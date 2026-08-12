@@ -1,0 +1,445 @@
+import type * as XLSXNS from 'xlsx';
+import { SPECIFIC_GRADE_LEVELS } from './gradeMapping';
+
+// ⚠️ 這裡刻意不在檔案最上層直接 `import * as XLSX from 'xlsx'`。
+// 'xlsx' 這個套件在 Node.js 環境（Next.js 產生靜態頁面/伺服器端渲染時）執行到它的模組載入程式碼
+// 會直接丟出 `ReferenceError: self is not defined`，這是瀏覽器專用套件常見的問題。
+// 只有在使用者實際按下「下載範本」按鈕時才需要用到這個套件，所以改成當下才動態 import，
+// 確保它只會在瀏覽器裡執行，不會在建置(build)或伺服器端渲染時被載入。
+let _xlsx: typeof XLSXNS | null = null;
+async function loadXLSX(): Promise<typeof XLSXNS> {
+  if (!_xlsx) _xlsx = await import('xlsx');
+  return _xlsx;
+}
+
+function aoa(XLSX: typeof XLSXNS, rows: any[][]): XLSXNS.WorkSheet {
+  return XLSX.utils.aoa_to_sheet(rows);
+}
+
+function download(XLSX: typeof XLSXNS, wb: XLSXNS.WorkBook, filename: string) {
+  XLSX.writeFile(wb, filename);
+}
+
+/* ------------------------------------------------------------------ */
+/* 1. 班級與導師設定                                                    */
+/* ------------------------------------------------------------------ */
+export const CLASSES_SHEET_NAME = '班級與導師設定';
+
+export async function buildClassesSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['序號', '部別(年級)', '班級名稱', '合併名稱', '泰文代碼', '男生', '女生', '合計', '級任老師'],
+    ['↓從第3列開始才是資料。年級請填具體年級（例如「1年」「初一」），級任老師打姓名即可，系統會自動建立', '', '', '', '', '', '', '', ''],
+    [
+      `⚠️ 年級欄位請務必從下面這份清單裡「照字打」，多一個字/少一個字（例如打成「初中一」）都會讓這個班級對不到部別、` +
+        `對不到排課系統的年級，也會讓「科目與比重設定」抓不到對應資料：${SPECIFIC_GRADE_LEVELS.join('、')}`,
+      '', '', '', '', '', '', '', '',
+    ],
+    [1, '1年', '忠班', '', '', 15, 13, 28, '王小明'],
+    [2, '1年', '孝班', '', '', 14, 14, 28, '李美華'],
+  ]);
+}
+
+export async function downloadClassesTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildClassesSheet(), CLASSES_SHEET_NAME);
+  download(XLSX, wb, '班級與導師設定_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. 科目與比重設定                                                    */
+/* ------------------------------------------------------------------ */
+export const CURRICULUM_SHEET_NAME = '科目與比重設定';
+
+export async function buildCurriculumSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  const header = ['學年度', '(保留)', '(保留)', '(保留)', '(保留)', '比重(0-1)', '節數', ...SPECIFIC_GRADE_LEVELS];
+  const blankGrades = () => SPECIFIC_GRADE_LEVELS.map(() => '');
+  const row1 = [2026, '', '', '', '', 0.2, 4, ...blankGrades()];
+  const row2 = [2026, '', '', '', '', 0.2, 4, ...blankGrades()];
+  // 示範：國語（1~6年）與數學（1~6年）兩科比重0.2、節數4節，其餘年級留空表示該年級沒有這科
+  const gradeIdx = (g: string) => 7 + SPECIFIC_GRADE_LEVELS.indexOf(g);
+  ['1年', '2年', '3年', '4年', '5年', '6年'].forEach((g) => {
+    row1[gradeIdx(g)] = '國語';
+    row2[gradeIdx(g)] = '數學';
+  });
+  return aoa(XLSX, [header, row1, row2]);
+}
+
+export async function downloadCurriculumTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildCurriculumSheet(), CURRICULUM_SHEET_NAME);
+  download(XLSX, wb, '科目與比重設定_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. 整體佔比與加扣分規則                                              */
+/* ------------------------------------------------------------------ */
+export const GRADING_RULES_SHEET_NAME = '整體佔比與加扣分規則';
+
+export async function buildGradingRulesSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['期中比重', '期末比重', '平時比重', '', '項目', '分數'],
+    ['', '', '', '', '曠課', -1],
+    [0.35, 0.35, 0.3, '', '遲到', -0.5],
+    ['', '', '', '', '病假', 0],
+    ['', '', '', '', '事假', 0],
+    ['', '', '', '', '公假', 0],
+  ]);
+}
+
+export async function downloadGradingRulesTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildGradingRulesSheet(), GRADING_RULES_SHEET_NAME);
+  download(XLSX, wb, '整體佔比與加扣分規則_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. 既有學生快速建檔（精簡版）                                         */
+/* ------------------------------------------------------------------ */
+export const STUDENTS_IMPORT_SHEET_NAME = '既有學生快速建檔（精簡版）';
+
+export async function buildStudentsImportSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['學年度', '學期', '年級', '班級', '學號', '姓名', '座號', '導師評語', '曠課', '遲到', '病假', '事假', '公假', '小功', '大功', '警告', '小過', '大過', '操行'],
+    ['↓從第3列開始才是資料。曠課~大過等彙總欄位僅供參考，不會匯入系統', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+    [2026, '上學期', '7年', '忠班', 'S10701', '王小明', 1, '', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ''],
+    [2026, '上學期', '7年', '忠班', 'S10702', '李小華', 2, '', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ''],
+  ]);
+}
+
+export async function downloadStudentsImportTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildStudentsImportSheet(), STUDENTS_IMPORT_SHEET_NAME);
+  download(XLSX, wb, '既有學生快速建檔_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. 任課教師設定（class_schedule，不含星期/節次，僅「這班這科由誰教」）    */
+/* ------------------------------------------------------------------ */
+export const TEACHER_ASSIGNMENTS_SHEET_NAME = '任課教師設定';
+
+export async function buildTeacherAssignmentsSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['學年度', '學期', '年級', '班級', '科目', '任課教師'],
+    ['↓從第3列開始才是資料。任課教師打姓名即可，系統會自動建立/比對既有教師。這裡只設定「誰教哪班哪科」，星期/節次請到「學校課表」頁設定', '', '', '', '', ''],
+    [2026, '上學期', '7年', '忠班', '國文', '陳老師'],
+    [2026, '上學期', '7年', '忠班', '數學', '林老師'],
+  ]);
+}
+
+export async function downloadTeacherAssignmentsTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildTeacherAssignmentsSheet(), TEACHER_ASSIGNMENTS_SHEET_NAME);
+  download(XLSX, wb, '任課教師設定_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 5b. 學校課表（class_schedule，含星期/節次，完整每週課表）              */
+/* ------------------------------------------------------------------ */
+export const SCHOOL_TIMETABLE_SHEET_NAME = '學校課表';
+
+export async function buildSchoolTimetableSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['學年度', '學期', '年級', '班級', '星期(一~六)', '節次', '科目', '任課教師'],
+    ['↓從第3列開始才是資料。星期請填「一」「二」...「六」，任課教師打姓名即可，系統會自動建立/比對既有教師', '', '', '', '', '', '', ''],
+    [2026, '上學期', '7年', '忠班', '一', 1, '國文', '陳老師'],
+    [2026, '上學期', '7年', '忠班', '一', 2, '數學', '林老師'],
+  ]);
+}
+
+export async function downloadSchoolTimetableTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildSchoolTimetableSheet(), SCHOOL_TIMETABLE_SHEET_NAME);
+  download(XLSX, wb, '學校課表_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 5c. 帳號名單（app_users，供批次邀請/匯出使用）                        */
+/* ------------------------------------------------------------------ */
+export const ACCOUNTS_SHEET_NAME = '帳號名單';
+
+export async function buildAccountsSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['姓名', '電子郵件', '角色', '初始密碼'],
+    [
+      '↓從第3列開始才是資料。角色請填：admin_a（系統管理員A）／admin_b（管理員B）／homeroom_teacher（班級導師）／subject_teacher（任課教師），實際能新增哪些角色要看您自己的身分權限。初始密碼：有填就直接建立帳號並設定這個密碼，不會寄任何信，對方可以馬上用這組密碼登入（建議之後自行更改）；不填則會改寄邀請信，請對方自行點連結設定密碼。若姓名跟既有教師資料一致，會自動連結（不會產生重複的老師資料）',
+      '',
+      '',
+      '',
+    ],
+    ['王小明', 'teacher1@example.com', 'homeroom_teacher', 'Aa123456'],
+    ['李美華', 'teacher2@example.com', 'subject_teacher', 'Bb123456'],
+  ]);
+}
+
+export async function downloadAccountsTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildAccountsSheet(), ACCOUNTS_SHEET_NAME);
+  download(XLSX, wb, '帳號名單_範本.xlsx');
+}
+
+// 「下載目前帳號名單」：改成跟批次上傳範本同樣的 4 欄格式（姓名/電子郵件/角色/初始密碼），
+// 密碼欄一律留空（原本的密碼本來就無法讀出，也不應該讓明碼到處流通）——這樣下載下來的檔案
+// 可以直接拿來對照、修改後再重新上傳（例如整批改角色），不用重新對照格式。
+// 沒有任何帳號時（全新系統剛建置），直接退回範本（含範例列），才不會下載出一份空白到看不出格式的檔案。
+export async function downloadAccountsList(users: { name: string; email: string | null; role: string }[]) {
+  const XLSX = await loadXLSX();
+  if (users.length === 0) {
+    await downloadAccountsTemplate();
+    return;
+  }
+  const rows = [
+    ['姓名', '電子郵件', '角色', '初始密碼'],
+    ...users.map((u) => [u.name, u.email ?? '（查無信箱）', u.role, '']),
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoa(XLSX, rows), ACCOUNTS_SHEET_NAME);
+  download(XLSX, wb, '目前帳號名單.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 5d. 節次設定（period_config，只支援「全校」「部別」兩種範圍，          */
+/*     「班級」範圍因為要對應內部的班級ID，Excel不好填，請個別到資料庫調整）*/
+/* ------------------------------------------------------------------ */
+export const PERIOD_CONFIG_SHEET_NAME = '節次設定';
+
+export async function buildPeriodConfigSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['範圍(全校/部別)', '部別(範圍=全校時留空)', '星期(一~六)', '堂數'],
+    [
+      '↓從第3列開始才是資料。「部別」範圍要填「幼兒園」「國小」「國中」「高中」其中一種。同星期同範圍重複上傳會直接覆蓋原本堂數。' +
+        '「班級」個別覆寫（少數班級跟部別不同堂數）目前無法用Excel設定，如有需要請告知系統開發人員協助處理。',
+      '',
+      '',
+      '',
+    ],
+    ['全校', '', '一', 8],
+    ['部別', '國中', '六', 5],
+  ]);
+}
+
+export async function downloadPeriodConfigTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildPeriodConfigSheet(), PERIOD_CONFIG_SHEET_NAME);
+  download(XLSX, wb, '節次設定_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. 成績、出缺輸入表（學生成績輸入 + 學生出缺席輸入 共用同一份格式）      */
+/* ------------------------------------------------------------------ */
+export const SCORE_ATTENDANCE_SHEET_NAME = '成績、出缺輸入表';
+
+const EXAM_BLOCK_START: Record<string, number> = { '期中考': 3, '期末考': 14, '平時分': 25 };
+const ATTENDANCE_WEEKDAY_START = 40; // 一~六，每個日期5欄(第1~5節)，共30欄
+const ATTENDANCE_WEEKDAYS = ['一', '二', '三', '四', '五', '六'];
+const DEMO_SUBJECTS = ['國文', '數學', '英文'];
+
+function makeRow(width: number, fill: (row: any[]) => void) {
+  const row = new Array(width).fill('');
+  fill(row);
+  return row;
+}
+
+export async function buildScoreAttendanceSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  const width = ATTENDANCE_WEEKDAY_START + ATTENDANCE_WEEKDAYS.length * 5;
+
+  // 第1列：學年度/學期(任一格含4位數字視為學年度、"上學期"/"下學期"字樣視為學期)，第3欄=年級
+  const row1 = makeRow(width, (r) => {
+    r[0] = '2026學年度';
+    r[1] = '上學期';
+    r[2] = '7年';
+  });
+  // 第2列：第3欄=班級名稱
+  const row2 = makeRow(width, (r) => {
+    r[2] = '忠班';
+  });
+  const row3 = makeRow(width, () => {});
+  const row4 = makeRow(width, () => {});
+  // 第5列：期中考/期末考/平時分 三個區塊標題 + 各星期的日期
+  const row5 = makeRow(width, (r) => {
+    Object.entries(EXAM_BLOCK_START).forEach(([name, start]) => {
+      r[start] = name;
+    });
+    ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
+      r[ATTENDANCE_WEEKDAY_START + i * 5] = new Date(2026, 6, 20 + i); // 示範日期
+    });
+  });
+  // 第6列：出缺勤節次標示（僅供閱讀方便，系統不解析此列）
+  const row6 = makeRow(width, (r) => {
+    ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
+      for (let p = 0; p < 5; p++) {
+        r[ATTENDANCE_WEEKDAY_START + i * 5 + p] = `第${p + 1}節`;
+      }
+    });
+  });
+  // 第7列：各分數區塊的科目名稱
+  const row7 = makeRow(width, (r) => {
+    Object.values(EXAM_BLOCK_START).forEach((start) => {
+      DEMO_SUBJECTS.forEach((subj, i) => {
+        r[start + i] = subj;
+      });
+    });
+  });
+  // 第8列起：學生資料（座號/學號/姓名 + 分數/出缺勤代碼留空給老師填寫）
+  const studentRow = (seatNo: number, studentNo: string, name: string) =>
+    makeRow(width, (r) => {
+      r[0] = seatNo;
+      r[1] = studentNo;
+      r[2] = name;
+    });
+
+  return aoa(XLSX, [
+    row1,
+    row2,
+    row3,
+    row4,
+    row5,
+    row6,
+    row7,
+    studentRow(1, 'S10701', '王小明'),
+    studentRow(2, 'S10702', '李小華'),
+  ]);
+}
+
+export async function buildScoreAttendanceLegendSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['出缺勤代碼說明（填在對應節次的儲存格）'],
+    ['代碼', '意義'],
+    [10, '曠課'],
+    [1, '遲到'],
+    [2, '病假'],
+    [3, '事假'],
+    [4, '公假'],
+    ['(空白)', '出席（不用填）'],
+    [],
+    ['分數區塊填法'],
+    ['期中考/期末考/平時分 三個區塊，各科目分數請填在對應科目欄位下方，0-100分'],
+  ]);
+}
+
+export async function downloadScoreAttendanceTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildScoreAttendanceSheet(), SCORE_ATTENDANCE_SHEET_NAME);
+  XLSX.utils.book_append_sheet(wb, await buildScoreAttendanceLegendSheet(), '代碼說明');
+  download(XLSX, wb, '成績出缺輸入表_範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. 全部上傳(下載)：整批設定用的合併範本                               */
+/*    （不含成績/出缺，因為那是每班每學期持續登錄的資料，非一次性建置；    */
+/*     班級/科目節數/任課教師/節次已改由排課系統匯出Excel自動匯入）        */
+/* ------------------------------------------------------------------ */
+export async function downloadAllSetupTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildGradingRulesSheet(), GRADING_RULES_SHEET_NAME);
+  XLSX.utils.book_append_sheet(wb, await buildStudentsImportSheet(), STUDENTS_IMPORT_SHEET_NAME);
+  download(XLSX, wb, '新學期開學設定_整批範本.xlsx');
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. 開發人員區「一鍵上傳/下載」：系統內所有Excel表格，合併成一份檔案，   */
+/*    專門給第一次建檔（全新學校／全新學年，資料庫幾乎是空的）時使用，     */
+/*    不用每個功能頁分開下載/上傳一次。                                  */
+/*                                                                      */
+/*    ⚠️「班級與導師設定」「任課教師設定」「學校課表」「科目與比重設定」   */
+/*    （節數部分）這4張，平常請優先用【排課系統（自動排課工具）】排課後    */
+/*    匯出Excel自動匯入，這裡保留只是給「還沒用過排課系統、資料庫整個是   */
+/*    空的」全新學校第一次建檔用；已經有資料後如果同時用這裡跟排課系統匯入，*/
+/*    以「最後上傳的那次」為準，請避免兩邊都上傳造成互相覆蓋。            */
+/* ------------------------------------------------------------------ */
+async function buildDeveloperReadmeSheet(): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  return aoa(XLSX, [
+    ['開發人員區：系統內所有Excel表格 說明（請先看這張再開始填）'],
+    [''],
+    ['這份檔案把系統裡所有可以用Excel整批建立資料的表格，合併成一份檔案，方便全新學校/全新學年「第一次建檔」時一次填完、一次上傳。'],
+    ['每張工作表的格式跟各功能頁「下載範本」下載到的一模一樣，只是這裡集中放在同一份檔案裡。'],
+    [''],
+    ['工作表', '對應功能頁', '建議使用時機'],
+    ['帳號名單', '帳號管理', '建立教職員登入帳號'],
+    ['班級與導師設定', '（已停用，見下方說明）', '全新學校第一次建檔用；平常請用排課系統排課後按「存檔到校務系統」自動建立'],
+    ['科目與比重設定', '成績相關設定及查詢', '節數部分全新學校第一次建檔用（平常由排課系統帶入）；比重請務必手動填寫，排課系統不會有這項資料'],
+    ['任課教師設定', '（已停用，見下方說明）', '全新學校第一次建檔用；平常請用排課系統排課後按「存檔到校務系統」自動建立'],
+    ['學校課表', '學校課表', '全新學校第一次建檔用；平常請用排課系統排課後按「存檔到校務系統」自動匯入'],
+    ['節次設定', '（目前無獨立頁面，資料庫直接設定）', '設定每週各星期預設堂數，沒設定過的學校請至少填一次「全校」列'],
+    ['整體佔比與加扣分規則', '成績相關設定及查詢', '每學期開學前設定期中/期末/平時比重與加扣分項目'],
+    ['既有學生快速建檔（精簡版）', '學籍設定及查詢', '全新學校快速把既有學生名冊匯入'],
+    [''],
+    ['上傳時系統會詢問「這批資料主要適用哪個學年度/學期」，全部工作表共用同一組回答（成績、出缺輸入表除外，那張本來就要在各自的頁面單獨處理，不在這份檔案裡）。'],
+    ['上傳前系統會列出「這份檔案裡有、但看起來已經有資料在用排課系統管理」的工作表並提醒一次，請看清楚提醒後再決定要不要繼續。'],
+  ]);
+}
+
+export const DEVELOPER_ALL_SHEETS = [
+  ACCOUNTS_SHEET_NAME,
+  CLASSES_SHEET_NAME,
+  CURRICULUM_SHEET_NAME,
+  TEACHER_ASSIGNMENTS_SHEET_NAME,
+  SCHOOL_TIMETABLE_SHEET_NAME,
+  PERIOD_CONFIG_SHEET_NAME,
+  GRADING_RULES_SHEET_NAME,
+  STUDENTS_IMPORT_SHEET_NAME,
+] as const;
+
+// 跟排課系統「存檔到校務系統」功能重疊的表，上傳前要特別提醒一次：
+// 前4張是「一鍵上傳」自己的可上傳範本；後2張是排課工具匯出Excel的「全校總課表(輸入)」／
+// 「課表模板(修改用)」，內容相同、現在也接到同一套 importScheduleExcel() 寫回邏輯，
+// 一樣會動到 classes/curriculum/class_schedule，所以一起列進重疊提醒。
+export const DEVELOPER_SCHEDULER_OVERLAP_SHEETS = [
+  CLASSES_SHEET_NAME,
+  CURRICULUM_SHEET_NAME,
+  TEACHER_ASSIGNMENTS_SHEET_NAME,
+  SCHOOL_TIMETABLE_SHEET_NAME,
+  '全校總課表(輸入)',
+  '課表模板(修改用)',
+  // 「下載完整資料快照」下載回來的「(現況)」工作表現在也可以直接重新上傳（見 BulkExcelPanel 的
+  // plan.currentName），所以這4張的「(現況)」版本也要一起列進重疊提醒，不然直接把快照檔案
+  // 整份重新上傳時，不會被提醒「可能蓋掉排課系統寫入的資料」。
+  '班級與導師設定(現況)',
+  '科目與比重設定(現況)',
+  '任課教師設定(現況)',
+  '學校課表(現況)',
+] as const;
+
+export type NamedSheet = { name: string; ws: XLSXNS.WorkSheet };
+
+export async function buildDeveloperSetupSheets(): Promise<NamedSheet[]> {
+  return [
+    { name: '說明（請先看這裡）', ws: await buildDeveloperReadmeSheet() },
+    { name: ACCOUNTS_SHEET_NAME, ws: await buildAccountsSheet() },
+    { name: CLASSES_SHEET_NAME, ws: await buildClassesSheet() },
+    { name: CURRICULUM_SHEET_NAME, ws: await buildCurriculumSheet() },
+    { name: TEACHER_ASSIGNMENTS_SHEET_NAME, ws: await buildTeacherAssignmentsSheet() },
+    { name: SCHOOL_TIMETABLE_SHEET_NAME, ws: await buildSchoolTimetableSheet() },
+    { name: PERIOD_CONFIG_SHEET_NAME, ws: await buildPeriodConfigSheet() },
+    { name: GRADING_RULES_SHEET_NAME, ws: await buildGradingRulesSheet() },
+    { name: STUDENTS_IMPORT_SHEET_NAME, ws: await buildStudentsImportSheet() },
+  ];
+}
+
+export async function downloadDeveloperAllTemplate() {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  const sheets = await buildDeveloperSetupSheets();
+  sheets.forEach(({ name, ws }) => XLSX.utils.book_append_sheet(wb, ws, name));
+  download(XLSX, wb, '開發人員區_全部表格_範本.xlsx');
+}
