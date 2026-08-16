@@ -46,6 +46,13 @@ function scopeLabel(row: WindowRow, classMap: Record<string, ClassOption>) {
   return cls ? `${cls.academic_year}學年度 ${cls.grade_level}${cls.class_name}` : '(找不到班級，可能已被刪除)';
 }
 
+// 「有效鎖定」＝手動勾了 is_locked，或是開放結束時間(closes_at)已經過了——
+// 跟資料庫的 submission_window_locked() 函式邏輯一致，只是這裡先不用管班級/部別/全校
+// 的層層 fallback（這個表格本身每一列就是各自獨立的設定，不需要再往上找）。
+function effectivelyLocked(row: WindowRow): boolean {
+  return row.is_locked || (!!row.closes_at && new Date(row.closes_at) < new Date());
+}
+
 function toLocalInputValue(iso: string | null) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -140,10 +147,22 @@ export default function ScoreSubmissionWindowsPage() {
   }
 
   async function handleToggleLock(row: WindowRow) {
-    const { error } = await supabase.from('submission_windows').update({ is_locked: !row.is_locked }).eq('id', row.id);
-    if (error) {
-      alert('更新失敗：' + error.message);
-      return;
+    if (row.is_locked) {
+      // 從「已鎖定」改回「未鎖定」＝重新打開讓人修正，請填一段原因，會連同操作者一起存進
+      // 稽核紀錄（僅系統管理員S、管理員A看得到，見下方「解鎖／修正紀錄」）。
+      const reason = window.prompt('這筆原本已鎖定，重新打開會留下紀錄（僅系統管理員S、管理員A看得到）。請簡短說明原因：');
+      if (reason === null) return; // 按取消，不繼續
+      const { error } = await supabase.rpc('reopen_submission_window', { p_id: row.id, p_reason: reason || null });
+      if (error) {
+        alert('更新失敗：' + error.message);
+        return;
+      }
+    } else {
+      const { error } = await supabase.from('submission_windows').update({ is_locked: true }).eq('id', row.id);
+      if (error) {
+        alert('更新失敗：' + error.message);
+        return;
+      }
     }
     load();
   }
@@ -267,8 +286,8 @@ export default function ScoreSubmissionWindowsPage() {
                   <td style={tdStyle}>{r.scope}／{scopeLabel(r, classMap)}</td>
                   <td style={tdStyle}>{r.opens_at ? toLocalInputValue(r.opens_at).replace('T', ' ') : ''}</td>
                   <td style={tdStyle}>{r.closes_at ? toLocalInputValue(r.closes_at).replace('T', ' ') : ''}</td>
-                  <td style={{ ...tdStyle, color: r.is_locked ? '#2C6E9E' : '#999', fontWeight: r.is_locked ? 700 : 400 }}>
-                    {r.is_locked ? '已鎖定' : '未鎖定'}
+                  <td style={{ ...tdStyle, color: effectivelyLocked(r) ? '#2C6E9E' : '#999', fontWeight: effectivelyLocked(r) ? 700 : 400 }}>
+                    {r.is_locked ? '已鎖定' : r.closes_at && new Date(r.closes_at) < new Date() ? '已鎖定（時間已到，自動）' : '未鎖定'}
                   </td>
                   <td style={tdStyle}>
                     <button type="button" disabled={!rowManageable} onClick={() => handleToggleLock(r)} style={{ fontSize: 12, marginRight: 8, cursor: rowManageable ? 'pointer' : 'not-allowed' }}>

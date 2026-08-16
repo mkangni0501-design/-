@@ -7,17 +7,19 @@ import { isDepartmentLead } from '@/lib/departments';
 import CurriculumSettingsTab from '@/components/admin-tabs/CurriculumSettingsTab';
 import GradingRulesTab from '@/components/admin-tabs/GradingRulesTab';
 import ScoresEntryTab from '@/components/admin-tabs/ScoresEntryTab';
+import ConductScoresTab from '@/components/admin-tabs/ConductScoresTab';
 import ClassSummaryTab from '@/components/admin-tabs/ClassSummaryTab';
 import ClassResultsTab from '@/components/admin-tabs/ClassResultsTab';
 import SchoolRankingsTab from '@/components/admin-tabs/SchoolRankingsTab';
 import HistoryTab from '@/components/admin-tabs/HistoryTab';
 import BatchReportCardTab from '@/components/admin-tabs/BatchReportCardTab';
 
-type TabKey = 'settings' | 'entry' | 'class-summary' | 'class-results' | 'school-rankings' | 'history' | 'batch-print';
+type TabKey = 'settings' | 'entry' | 'conduct' | 'class-summary' | 'class-results' | 'school-rankings' | 'history' | 'batch-print';
 
 const TABS: { key: TabKey; label: string; adminOnly: boolean }[] = [
   { key: 'settings', label: '成績相關設定', adminOnly: true },
   { key: 'entry', label: '學生成績登錄', adminOnly: false },
+  { key: 'conduct', label: '操行成績評分', adminOnly: false },
   { key: 'class-summary', label: '班級成績總表', adminOnly: false },
   { key: 'class-results', label: '班級成績結果與排名', adminOnly: false },
   { key: 'school-rankings', label: '全校排行榜', adminOnly: false },
@@ -96,6 +98,7 @@ function GradingHubPageInner() {
         </div>
       )}
       {tab === 'entry' && <ScoresEntryTab />}
+      {tab === 'conduct' && <ConductScoresTab />}
       {tab === 'class-summary' && <ClassSummaryTab />}
       {tab === 'class-results' && <ClassResultsTab />}
       {tab === 'school-rankings' && <SchoolRankingsTab />}

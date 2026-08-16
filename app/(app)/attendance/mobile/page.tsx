@@ -317,14 +317,21 @@ export default function MobileAttendancePage() {
       (existing ?? []).forEach((e: any) => (map[e.student_no] = e.status));
       setStatusMap(map);
 
-      const { data: windowRow } = await supabase
-        .from('submission_windows')
-        .select('is_locked')
-        .eq('data_type', '出缺勤')
-        .eq('scope_ref', targetClassId)
-        .maybeSingle();
+      // 是否已鎖定：改成呼叫 submission_window_locked()，跟其他頁面一致
+      // （班級 > 部別 > 全校 三層 fallback，且「手動鎖定」或「開放結束時間已過」任一成立即算鎖定）。
+      const currentTermInfo = await resolveCurrentTerm();
       const ownsThisAsHomeroom = isHomeroom && targetClassId === homeroomClassId;
-      setLocked(!!windowRow?.is_locked && !ownsThisAsHomeroom && !isAdmin);
+      if (currentTermInfo) {
+        const { data: isLocked } = await supabase.rpc('submission_window_locked', {
+          p_class_id: targetClassId,
+          p_academic_year: currentTermInfo.academic_year,
+          p_term: currentTermInfo.term,
+          p_data_type: '出缺勤',
+        });
+        setLocked(!!isLocked && !ownsThisAsHomeroom && !isAdmin);
+      } else {
+        setLocked(false);
+      }
     })();
   }, [selectedEntry?.classId, selectedEntry?.period_no, date, isHomeroom, homeroomClassId, isAdmin]);
 

@@ -265,14 +265,21 @@ export default function WeeklyAttendancePage() {
         setAttMap({});
       }
 
-      const { data: windowRow } = await supabase
-        .from('submission_windows')
-        .select('is_locked')
-        .eq('data_type', '出缺勤')
-        .eq('scope', '班級')
-        .eq('scope_ref', classId)
-        .maybeSingle();
-      setLocked(!!windowRow?.is_locked);
+      // 是否已鎖定：改成呼叫 submission_window_locked()，跟排名頁面/成績登錄頁一致
+      // （班級 > 部別 > 全校 三層 fallback，且「手動鎖定」或「開放結束時間已過」任一成立即算鎖定）。
+      // 原本這裡只查「這個班自己有沒有設班級層級的 is_locked」，沒有 fallback、也不看時間。
+      const currentTermInfo = await resolveCurrentTerm();
+      if (currentTermInfo) {
+        const { data: isLocked } = await supabase.rpc('submission_window_locked', {
+          p_class_id: classId,
+          p_academic_year: currentTermInfo.academic_year,
+          p_term: currentTermInfo.term,
+          p_data_type: '出缺勤',
+        });
+        setLocked(!!isLocked);
+      } else {
+        setLocked(false);
+      }
 
       setLoading(false);
     })();
