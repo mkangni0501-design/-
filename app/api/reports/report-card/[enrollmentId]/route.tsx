@@ -28,7 +28,11 @@ export async function GET(req: NextRequest, { params }: { params: { enrollmentId
 
   // ---- 2. 組資料（跟批次列印共用同一份邏輯，規則異動只要改 lib/reportCard.ts 一處） ----
   const result = await getReportCardResult(enrollmentId);
-  if (!result.ready) {
+  // 用 'reason' in result 判斷、不要用 !result.ready：這個專案 tsconfig 的 strict:false
+  // 會讓 TypeScript 對「用 boolean 欄位(ready)做判別」的 union type 沒辦法正確窄化型別
+  // （這是 TS 在 strictNullChecks 關閉時的已知限制，不是這裡邏輯有錯），
+  // 用屬性是否存在來判斷則不受影響，兩種寫法在執行期的行為是一樣的。
+  if ('reason' in result) {
     return NextResponse.json(
       { error: '尚未能產出正式成績單', reason: result.reason },
       { status: 409 }

@@ -58,7 +58,9 @@ export async function POST(req: NextRequest) {
 
   for (const en of enrollments) {
     const result = await getReportCardResult(en.id);
-    if (!result.ready) {
+    // 用 'reason' in result 判斷、不要用 !result.ready：見上方 [enrollmentId]/route.tsx 的說明
+    // （這個專案 tsconfig 的 strict:false 會讓 boolean 欄位當判別式的窄化失效）。
+    if ('reason' in result) {
       notReady.push({ studentNo: result.studentNo, studentName: result.studentName, reason: result.reason });
     } else {
       readyList.push({ enrollmentId: en.id, studentNo: result.studentNo, studentName: result.studentName });
@@ -85,7 +87,7 @@ export async function POST(req: NextRequest) {
 
   for (const item of readyList) {
     const result = await getReportCardResult(item.enrollmentId);
-    if (!result.ready) continue; // 理論上不會發生，防呆用
+    if ('reason' in result) continue; // 理論上不會發生，防呆用
     const pdfBuffer = await renderToBuffer(<ReportCardDocument data={result.data} />);
     const singlePdf = await PDFDocument.load(pdfBuffer);
     const copiedPages = await mergedPdf.copyPages(singlePdf, singlePdf.getPageIndices());
