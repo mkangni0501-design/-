@@ -24,7 +24,8 @@ type ClassLabel = { id: string; label: string };
 
 // 全校排行榜：各班前三名、各年級前三名。
 // 資料來源是 class_rankings / grade_rankings 這兩個資料庫view（已經套用加扣分規則計算好加權總分），
-// 只有該班「平時分」已鎖定的班級才會出現在排名裡（跟班級成績總表的鎖定規則一致）。
+// 只有該班「期中考／期末考／平時分」三項都已鎖定，才會出現在這裡的總分排名裡
+// （總分本身就是三項加權後的結果，任何一項還沒鎖定，加權總分就還不完整，不能拿來排名）。
 export default function SchoolRankingsPage() {
   const [academicYear, setAcademicYear] = useState(new Date().getFullYear());
   const [term, setTerm] = useState('上學期');
@@ -97,7 +98,7 @@ export default function SchoolRankingsPage() {
     <div style={{ maxWidth: 800, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 16, marginBottom: 4 }}>全校排行榜</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-        只有該班「平時分」已鎖定的班級才會出現在這裡（鎖定後排名才會計算並開放顯示，跟「班級成績總表」的規則一致）。
+        只有該班「期中考／期末考／平時分」三項都已鎖定，才會出現在這裡（總分排名需要三項都鎖定才完整、才開放顯示）。
       </p>
       <ErrorBanner message={loadError} />
 

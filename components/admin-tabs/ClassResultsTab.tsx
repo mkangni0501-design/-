@@ -70,11 +70,24 @@ export default function ClassResultsPage() {
         const opt = classOptions.find((c) => c.id === classId);
         if (opt) setClassName(opt.label);
       }
-      // class_rankings 這個 view 已經算好加權總分與排名（含目前啟用中的加扣分規則）
-      const { data, error } = await supabase
-        .from('class_rankings')
-        .select('enrollment_id, seat_no, name, total_score, class_rank')
+      // 先查這個班目前的學期（同一個 class_id 可能同時存在上學期／下學期兩批獨立
+      // 學籍列，一定要知道是哪個學期才能正確篩選、排名，理由同
+      // sql/44fix_report_card_and_ranking_performance.sql 裡的說明）。
+      const { data: enrollRows } = await supabase
+        .from('enrollments')
+        .select('term')
         .eq('class_id', classId)
+        .eq('is_current', true)
+        .limit(1);
+      const currentTerm = (enrollRows ?? [])[0]?.term as string | undefined;
+
+      // 改呼叫 class_rankings_for_class()（sql/44fix_report_card_and_ranking_performance.sql），
+      // 一開始 join 就用 class_id 篩過，不會再因為全校資料量變大而逾時
+      // （canceling statement due to statement timeout）——原本直接查 class_rankings
+      // 這個 view 要等全校所有學生的排名都算完才篩選，這個班的查詢速度會被全校資料
+      // 拖慢；改成呼叫這支函式後，這個班有多少學生就只算多少學生。
+      const { data, error } = await supabase
+        .rpc('class_rankings_for_class', { p_class_id: classId, p_term: currentTerm })
         .order('class_rank');
 
       setLoadError(
@@ -92,7 +105,10 @@ export default function ClassResultsPage() {
     <div style={{ maxWidth: 480, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 16, marginBottom: 4 }}>{className || '班級'} 成績結果</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-        總分＝期中35%＋期末35%＋平時30%（依各科比重加權），已套用目前啟用中的加扣分規則。若該班「平時分」尚未鎖定，這裡會是空的。
+        總分＝期中35%＋期末35%＋平時30%（依各科比重加權），已套用目前啟用中的加扣分規則。
+        該班「期中考」「期末考」「平時分」三項都鎖定後，這裡的總分／班排名才會出現；
+        任何一項還沒鎖定，這裡會是空的（但「班級成績總表」頁面上，期中/期末/平時各自的
+        小計與排名，只要該項自己鎖定就會各自顯示，不用等其他兩項）。
       </p>
 
       {isAdmin && (
@@ -135,7 +151,7 @@ export default function ClassResultsPage() {
             {rows.length === 0 && (
               <tr>
                 <td colSpan={4} style={{ padding: 12, textAlign: 'center', color: '#999' }}>
-                  目前沒有資料（可能該班平時分尚未鎖定）
+                  目前沒有資料（可能該班「期中考／期末考／平時分」還沒三項都鎖定）
                 </td>
               </tr>
             )}

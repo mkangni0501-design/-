@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { SPECIFIC_GRADE_LEVELS } from '@/lib/gradeMapping';
 import ErrorBanner from '@/components/ErrorBanner';
@@ -23,6 +23,24 @@ export default function CurriculumAdminPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchWeight, setBatchWeight] = useState('');
+  // 「各科目百分比批次修改」：原本只能勾選多筆、套用同一個比重數字。
+  // 這裡改成可以直接在表格內每一列各自輸入不同的新比重，最後一次按「儲存所有修改」統一送出，
+  // 不用像原本那樣被迫把選取的幾科都改成同一個數字。
+  const [editedWeights, setEditedWeights] = useState<Record<string, string>>({});
+  // 修正比重時可以直接按 ENTER 換下一個科目的輸入框，不用每次都用滑鼠點下一格。
+  const weightInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  function focusNextWeightInput(currentId: string) {
+    const idx = rows.findIndex((r) => r.id === currentId);
+    for (let i = idx + 1; i < rows.length; i++) {
+      const el = weightInputRefs.current[rows[i].id];
+      if (el) {
+        el.focus();
+        el.select();
+        return;
+      }
+    }
+  }
+  const [savingAll, setSavingAll] = useState(false);
 
   function toggleSelect(id: string) {
     setSelected((prev) => {
@@ -64,6 +82,41 @@ export default function CurriculumAdminPage() {
       alert(`已送出 ${selected.size} 筆刪除申請，等教務主管核准後才會真正刪除。`);
     }
     setSelected(new Set());
+    load();
+  }
+
+  async function handleSaveAllWeights() {
+    const changed = Object.entries(editedWeights).filter(([id, val]) => {
+      const row = rows.find((r) => r.id === id);
+      return row && val !== '' && Number(val) !== Number(row.weight);
+    });
+    if (changed.length === 0 || !perms.userId) return;
+    setSavingAll(true);
+    if (canWriteDirect) {
+      const results = await Promise.all(
+        changed.map(([id, val]) => supabase.from('curriculum').update({ weight: Number(val) }).eq('id', id))
+      );
+      const firstError = results.find((r) => r.error)?.error;
+      setSavingAll(false);
+      if (firstError) {
+        alert('儲存失敗：' + firstError.message);
+        return;
+      }
+    } else {
+      for (const [id, val] of changed) {
+        const row = rows.find((r) => r.id === id);
+        await writeGoverned('curriculum', 'update', { weight: Number(val) }, {
+          myDepartments: perms.myDepartments,
+          isSystemAdmin: perms.isSystemAdmin,
+          requestedBy: perms.userId,
+          recordKey: id,
+          beforeSnapshot: row ?? null,
+        });
+      }
+      setSavingAll(false);
+      alert(`已送出 ${changed.length} 筆改比重申請，等教務主管核准後才會生效。`);
+    }
+    setEditedWeights({});
     load();
   }
 
@@ -304,6 +357,22 @@ export default function CurriculumAdminPage() {
         </div>
       )}
 
+      {Object.keys(editedWeights).length > 0 && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, padding: 8, background: '#EAF2E8', borderRadius: 6 }}>
+          <span style={{ fontSize: 12, color: '#3B6D11' }}>已修改 {Object.keys(editedWeights).length} 科的比重，尚未儲存</span>
+          <button
+            onClick={handleSaveAllWeights}
+            disabled={savingAll}
+            style={{ fontSize: 12, padding: '4px 12px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 4 }}
+          >
+            {savingAll ? '儲存中…' : canWriteDirect ? '儲存所有修改' : '送出所有修改申請'}
+          </button>
+          <button onClick={() => setEditedWeights({})} style={{ fontSize: 12, padding: '4px 10px' }}>
+            還原修改
+          </button>
+        </div>
+      )}
+
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <thead>
           <tr>
@@ -313,7 +382,7 @@ export default function CurriculumAdminPage() {
             <th style={{ textAlign: 'left', padding: 6 }}>學年/學期</th>
             <th style={{ textAlign: 'left', padding: 6 }}>年級</th>
             <th style={{ textAlign: 'left', padding: 6 }}>科目</th>
-            <th style={{ textAlign: 'right', padding: 6 }}>比重</th>
+            <th style={{ textAlign: 'right', padding: 6 }}>比重（可直接改，改完按上方「儲存所有修改」一次存檔）</th>
             <th style={{ textAlign: 'right', padding: 6 }}>節數</th>
             <th></th>
           </tr>
@@ -322,6 +391,7 @@ export default function CurriculumAdminPage() {
           {rows.map((r) => {
             const key = `${r.academic_year}-${r.term}-${r.grade_level}`;
             const sum = weightSumByGrade[key];
+            const editedVal = editedWeights[r.id];
             return (
               <tr key={r.id} style={{ borderTop: '1px solid #eee' }}>
                 <td style={{ padding: 6 }}>
@@ -331,7 +401,29 @@ export default function CurriculumAdminPage() {
                 <td style={{ padding: 6 }}>{r.grade_level}</td>
                 <td style={{ padding: 6 }}>{r.subject}</td>
                 <td style={{ padding: 6, textAlign: 'right' }}>
-                  {r.weight}
+                  <input
+                    type="number"
+                    step="0.01"
+                    ref={(el) => {
+                      weightInputRefs.current[r.id] = el;
+                    }}
+                    value={editedVal ?? r.weight}
+                    onChange={(e) => setEditedWeights((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        focusNextWeightInput(r.id);
+                      }
+                    }}
+                    style={{
+                      width: 80,
+                      padding: 4,
+                      textAlign: 'right',
+                      background: editedVal !== undefined && Number(editedVal) !== Number(r.weight) ? '#FFF8E1' : '#fff',
+                      border: '1px solid #ccc',
+                      borderRadius: 4,
+                    }}
+                  />
                   {Math.abs(sum - 1) > 0.001 && <span style={{ color: '#A32D2D', marginLeft: 4 }}>⚠ 該年級加總={sum.toFixed(2)}</span>}
                 </td>
                 <td style={{ padding: 6, textAlign: 'right' }}>{r.periods ?? '—'}</td>
