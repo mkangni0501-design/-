@@ -31,6 +31,7 @@ export const MODULE_SUB_ITEMS: Record<string, ModuleSubItemsConfig> = {
     items: [
       { key: 'settings', label: '成績相關設定（科目比重／加扣分規則）' },
       { key: 'entry', label: '學生成績登錄' },
+      { key: 'conduct', label: '操行成績評分（禮貌／衣著／服務／紀律）' },
       { key: 'class-summary', label: '班級成績總表' },
       { key: 'class-results', label: '班級成績結果與排名' },
       { key: 'school-rankings', label: '全校排行榜' },

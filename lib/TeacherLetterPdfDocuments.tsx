@@ -1,16 +1,10 @@
-import { Document, Page, Text, View, StyleSheet, Font } from '@react-pdf/renderer';
+import { Document, Page, Text, View, StyleSheet } from '@react-pdf/renderer';
 import { CertificateContent, AppointmentContent } from './teacherLetterContent';
+import { registerNotoSansTC } from './pdfFonts';
 
-// 【2026-08-10 新增】react-pdf 預設字型不含中文字，之前 lib/ReportCardDocument.tsx 也提醒過這件事
-// 但一直沒有真的補上字型檔——這裡的內容幾乎全是中文，沒有字型會整份印出來是空白/方框。
-// 已經把 Noto Sans TC（繁體中文）的字型檔放進 public/fonts/，這裡註冊起來給所有聘書/證明PDF共用。
-Font.register({
-  family: 'NotoSansTC',
-  fonts: [
-    { src: '/fonts/NotoSansTC-Regular.woff2', fontWeight: 400 },
-    { src: '/fonts/NotoSansTC-Bold.woff2', fontWeight: 700 },
-  ],
-});
+// 中文字型註冊：見 lib/pdfFonts.ts 的完整說明——原本這裡的寫法（網址路徑 + woff2）
+// 在伺服器端沒辦法正確讀到字型檔，聘書/證明信印出來中文部分會是亂碼，已經修正。
+registerNotoSansTC();
 
 const styles = StyleSheet.create({
   page: { padding: 48, fontSize: 12, fontFamily: 'NotoSansTC', lineHeight: 1.6 },

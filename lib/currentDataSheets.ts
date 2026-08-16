@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient';
 import { SPECIFIC_GRADE_LEVELS } from './gradeMapping';
 import type { SheetRows } from './schoolWideDataQueries';
+import { fetchAllPaged } from './schoolWideDataQueries';
 
 // ============================================================
 // 問題根源（管理員S反映「一鍵下載的資料有大量缺失」）：
@@ -33,8 +34,11 @@ import type { SheetRows } from './schoolWideDataQueries';
  * 不會讓整張表變成「讀取失敗」。
  */
 export async function fetchCurrentAccountsSheet(accessToken?: string): Promise<SheetRows> {
-  const { data, error } = await supabase.from('app_users').select('id, name, role').order('name');
-  if (error || !data) return { name: '帳號名單(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  // 【2026-08 修正】原本沒有分頁，帳號超過1000筆時會被靜默截斷（見本檔開頭/schoolWideDataQueries.ts的說明）。
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase.from('app_users').select('id, name, role').order('name').range(from, to)
+  );
+  if (error) return { name: '帳號名單(現況)', aoa: [['讀取失敗：' + error.message]] };
 
   let emails: Record<string, string | null> = {};
   if (accessToken && data.length > 0) {
@@ -101,14 +105,18 @@ export async function fetchCurrentTeacherAssignmentsSheet(academicYear: number, 
 /** 學校課表（目前現況）：class_schedule 每一節逐列列出 */
 export async function fetchCurrentSchoolTimetableSheet(academicYear: number, term: string): Promise<SheetRows> {
   const WEEKDAY_LABEL = ['', '一', '二', '三', '四', '五', '六'];
-  const { data, error } = await supabase
-    .from('class_schedule')
-    .select('weekday, period_no, subject, classes(grade_level, class_name), teachers(name)')
-    .eq('academic_year', academicYear)
-    .eq('term', term)
-    .order('weekday')
-    .order('period_no');
-  if (error || !data) return { name: '學校課表(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  // 【2026-08 修正】原本沒有分頁：班級數×每週節數×科目，中大型學校很容易超過1000列被截斷。
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase
+      .from('class_schedule')
+      .select('weekday, period_no, subject, classes(grade_level, class_name), teachers(name)')
+      .eq('academic_year', academicYear)
+      .eq('term', term)
+      .order('weekday')
+      .order('period_no')
+      .range(from, to)
+  );
+  if (error) return { name: '學校課表(現況)', aoa: [['讀取失敗：' + error.message]] };
   const rows = (data as any[]).map((r) => [
     academicYear,
     term,
@@ -158,12 +166,17 @@ export async function fetchCurrentGradingRulesSheet(academicYear: number, term: 
 
 /** 既有學生快速建檔格式的「目前現況」：只列基本學籍資料（曠課~操行等彙總欄位本來上傳就不會用到，這裡留空） */
 export async function fetchCurrentStudentsSheet(academicYear: number, term: string): Promise<SheetRows> {
-  const { data, error } = await supabase
-    .from('enrollments')
-    .select('seat_no, students(student_no, name), classes(academic_year, grade_level, class_name)')
-    .eq('term', term)
-    .eq('is_current', true);
-  if (error || !data) return { name: '既有學生快速建檔(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  // 【2026-08 修正】原本沒有分頁——這是「學生超過一千人只抓到一千筆」這個問題的直接根因，
+  // 因為這支函式抓的就是全校在學學生名冊。
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase
+      .from('enrollments')
+      .select('seat_no, students(student_no, name), classes(academic_year, grade_level, class_name)')
+      .eq('term', term)
+      .eq('is_current', true)
+      .range(from, to)
+  );
+  if (error) return { name: '既有學生快速建檔(現況)', aoa: [['讀取失敗：' + error.message]] };
   const rows = (data as any[])
     .filter((r) => r.classes?.academic_year === academicYear)
     .map((r) => [
@@ -199,8 +212,15 @@ export async function fetchCurrentStudentsSheet(academicYear: number, term: stri
 /** 科目與比重設定（目前現況）：curriculum 是「每列一個學年度+比重+節數」，
  *  同一列可以有多個年級/科目共用同一組比重節數（用格子對應年級與科目名稱）。
  *  這裡把資料庫裡正規化的 (academic_year, grade_level, subject, weight, periods)
- *  依「比重+節數」分組還原成範本那種寬表格式；同一組比重節數裡同一年級出現兩個以上
- *  科目時，會另外多開一列避免互相蓋掉。 */
+ *  依「年級+比重+節數」分組還原成範本那種寬表格式；同一組比重節數裡同一年級出現
+ *  兩個以上科目時，會另外多開一列避免互相蓋掉。
+ *
+ *  注意：分組 key 特意包含 grade_level，不同年級即使剛好比重、節數數字相同，也絕對
+ *  不會被合併到同一列——即使同一列在格式上「能」同時涵蓋好幾個年級（H欄開始每個
+ *  年級各一格），下載出來的「目前現況」檔案還是固定一列只對應一個年級，這樣以後
+ *  要單獨調整某個年級的節數或比重時，直接改那一列的數字就好，不會不小心牽動到
+ *  其他年級（即使上傳時仍然支援把好幾個年級填進同一列，那是使用者自己選擇的
+ *  精簡寫法，不是這裡下載時的預設行為）。 */
 export async function fetchCurrentCurriculumSheet(academicYear: number, term: string): Promise<SheetRows> {
   const { data, error } = await supabase
     .from('curriculum')
@@ -209,9 +229,9 @@ export async function fetchCurrentCurriculumSheet(academicYear: number, term: st
     .eq('term', term);
   if (error || !data) return { name: '科目與比重設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
 
-  const groups = new Map<string, any[]>(); // key = weight|periods
+  const groups = new Map<string, any[]>(); // key = grade_level|weight|periods
   for (const r of data as any[]) {
-    const key = `${r.weight}|${r.periods ?? ''}`;
+    const key = `${r.grade_level}|${r.weight}|${r.periods ?? ''}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(r);
   }
@@ -219,9 +239,10 @@ export async function fetchCurrentCurriculumSheet(academicYear: number, term: st
   const header = ['學年度', '(保留)', '(保留)', '(保留)', '(保留)', '比重(0-1)', '節數', ...SPECIFIC_GRADE_LEVELS];
   const rows: any[][] = [];
   for (const [key, items] of groups) {
-    const [weightStr, periodsStr] = key.split('|');
-    // 同一組比重/節數，可能有好幾個年級各自對到不同科目；每個年級的格子放科目名稱，
-    // 若同一年級撞到第二個科目，另開一列處理
+    const [, weightStr, periodsStr] = key.split('|');
+    // 分組 key 已經包含 grade_level，這裡每一組裡的科目一定都屬於同一個年級；
+    // 同一年級如果有好幾科剛好比重/節數相同，一樣可以擠進同一列（H欄開始每個年級
+    // 只有一格，撞到就跟原本邏輯一樣另開一列），不影響「不同年級絕不共用一列」的原則。
     const lines: any[][] = [];
     for (const item of items) {
       const idx = SPECIFIC_GRADE_LEVELS.indexOf(item.grade_level);
@@ -235,5 +256,11 @@ export async function fetchCurrentCurriculumSheet(academicYear: number, term: st
     }
     rows.push(...lines);
   }
+  // 同一年級的多列排在一起，看起來比較不會亂（原本是依 Map 的插入順序，容易讓同一年級
+  // 的資料散落在檔案各處）。
+  rows.sort((a, b) => {
+    const gradeIdxOf = (row: any[]) => SPECIFIC_GRADE_LEVELS.findIndex((_, i) => row[7 + i]);
+    return gradeIdxOf(a) - gradeIdxOf(b);
+  });
   return { name: '科目與比重設定(現況)', aoa: [header, ...rows] };
 }

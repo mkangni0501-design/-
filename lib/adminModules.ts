@@ -73,6 +73,7 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/reports/attendance-unlock-requests', href: '/reports/attendance-unlock-requests', label: '出缺勤鎖定開放申請審核', adminOnly: false },
   { key: '/reports/profile-requests', href: '/reports/profile-requests', label: '學生資料修改申請審核', adminOnly: false },
   { key: '/admin/attendance-alert-settings', href: '/admin/attendance-alert-settings', label: '出缺席示警門檻設定', adminOnly: true },
+  { key: '/admin/audit-logs', href: '/admin/audit-logs', label: '修正／解鎖紀錄（出缺勤修改紀錄＋成績鎖定解鎖紀錄，僅系統管理員S、管理員A看得到）', adminOnly: true },
 
   // ---- 總務（日後建置的五張表格） ----
   { key: '/admin/general/library', href: '/admin/general/library', label: '書庫登記表', adminOnly: true },

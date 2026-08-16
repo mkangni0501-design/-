@@ -343,6 +343,91 @@ export async function downloadScoreAttendanceTemplate() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 6b. 成績、出缺輸入表：帶入教師目前選定班級的「真實名冊＋真實科目」版本    */
+/*     （給「成績登錄」頁「下載範本」用單機版操作的老師，不再是完全空白、    */
+/*     跟自己班級無關的示範資料，且只帶出這位老師實際能教的科目）          */
+/* ------------------------------------------------------------------ */
+export type ClassRosterStudent = { seatNo: number; studentNo: string; name: string };
+
+export async function buildScoreAttendanceSheetForClass(params: {
+  academicYear: number;
+  term: string;
+  gradeLevel: string;
+  className: string;
+  subjects: string[];
+  students: ClassRosterStudent[];
+}): Promise<XLSXNS.WorkSheet> {
+  const XLSX = await loadXLSX();
+  const width = ATTENDANCE_WEEKDAY_START + ATTENDANCE_WEEKDAYS.length * 5;
+  // 各區塊實際能放的欄數（見上面 EXAM_BLOCK_START 的間距），超過的科目會被截掉，
+  // 並非本次需求範圍能解決的版面限制——如果真的超過，畫面上會另外提醒老師改用線上輸入。
+  const blockWidth = ATTENDANCE_WEEKDAY_START - EXAM_BLOCK_START['平時分'];
+  const subjectsForBlock = params.subjects.slice(0, blockWidth);
+
+  const row1 = makeRow(width, (r) => {
+    r[0] = `${params.academicYear}學年度`;
+    r[1] = params.term;
+    r[2] = params.gradeLevel;
+  });
+  const row2 = makeRow(width, (r) => {
+    r[2] = params.className;
+  });
+  const row3 = makeRow(width, () => {});
+  const row4 = makeRow(width, () => {});
+  const row5 = makeRow(width, (r) => {
+    Object.entries(EXAM_BLOCK_START).forEach(([name, start]) => {
+      r[start] = name;
+    });
+    ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
+      r[ATTENDANCE_WEEKDAY_START + i * 5] = new Date(params.academicYear, 6, 20 + i);
+    });
+  });
+  const row6 = makeRow(width, (r) => {
+    ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
+      for (let p = 0; p < 5; p++) {
+        r[ATTENDANCE_WEEKDAY_START + i * 5 + p] = `第${p + 1}節`;
+      }
+    });
+  });
+  const row7 = makeRow(width, (r) => {
+    Object.values(EXAM_BLOCK_START).forEach((start) => {
+      subjectsForBlock.forEach((subj, i) => {
+        r[start + i] = subj;
+      });
+    });
+  });
+  const studentRow = (seatNo: number, studentNo: string, name: string) =>
+    makeRow(width, (r) => {
+      r[0] = seatNo;
+      r[1] = studentNo;
+      r[2] = name;
+    });
+
+  const rows = [row1, row2, row3, row4, row5, row6, row7];
+  params.students
+    .slice()
+    .sort((a, b) => a.seatNo - b.seatNo)
+    .forEach((s) => rows.push(studentRow(s.seatNo, s.studentNo, s.name)));
+
+  return aoa(XLSX, rows);
+}
+
+export async function downloadScoreAttendanceTemplateForClass(params: {
+  academicYear: number;
+  term: string;
+  gradeLevel: string;
+  className: string;
+  subjects: string[];
+  students: ClassRosterStudent[];
+}) {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, await buildScoreAttendanceSheetForClass(params), SCORE_ATTENDANCE_SHEET_NAME);
+  XLSX.utils.book_append_sheet(wb, await buildScoreAttendanceLegendSheet(), '代碼說明');
+  download(XLSX, wb, `成績出缺輸入表_${params.gradeLevel}${params.className}.xlsx`);
+}
+
+/* ------------------------------------------------------------------ */
 /* 7. 全部上傳(下載)：整批設定用的合併範本                               */
 /*    （不含成績/出缺，因為那是每班每學期持續登錄的資料，非一次性建置；    */
 /*     班級/科目節數/任課教師/節次已改由排課系統匯出Excel自動匯入）        */

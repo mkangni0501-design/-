@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient';
 import type { SheetRows } from './schoolWideDataQueries';
+import { fetchAllPaged } from './schoolWideDataQueries';
 
 // ============================================================
 // 【2026-08 新增】管理員S反映「一鍵上傳/下載中功能上有缺失分頁」——原本
@@ -52,12 +53,16 @@ export async function fetchCurrentGeneralInventoryItemsSheet(): Promise<SheetRow
 
 export const GENERAL_INVENTORY_TX_SHEET_NAME = '總務庫存進出紀錄(現況)';
 export async function fetchCurrentGeneralInventoryTransactionsSheet(): Promise<SheetRows> {
-  const { data, error } = await supabase
-    .from('general_inventory_transactions')
-    .select('direction, quantity, unit_price_at_time, counterparty, note, recorded_at, general_inventory_items(name)')
-    .order('recorded_at', { ascending: false })
-    .limit(2000);
-  if (error || !data) return { name: GENERAL_INVENTORY_TX_SHEET_NAME, aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  // 【2026-08 修正】原本 .limit(2000) 看似有給上限，但 PostgREST 伺服器端的單次回傳上限
+  // （這個專案是1000）優先生效，實際上還是只會拿到1000筆，`.limit()` 比它大時完全沒用。
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase
+      .from('general_inventory_transactions')
+      .select('direction, quantity, unit_price_at_time, counterparty, note, recorded_at, general_inventory_items(name)')
+      .order('recorded_at', { ascending: false })
+      .range(from, to)
+  );
+  if (error) return { name: GENERAL_INVENTORY_TX_SHEET_NAME, aoa: [['讀取失敗：' + error.message]] };
   return {
     name: GENERAL_INVENTORY_TX_SHEET_NAME,
     aoa: [
