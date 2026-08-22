@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { renderToBuffer } from '@react-pdf/renderer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { ReportCardDocument } from '@/lib/ReportCardDocument';
-import { getReportCardResult, canAccessClass } from '@/lib/reportCard';
+import { getReportCardResult, canAccessClass, getActiveReportCardStyle } from '@/lib/reportCard';
 
 export async function GET(req: NextRequest, { params }: { params: { enrollmentId: string } }) {
   const enrollmentId = params.enrollmentId;
@@ -39,7 +39,8 @@ export async function GET(req: NextRequest, { params }: { params: { enrollmentId
     );
   }
 
-  const pdfBuffer = await renderToBuffer(<ReportCardDocument data={result.data} />);
+  const styleConfig = await getActiveReportCardStyle();
+  const pdfBuffer = await renderToBuffer(<ReportCardDocument data={result.data} styleConfig={styleConfig} />);
 
   return new NextResponse(new Uint8Array(pdfBuffer), {
     headers: {

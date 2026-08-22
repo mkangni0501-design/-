@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getMyDepartments, hasDepartment } from '@/lib/departments';
 
 type StudentRow = {
   student_no: string;
@@ -31,10 +32,22 @@ export default function SchoolAttendanceOverviewPage() {
     (async () => {
       const appUser = await getCurrentAppUser();
       // 改用 isAdminInCurrentView()，讓「切換身分」對這頁也生效：管理員切到教師視角時，
-      // 這個「僅管理員」的全校總覽頁應該跟著視為不可見，不然身分切換形同虛設。
+      // 這個全校總覽頁應該跟著視為不可見，不然身分切換形同虛設。
       const admin = isAdminInCurrentView(appUser?.role);
-      setIsAdmin(admin);
-      if (!admin) return;
+      // 訓導部門（承辦人員／主管皆可）不是 admin_a/admin_b/system_admin_s，過去只檢查
+      // isAdminInCurrentView() 會被判定「資格不足」看不到這頁——但全校出缺席總覽本來
+      // 就是訓導處最主要會用到的頁面之一。這裡另外檢查是否身兼訓導部門（同樣尊重
+      // 「切換身分」：管理員切到教師視角時 sessionStorage.viewMode==='teacher'，
+      // 這時不查部門，維持跟其他管理頁一致的行為）。
+      const viewingAsTeacher = typeof window !== 'undefined' && sessionStorage.getItem('viewMode') === 'teacher';
+      let isDiscipline = false;
+      if (!viewingAsTeacher && appUser?.id) {
+        const depts = await getMyDepartments(appUser.id);
+        isDiscipline = hasDepartment(depts, 'discipline');
+      }
+      const canView = admin || isDiscipline;
+      setIsAdmin(canView);
+      if (!canView) return;
 
       setLoading(true);
       const { data: settingRow } = await supabase
@@ -106,7 +119,7 @@ export default function SchoolAttendanceOverviewPage() {
     return (
       <main style={{ maxWidth: 720, margin: '0 auto', padding: 24 }}>
         <h1 style={{ fontSize: 16, marginBottom: 4 }}>全校出缺席狀況總覽</h1>
-        <p style={{ fontSize: 13, color: '#999' }}>本頁僅提供管理員使用。</p>
+        <p style={{ fontSize: 13, color: '#999' }}>本頁僅提供管理員或訓導部門人員使用。</p>
       </main>
     );
   }

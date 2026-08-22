@@ -33,6 +33,8 @@ type EditableOption = { key: string; label: string; targetTable: 'students' | 'g
 
 export default function ParentPortalPage() {
   const [linkedStudents, setLinkedStudents] = useState<LinkedStudent[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<LinkedStudent | null>(null);
   const [records, setRecords] = useState<TermRecord[]>([]);
   const [attendanceCounts, setAttendanceCounts] = useState<Record<string, number>>({});
@@ -52,10 +54,21 @@ export default function ParentPortalPage() {
         router.push('/portal/login');
         return;
       }
-      const { data: accounts } = await supabase
+      // 【2026-08-19】原本這裡完全沒有「還在載入」跟「載入完成但沒有綁定任何學生」
+      // 這兩種狀態的畫面——不管是哪種情況，畫面上都只會看到標題「家長／學生查詢
+      // 入口」，下面整片空白，這正是這次反映「登入以後什麼也看不見」的直接原因。
+      // 這裡補上明確的載入中／查無資料訊息，不管背後真正卡在哪一步，至少畫面上
+      // 會告訴使用者「現在是什麼狀態」，不會像一片空白一樣看起來像當機。
+      const { data: accounts, error: accErr } = await supabase
         .from('portal_accounts')
         .select('id, student_no, relation, students(name)')
         .eq('auth_user_id', sessionData.session.user.id);
+
+      if (accErr) {
+        setLoadError('讀取綁定的學生資料時發生錯誤：' + accErr.message);
+        setLoadingAccounts(false);
+        return;
+      }
 
       const list: LinkedStudent[] = (accounts ?? []).map((a: any) => ({
         id: a.id,
@@ -65,6 +78,7 @@ export default function ParentPortalPage() {
       }));
       setLinkedStudents(list);
       if (list.length > 0) setSelected(list[0]);
+      setLoadingAccounts(false);
 
       const { data: settingRow } = await supabase.from('attendance_alert_settings').select('threshold_periods').eq('id', 1).maybeSingle();
       if (settingRow) setAlertThreshold(settingRow.threshold_periods);
@@ -217,6 +231,21 @@ export default function ParentPortalPage() {
             </option>
           ))}
         </select>
+      )}
+
+      {loadingAccounts && <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>}
+
+      {loadError && (
+        <p style={{ fontSize: 13, color: '#B3261E', background: '#FDECEA', border: '1px solid #f5c2c7', borderRadius: 8, padding: '8px 12px' }}>
+          ⚠️ {loadError}
+        </p>
+      )}
+
+      {!loadingAccounts && !loadError && linkedStudents.length === 0 && (
+        <p style={{ fontSize: 13, color: '#666', background: '#f5f5f4', border: '1px solid #e5e5e0', borderRadius: 8, padding: '12px 16px' }}>
+          目前這個帳號還沒有綁定任何學生資料，請聯絡導師或學校確認登入代碼與信箱是否正確、
+          或是否已經完成帳號綁定。
+        </p>
       )}
 
       {selected && (

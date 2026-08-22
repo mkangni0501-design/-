@@ -14,7 +14,7 @@ import { renderToBuffer } from '@react-pdf/renderer';
 import { PDFDocument } from 'pdf-lib';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { ReportCardDocument } from '@/lib/ReportCardDocument';
-import { getReportCardResult, canAccessClass } from '@/lib/reportCard';
+import { getReportCardResult, canAccessClass, getActiveReportCardStyle } from '@/lib/reportCard';
 
 export async function POST(req: NextRequest) {
   const { classIds } = await req.json();
@@ -84,11 +84,12 @@ export async function POST(req: NextRequest) {
 
   // ---- 5. 逐一產生 PDF，再合併成一份 ----
   const mergedPdf = await PDFDocument.create();
+  const styleConfig = await getActiveReportCardStyle();
 
   for (const item of readyList) {
     const result = await getReportCardResult(item.enrollmentId);
     if ('reason' in result) continue; // 理論上不會發生，防呆用
-    const pdfBuffer = await renderToBuffer(<ReportCardDocument data={result.data} />);
+    const pdfBuffer = await renderToBuffer(<ReportCardDocument data={result.data} styleConfig={styleConfig} />);
     const singlePdf = await PDFDocument.load(pdfBuffer);
     const copiedPages = await mergedPdf.copyPages(singlePdf, singlePdf.getPageIndices());
     copiedPages.forEach((page) => mergedPdf.addPage(page));

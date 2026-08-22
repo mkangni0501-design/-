@@ -12,8 +12,19 @@ function PortalLoginPageInner() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
+  const [verificationEnabled, setVerificationEnabled] = useState(true);
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  useEffect(() => {
+    (async () => {
+      // 提前查一次「是否啟用信箱驗證」，只是用來調整畫面上的說明文字跟按鈕文字
+      // （關閉時不用讓人誤以為還要去收信），真正決定行為的判斷在伺服器端
+      // （app/api/portal/request-login/route.ts），這裡查不到就當作維持預設（啟用）。
+      const { data: settingsRow } = await supabase.from('portal_login_settings').select('email_verification_enabled').eq('id', true).maybeSingle();
+      if (settingsRow) setVerificationEnabled(settingsRow.email_verification_enabled);
+    })();
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -54,6 +65,21 @@ function PortalLoginPageInner() {
       setError(body.error ?? '寄送失敗');
       return;
     }
+    // 【2026-08-19】開發人員區把「信箱驗證」關掉時，這支 API 不會寄信，而是直接
+    // 回傳一組已經登入好的 session——這裡直接把它設成目前的登入狀態，跳過「寄信/
+    // 等待點連結」那一步，符合「輸入完直接登入」的要求。
+    if (body.verificationEnabled === false && body.session) {
+      const { error: setErr } = await supabase.auth.setSession({
+        access_token: body.session.access_token,
+        refresh_token: body.session.refresh_token,
+      });
+      if (setErr) {
+        setError('登入失敗：' + setErr.message);
+        return;
+      }
+      router.push('/portal');
+      return;
+    }
     setSent(true);
   }
 
@@ -91,7 +117,9 @@ function PortalLoginPageInner() {
       </button>
       <h1 style={{ fontSize: 18, marginBottom: 8 }}>家長／學生查詢入口</h1>
       <p style={{ fontSize: 13, color: '#666', marginBottom: 24 }}>
-        請輸入學校提供的登入代碼（格式為 HY+學號）與登記的信箱，系統會寄一封驗證信到該信箱，點開連結即可完成登入。
+        {verificationEnabled
+          ? '請輸入學校提供的登入代碼（格式為 HY+學號）與登記的信箱，系統會寄一封驗證信到該信箱，點開連結即可完成登入。'
+          : '請輸入學校提供的登入代碼（格式為 HY+學號）與登記的信箱，送出後即可直接進入查詢。'}
       </p>
 
       {!signedInEmail ? (
@@ -114,7 +142,7 @@ function PortalLoginPageInner() {
             />
             {error && <p style={{ color: '#A32D2D', fontSize: 13 }}>{error}</p>}
             <button type="submit" style={{ padding: 12, background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 8 }}>
-              寄送登入驗證信
+              {verificationEnabled ? '寄送登入驗證信' : '登入'}
             </button>
           </form>
         ) : (

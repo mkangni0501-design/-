@@ -8,13 +8,14 @@ import CurriculumSettingsTab from '@/components/admin-tabs/CurriculumSettingsTab
 import GradingRulesTab from '@/components/admin-tabs/GradingRulesTab';
 import ScoresEntryTab from '@/components/admin-tabs/ScoresEntryTab';
 import ConductScoresTab from '@/components/admin-tabs/ConductScoresTab';
+import ReportCardStyleTab from '@/components/admin-tabs/ReportCardStyleTab';
 import ClassSummaryTab from '@/components/admin-tabs/ClassSummaryTab';
 import ClassResultsTab from '@/components/admin-tabs/ClassResultsTab';
 import SchoolRankingsTab from '@/components/admin-tabs/SchoolRankingsTab';
 import HistoryTab from '@/components/admin-tabs/HistoryTab';
 import BatchReportCardTab from '@/components/admin-tabs/BatchReportCardTab';
 
-type TabKey = 'settings' | 'entry' | 'conduct' | 'class-summary' | 'class-results' | 'school-rankings' | 'history' | 'batch-print';
+type TabKey = 'settings' | 'entry' | 'conduct' | 'class-summary' | 'class-results' | 'school-rankings' | 'history' | 'batch-print' | 'report-card-style';
 
 const TABS: { key: TabKey; label: string; adminOnly: boolean }[] = [
   { key: 'settings', label: '成績相關設定', adminOnly: true },
@@ -25,6 +26,7 @@ const TABS: { key: TabKey; label: string; adminOnly: boolean }[] = [
   { key: 'school-rankings', label: '全校排行榜', adminOnly: false },
   { key: 'history', label: '歷年成績查詢', adminOnly: false },
   { key: 'batch-print', label: '批次列印成績單（多班／全校）', adminOnly: true },
+  { key: 'report-card-style', label: '成績單樣式設定', adminOnly: true },
 ];
 
 const TAB_KEYS: TabKey[] = TABS.map((t) => t.key);
@@ -104,6 +106,7 @@ function GradingHubPageInner() {
       {tab === 'school-rankings' && <SchoolRankingsTab />}
       {tab === 'history' && <HistoryTab />}
       {tab === 'batch-print' && isAdmin && <BatchReportCardTab />}
+      {tab === 'report-card-style' && isAdmin && <ReportCardStyleTab />}
     </main>
   );
 }
