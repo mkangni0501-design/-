@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
       body.kind === 'certificate'
         ? await renderToBuffer(<CertificateDocument data={body.content as CertificateContent} />)
         : await renderToBuffer(<AppointmentDocument data={body.content as AppointmentContent} />);
-    return new NextResponse(new Uint8Array(buffer), {
+    return new NextResponse(buffer as any, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
