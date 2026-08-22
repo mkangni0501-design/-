@@ -37,6 +37,7 @@ export const MODULE_SUB_ITEMS: Record<string, ModuleSubItemsConfig> = {
       { key: 'school-rankings', label: '全校排行榜' },
       { key: 'history', label: '歷年成績查詢' },
       { key: 'batch-print', label: '批次列印成績單（多班／全校）' },
+      { key: 'report-card-style', label: '成績單樣式設定' },
     ],
   },
   '/admin/registrar': {

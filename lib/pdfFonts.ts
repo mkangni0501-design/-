@@ -35,6 +35,21 @@ export function registerNotoSansTC() {
       { src: path.join(fontsDir, 'NotoSansTC-Bold.ttf'), fontWeight: 700 },
     ],
   });
+  // 泰文字型：成績單封面（外頁）需要印泰文校名，NotoSansTC（繁體中文字型）不含
+  // 泰文字符，直接用中文字型印泰文字會是亂碼/空白方框，所以另外註冊一套泰文字型
+  // （Noto Sans Thai，從 @fontsource/noto-sans-thai 這個 npm 套件抽出 woff2、用
+  // fonttools 轉成 .ttf，做法跟上面 NotoSansTC 一樣，理由也一樣：.ttf 對
+  // fontkit／react-pdf 的相容性比較穩定）。用法：泰文文字的 <Text> 元素指定
+  // `fontFamily: 'NotoSansThai'`，中文/數字維持 `fontFamily: 'NotoSansTC'`
+  // （不能兩種文字混在同一個 <Text> 裡用同一個 fontFamily，泰文跟中文要分開兩個
+  // <Text> 元素各自指定字型，見 lib/ReportCardDocument.tsx 的 CoverPage）。
+  Font.register({
+    family: 'NotoSansThai',
+    fonts: [
+      { src: path.join(fontsDir, 'NotoSansThai-Regular.ttf'), fontWeight: 400 },
+      { src: path.join(fontsDir, 'NotoSansThai-Bold.ttf'), fontWeight: 700 },
+    ],
+  });
   // react-pdf 預設會嘗試連字（ligature）跟字距微調計算，中文字型不需要、反而偶爾會拖慢
   // 排版速度，關掉沒有副作用。
   Font.registerHyphenationCallback((word) => [word]);

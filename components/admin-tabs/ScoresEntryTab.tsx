@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { supabase, getCurrentAppUser, getCurrentTeacherId, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
 import { departmentForGrade } from '@/lib/gradeMapping';
@@ -300,6 +300,66 @@ export default function ScoreEntryPage() {
   //              給有權限的人（導師本人／管理員）預覽、列印個別學生的成績單 ----------
   const [classStudents, setClassStudents] = useState<{ enrollment_id: string; seat_no: number; name: string }[]>([]);
   const canSeeReportCards = isAdmin || (!!classId && classId === homeroomClassId);
+  // 導師評語：跟成績單一起產出，過去整個系統沒有任何一個畫面可以輸入（見
+  // student_remarks 表的 RLS 只開放導師/管理員讀寫，但沒有對應的輸入框）。
+  // 這次反映要求放在「輸入平時分」的頁面，這裡沿用跟成績單一樣的可見權限
+  // （導師本人或管理員），只在選到「平時分」時顯示，跟選了哪個科目無關
+  // （評語是整學期對這個學生的評語，不是某一科的評語）。
+  const canEditRemarks = canSeeReportCards;
+  const [remarks, setRemarks] = useState<Record<string, string>>({});
+  const [remarkStudentNames, setRemarkStudentNames] = useState<Record<string, string>>({});
+  const [remarksDirty, setRemarksDirty] = useState<Record<string, boolean>>({});
+  const [savingRemark, setSavingRemark] = useState<string | null>(null);
+  const [showRemarks, setShowRemarks] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      if (!classId || examType !== '平時分' || !canEditRemarks) {
+        setRemarks({});
+        setRemarksDirty({});
+        return;
+      }
+      const { data: enrollRows } = await supabase.from('enrollments').select('id, seat_no, student_no').eq('class_id', classId).order('seat_no');
+      const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
+      const { data: studentRows } = await supabase
+        .from('students')
+        .select('student_no, name')
+        .in('student_no', studentNos.length > 0 ? studentNos : ['__none__']);
+      const nameByStudentNo = new Map((studentRows ?? []).map((s: any) => [s.student_no, s.name]));
+      const remarkNames: Record<string, string> = {};
+      (enrollRows ?? []).forEach((e: any) => (remarkNames[e.id] = nameByStudentNo.get(e.student_no) ?? ''));
+      setRemarkStudentNames(remarkNames);
+      const { data: remarkRows } = await supabase
+        .from('student_remarks')
+        .select('enrollment_id, comment')
+        .in('enrollment_id', (enrollRows ?? []).map((e: any) => e.id));
+      const map: Record<string, string> = {};
+      (enrollRows ?? []).forEach((e: any) => (map[e.id] = ''));
+      (remarkRows ?? []).forEach((r: any) => (map[r.enrollment_id] = r.comment ?? ''));
+      setRemarks(map);
+      setRemarksDirty({});
+    })();
+  }, [classId, examType, canEditRemarks]);
+
+  async function handleSaveRemark(enrollmentId: string) {
+    setSavingRemark(enrollmentId);
+    // 錯用 getCurrentAppUser().id（那是 app_users.id／登入帳號本身的 id）當作
+    // updated_by 存進去，但 student_remarks.updated_by 參照的是 teachers(id)——
+    // 兩張表的 id 不是同一個值，才會違反外鍵限制。改用 getCurrentTeacherId()（跟
+    // 「通知」頁解決過同一個問題時用的是同一支函式），沒有連結教師資料的純管理帳號
+    // 會拿到 null，一樣可以存（updated_by 欄位允許空值），只是不會記錄是哪個教師存的。
+    const teacherId = await getCurrentTeacherId();
+    const { error } = await supabase
+      .from('student_remarks')
+      .upsert({ enrollment_id: enrollmentId, comment: remarks[enrollmentId] ?? '', updated_by: teacherId, updated_at: new Date().toISOString() });
+    setSavingRemark(null);
+    if (error) {
+      alert('評語儲存失敗：' + error.message);
+      return;
+    }
+    setRemarksDirty((d) => ({ ...d, [enrollmentId]: false }));
+  }
+
   useEffect(() => {
     if (!classId || !canSeeReportCards) {
       setClassStudents([]);
@@ -333,28 +393,44 @@ export default function ScoreEntryPage() {
   // 還沒有三項都鎖定（見 lib/reportCard.ts），這裡改成把 API 回傳的 reason 直接顯示出來，
   // 老師才知道要先做完哪一步（也就是上面的「鎖定」）才能印成績單。
   async function handlePrintReportCard(enrollmentId: string) {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const accessToken = sessionData.session?.access_token;
-    if (!accessToken) {
-      alert('請重新登入');
+    // 【2026-08-19】window.open 被瀏覽器靜靜擋掉的問題（跟【班級成績總表】頁同一個
+    // 根因：window.open 寫在 await 之後，失去「使用者點擊」的關聯，被彈出視窗封鎖
+    // 機制擋下且不會顯示任何提示）——這裡也一併修正，點擊當下先同步開好空白分頁。
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    const res = await fetch(`/api/reports/report-card/${enrollmentId}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!res.ok) {
-      let reason = '';
-      try {
-        const body = await res.json();
-        reason = body?.reason ? `\n原因：${body.reason}` : '';
-      } catch {
-        // 回應不是 JSON（例如逾時），忽略，用預設訊息即可
+    printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生成績單 PDF，請稍候…</p>');
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        printWindow.close();
+        alert('請重新登入');
+        return;
       }
-      alert('目前還無法產出正式成績單。' + (reason || '請確認期中考／期末考／平時分是否都已鎖定。'));
-      return;
+      const res = await fetch(`/api/reports/report-card/${enrollmentId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        printWindow.close();
+        let reason = '';
+        try {
+          const body = await res.json();
+          reason = body?.reason ? `\n原因：${body.reason}` : '';
+        } catch {
+          // 回應不是 JSON（例如逾時），忽略，用預設訊息即可
+        }
+        alert(`目前還無法產出正式成績單。狀態碼 ${res.status}` + (reason || '\n請確認期中考／期末考／平時分是否已鎖定。'));
+        return;
+      }
+      const blob = await res.blob();
+      printWindow.location.href = URL.createObjectURL(blob);
+    } catch (err: any) {
+      printWindow.close();
+      alert('列印成績單發生錯誤：' + (err?.message ?? String(err)));
     }
-    const blob = await res.blob();
-    window.open(URL.createObjectURL(blob), '_blank');
   }
 
   // ---------- 3) 班級 + 科目 + 考試類型都選好才載入學生名單與分數 ----------
@@ -751,8 +827,50 @@ export default function ScoreEntryPage() {
         <p style={{ fontSize: 13, color: '#999', marginBottom: 8 }}>請選擇「期中考」「期末考」或「平時分」後開始輸入分數。</p>
       )}
 
+      {classId && examType === '平時分' && canEditRemarks && (
+        <div style={{ marginBottom: 12 }}>
+          <button onClick={() => setShowRemarks((v) => !v)} className="no-print" style={{ fontSize: 12, padding: '4px 12px' }}>
+            {showRemarks ? '收合導師評語 ▲' : '📝 輸入導師評語 ▼'}
+          </button>
+          {showRemarks && (
+            <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginTop: 8 }}>
+              <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
+                每位學生一段評語，會跟著成績單一起印出（只有導師本人與管理員看得到，任課教師不會看到）。
+                點開其他欄位或離開輸入框會自動儲存。
+              </p>
+              {Object.keys(remarks).map((enrollmentId) => (
+                <div key={enrollmentId} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 8 }}>
+                  <span style={{ width: 80, fontSize: 13, paddingTop: 6, flexShrink: 0 }}>{remarkStudentNames[enrollmentId] ?? ''}</span>
+                  <textarea
+                    value={remarks[enrollmentId] ?? ''}
+                    onChange={(e) => {
+                      setRemarks((r) => ({ ...r, [enrollmentId]: e.target.value }));
+                      setRemarksDirty((d) => ({ ...d, [enrollmentId]: true }));
+                    }}
+                    onBlur={() => {
+                      if (remarksDirty[enrollmentId]) handleSaveRemark(enrollmentId);
+                    }}
+                    rows={2}
+                    style={{ flex: 1, padding: 6, fontSize: 13 }}
+                  />
+                  {savingRemark === enrollmentId && <span style={{ fontSize: 12, color: '#999', paddingTop: 6 }}>儲存中…</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {classId && effectiveSubject && examType && (
         <>
+          {(effectiveSubject === '全勤' || effectiveSubject === '出缺席') && (
+            <p style={{ fontSize: 12, color: '#A36A00', background: '#FFF8E1', border: '1px solid #f0d98a', borderRadius: 8, padding: '8px 12px', marginBottom: 8 }}>
+              「{effectiveSubject}」的分數是依真實出缺勤紀錄自動計算（全勤100分，曠課/遲到/事假/病假依
+              「整體佔比與加扣分規則」倒扣），不需要在這裡手動輸入──即使這裡存了分數，也不會被排名/總分
+              採用。要看實際計算出來的出缺席分數，請到「班級成績總表」頁；要調整倒扣點數，請到
+              「整體佔比與加扣分規則」頁。
+            </p>
+          )}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#666', marginBottom: 8 }}>
             <span>已填 {filledCount} / {rows.length}</span>
             <span>分數範圍 0–100</span>

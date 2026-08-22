@@ -1,7 +1,22 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { ReportCardData, TermBlock } from '@/lib/ReportCardDocument';
+import { ReportCardData, ReportCardStyleConfig, TermBlock, DEFAULT_REPORT_CARD_STYLE } from '@/lib/ReportCardDocument';
 
 const SCHOOL_NAME = '泰國清萊雲南會館附屬華雲學校'; // 依實際校名調整
+
+// 目前生效中的成績單樣式設定（顏色/字級/邊框/文字標籤，不含資料綁定，見
+// components/admin-tabs/ReportCardStyleTab.tsx／sql/46wire_attendance_and_discipline_adjustments.sql
+// 新增的 report_card_style 表）。管理員還沒上傳過自訂樣式時，回傳內建預設值。
+export async function getActiveReportCardStyle(): Promise<ReportCardStyleConfig> {
+  const { data } = await supabaseAdmin.from('report_card_style').select('config').eq('is_active', true).maybeSingle();
+  if (!data?.config) return DEFAULT_REPORT_CARD_STYLE;
+  // 用預設值當底，讓管理員上傳的設定檔即使漏了某些欄位也不會整份壞掉（只覆蓋有填的部分）。
+  return {
+    colors: { ...DEFAULT_REPORT_CARD_STYLE.colors, ...(data.config as any).colors },
+    sizes: { ...DEFAULT_REPORT_CARD_STYLE.sizes, ...(data.config as any).sizes },
+    labels: { ...DEFAULT_REPORT_CARD_STYLE.labels, ...(data.config as any).labels },
+    layout: { ...DEFAULT_REPORT_CARD_STYLE.layout, ...(data.config as any).layout },
+  };
+}
 
 // 誰可以產出/預覽一個班的成績單：管理員S/A/B、教務處成員、該班導師本人。
 // app/api/reports/report-card/[enrollmentId]/route.tsx 跟 batch/route.tsx 都會呼叫
@@ -48,7 +63,38 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
   if (!enrollment) return null;
   const cls = (enrollment as any).classes;
 
-  const { data: ready } = await supabaseAdmin.rpc('report_card_ready', { p_enrollment_id: enrollmentId });
+  // 期中/期末/平時 各佔比重（%），成績單科目表格的「35% 35% 30% 100%」那一列
+  // 用得到，直接抓 grading_rules，跟成績單「外頁」封面頁那組數字（buildPolicySummary）
+  // 同一個資料來源，不會兩邊數字對不起來。
+  const { data: gradingRow } = await supabaseAdmin
+    .from('grading_rules')
+    .select('midterm_weight, final_weight, daily_weight')
+    .eq('academic_year', cls.academic_year)
+    .eq('term', enrollment.term)
+    .maybeSingle();
+  const stageWeights = gradingRow
+    ? {
+        midterm: Number(gradingRow.midterm_weight) * 100,
+        final: Number(gradingRow.final_weight) * 100,
+        daily: Number(gradingRow.daily_weight) * 100,
+      }
+    : null;
+
+  // 期中/期末/平時 個別鎖定狀態（sql/47ranking_average_discipline_access_partial_report_card.sql
+  // 新增的 report_card_exam_type_locks()）。過去這裡只查「三項是否全部鎖定」的單一
+  // 布林值（ready），任何一項還沒鎖，整份成績單（含已經鎖定的部分）都會是空白——
+  // 這正是這次反映「期中/期末/平時沒有個人的列印，只有'全部'時能印」的根因。
+  // 改成分開查三項，已鎖定的部分正常顯示數字，還沒鎖定的部分維持空白，兩者互不影響。
+  const { data: locks } = await supabaseAdmin.rpc('report_card_exam_type_locks', { p_enrollment_id: enrollmentId });
+  const lockRow = Array.isArray(locks) ? locks[0] : locks;
+  const midLocked = !!lockRow?.mid_locked;
+  const finLocked = !!lockRow?.fin_locked;
+  const dayLocked = !!lockRow?.day_locked;
+  // fullyReady：三項都鎖定，只有這個狀態下「學業平均-總分」「全班排名」這類需要
+  // 三項合併才有意義的欄位才會顯示；ready（單一項有鎖定就算）則用來判斷這個學期
+  // 「還有沒有任何東西可以先印出來」。
+  const fullyReady = midLocked && finLocked && dayLocked;
+  const ready = midLocked || finLocked || dayLocked;
 
   const { data: subjectRows } = await supabaseAdmin
     .from('subject_weighted_scores')
@@ -65,16 +111,25 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
     .eq('term', enrollment.term)
     .eq('grade_level', cls.grade_level);
   const weightBySubject = new Map((curriculumRows ?? []).map((r: any) => [r.subject, Number(r.weight)]));
+  // 【2026-08-17 修正】sql/48fix_attendance_score_formula.sql 已經把「全勤」／「出缺席」
+  // 改成跟其他科目一樣，正常走加權平均那條路徑（不再是額外加減的調整值，見該檔案
+  // 說明），這裡原本沿用 sql/46 時代「這個科目不能出現在清單裡，不然會重複計算」的
+  // 排除邏輯已經過時──sql/48 之後，這個科目本來就應該像其他科目一樣正常顯示在
+  // 成績單的科目列表跟「比重」欄位上（顯示出缺席%），不排除了。
   const visibleSubjects = (subjectRows ?? [])
     .filter((s: any) => (weightBySubject.get(s.subject) ?? 0) > 0)
     .sort((a: any, b: any) => (weightBySubject.get(b.subject) ?? 0) - (weightBySubject.get(a.subject) ?? 0));
 
   // 學業平均：期中/期末/平時各自的「依科目比重加權平均」＝ student_examtype_totals
-  // 算好的 {type}_total（sql/41score_entry_fixes.sql），總分那一欄則是 student_total_scores
+  // 的 {type}_average 欄位（sql/45swap_total_and_average_formulas.sql 對調公式之後，
+  // _average 才是加權平均、_total 是直接加總）；總分那一欄則是 student_total_scores
   // 的 total_score——兩者都已經是「乘上比重」的結果，不用在這裡重新加總一次。
+  // 【2026-08-17 修正】這裡原本只 select 了 _total 三個欄位，沒有把 _average 三個欄位
+  // 一起查出來，導致底下 academicAverage.midterm/final/daily 永遠讀不到值、成績單上
+  // 學業平均那一列一直是空白——這是「期中/期末/平時分數沒有顯示」反映事項的直接原因。
   const { data: examtypeTotals } = await supabaseAdmin
     .from('student_examtype_totals')
-    .select('midterm_total, final_total, daily_total')
+    .select('midterm_total, final_total, daily_total, midterm_average, final_average, daily_average')
     .eq('enrollment_id', enrollmentId)
     .maybeSingle();
   const { data: totalRow } = await supabaseAdmin
@@ -147,6 +202,18 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
     .eq('term', enrollment.term);
 
   const { data: classRankValue } = await supabaseAdmin.rpc('report_card_class_rank', { p_enrollment_id: enrollmentId });
+  // 出缺席分數：改用 sql/48fix_attendance_score_formula.sql 新增的 attendance_score()，
+  // 跟排名/總分實際採用的公式是同一支函式（該函式的結果會乘上科目比重3%後計入
+  // 期中/期末/平時，見該檔案說明），成績單上顯示的數字才會跟實際拿去算總分/排名的
+  // 數字一致。全勤（這學期完全沒有曠課/遲到/病假/事假/公假紀錄）才是100分；只要
+  // 有任何一筆紀錄，直接顯示扣分點數加總後的原始值（可以是很大的負數，不會有
+  // 「以100分為底再扣、最低0分」這種下限——那是先前版本的錯誤理解，100分只有
+  // 真正全勤的人才有）。
+  const { data: attendanceScoreRaw } = await supabaseAdmin.rpc('attendance_score', { p_enrollment_id: enrollmentId });
+  const attendanceScore = attendanceScoreRaw === null || attendanceScoreRaw === undefined ? null : Number(attendanceScoreRaw);
+
+  // 操行成績＝禮貌/衣著/服務/紀律的平均，再加減懲獎點數（3e）。
+  const { data: disciplineAdj } = await supabaseAdmin.rpc('discipline_adjustment', { p_enrollment_id: enrollmentId });
 
   // 操行成績「禮貌／衣著／服務／紀律」：見 sql/44fix_report_card_and_ranking_performance.sql
   // 新增的 conduct_scores 表（你確認要另外開發評分介面後新增，components/admin-tabs/ConductScoresTab.tsx
@@ -166,7 +233,9 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
     dress: conductRow?.dress ?? null,
     service: conductRow?.service ?? null,
     discipline: conductRow?.discipline ?? null,
-    overall: conductValues.length > 0 ? conductValues.reduce((a, b) => a + b, 0) / conductValues.length : null,
+    // 操行成績＝四個分項的平均，再加減懲獎點數（3e）；四個分項都沒填時維持 null
+    // （沒有任何基準分數可以加減，不要顯示成 0 或負數）。
+    overall: conductValues.length > 0 ? conductValues.reduce((a, b) => a + b, 0) / conductValues.length + Number(disciplineAdj ?? 0) : null,
   };
 
   return {
@@ -179,24 +248,28 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
       daily: s.daily,
       total: s.subject_weighted_score,
     })),
-    academicAverage: ready
-      ? {
-          // 學業平均＝依各科比重加權平均，見 sql/45swap_total_and_average_formulas.sql——
-          // 原本讀 _total 欄位（sql/41 當初把 total/average 兩個公式寫反了，這裡對調
-          // 過來後改讀 _average 欄位，數字結果不變，仍然對得起你原本 AI.xlsx 樣本的
-          // 77.25／80 那組數字）。
-          midterm: examtypeTotals?.midterm_average ?? null,
-          final: examtypeTotals?.final_average ?? null,
-          daily: examtypeTotals?.daily_average ?? null,
-          total: totalRow?.total_score ?? null,
-        }
-      : { midterm: null, final: null, daily: null, total: null },
+    academicAverage: {
+      // 學業平均＝依各科比重加權平均，見 sql/45swap_total_and_average_formulas.sql——
+      // 期中/期末/平時三欄各自只看「這一項自己」有沒有鎖定，不再互相牽連；「總分」
+      // 欄需要三項都有數字加總才有意義，所以維持只在 fullyReady（三項都鎖定）時顯示。
+      midterm: midLocked ? examtypeTotals?.midterm_average ?? null : null,
+      final: finLocked ? examtypeTotals?.final_average ?? null : null,
+      daily: dayLocked ? examtypeTotals?.daily_average ?? null : null,
+      total: fullyReady ? totalRow?.total_score ?? null : null,
+    },
+    // 出缺勤／懲獎／操行分數不是「考試成績」，跟期中/期末/平時有沒有鎖定無關（本來
+    // 就是整個學期持續累計的紀錄），過去被一起綁在 ready 底下、要等三項都鎖定才
+    // 顯示，是不必要的限制，這裡改成只要這個學期本身查得到資料就顯示。
     attendance: attendanceCounts,
     isPerfectAttendance,
+    attendanceScore,
     discipline: disciplineCounts,
     conduct,
     classSize: classSize ?? null,
-    classRank: ready ? classRankValue ?? null : null,
+    // 全班排名：跟「學業平均-總分」一樣，需要三項都鎖定、總分才穩定，維持只在
+    // fullyReady 時顯示，避免印出「還會再變動」的排名讓人誤會是正式名次。
+    classRank: fullyReady ? classRankValue ?? null : null,
+    stageWeights,
   };
 }
 
@@ -222,9 +295,13 @@ export async function getReportCardResult(enrollmentId: string): Promise<ReportC
   const studentNo = student?.student_no ?? '';
   const studentName = student?.name ?? '';
 
-  const { data: ready } = await supabaseAdmin.rpc('report_card_ready', { p_enrollment_id: enrollmentId });
-  if (!ready) {
-    return { ready: false, studentNo, studentName, reason: '期中/期末/平時分尚未三項都鎖定' };
+  // 改成「只要期中/期末/平時至少有一項鎖定」就先讓成績單可以產出（已鎖定的部分
+  // 正常顯示，還沒鎖定的部分維持空白——見 buildTermBlock 的說明），對應這次反映
+  // 「'期中'、'期末'、'平時'沒有個人的列印，只有在'全部'時能印成績單」。
+  // 三項都還沒有任何一項鎖定時，才真的沒有東西可以印，這時才擋下來並說明原因。
+  const { data: anyLocked } = await supabaseAdmin.rpc('report_card_any_locked', { p_enrollment_id: enrollmentId });
+  if (!anyLocked) {
+    return { ready: false, studentNo, studentName, reason: '期中考／期末考／平時分尚未有任一項鎖定，目前沒有已完成的成績可以列印' };
   }
 
   // 找同一個學生、同一個學年度的另一個學期學籍（可能還不存在——下學期還沒開始就是這樣）。
@@ -249,6 +326,12 @@ export async function getReportCardResult(enrollmentId: string): Promise<ReportC
 
   const { data: remarkRow } = await supabaseAdmin.from('student_remarks').select('comment').eq('enrollment_id', enrollmentId).maybeSingle();
 
+  // 成績單「外頁」（封面說明頁）：操行等第標準、獎懲加扣分、學業成績佔比、出缺席
+  // 加扣分，這幾組數字全部從資料庫現有設定抓，不是寫死的文字——之後在【整體佔比與
+  // 加扣分規則】【科目與比重設定】頁調整這些數字，成績單封面會自動跟著變，不用
+  // 每次改了都要另外找人改成績單樣板。見 buildPolicySummary() 的說明。
+  const policy = await buildPolicySummary(cls.academic_year, enrollment.term, cls.grade_level);
+
   return {
     ready: true,
     studentNo,
@@ -265,6 +348,77 @@ export async function getReportCardResult(enrollmentId: string): Promise<ReportC
       terms: termBlocks,
       remark: remarkRow?.comment ?? '',
       printedAt: new Date().toISOString(),
+      policy,
     },
+  };
+}
+
+// 成績單封面說明頁用的動態資料：獎懲點數（conduct_point_defaults）、學業成績佔比
+// （grading_rules）、出缺席比重與扣分點數（curriculum 的「全勤／出缺席」科目 +
+// conduct_point_defaults）。任何一組資料庫裡查不到時，對應欄位維持 null，封面頁
+// 那一行就不印出來，不會印出「undefined」或錯誤的假數字。
+async function buildPolicySummary(academicYear: number, term: string, gradeLevel: string) {
+  const { data: conductRows } = await supabaseAdmin.from('conduct_point_defaults').select('item, points');
+  const conductMap: Record<string, number> = {};
+  (conductRows ?? []).forEach((r: any) => (conductMap[r.item] = Number(r.points)));
+
+  const { data: gradingRow } = await supabaseAdmin
+    .from('grading_rules')
+    .select('midterm_weight, final_weight, daily_weight')
+    .eq('academic_year', academicYear)
+    .eq('term', term)
+    .maybeSingle();
+
+  const { data: attendanceCurriculum } = await supabaseAdmin
+    .from('curriculum')
+    .select('subject, weight')
+    .eq('academic_year', academicYear)
+    .eq('term', term)
+    .eq('grade_level', gradeLevel)
+    .in('subject', ['全勤', '出缺席'])
+    .gt('weight', 0)
+    .order('subject', { ascending: false }) // 「出缺席」優先於「全勤」，跟 sql/48 的防呆邏輯一致
+    .limit(1)
+    .maybeSingle();
+  const attendanceWeight = attendanceCurriculum ? Number(attendanceCurriculum.weight) : null;
+
+  // 每一項換算成「最終影響總分的百分比」＝原始分數 × 出缺席比重，跟成績單「學業
+  // 平均」欄位實際採用的公式（sql/48fix_attendance_score_formula.sql）一致，這裡
+  // 印出來的百分比數字，跟真正拿去算總分的邏輯保證是同一套。
+  // 【2026-08-21 修正】attendanceWeight 本身已經是小數（例如3%存成0.03），
+  // rawScore × attendanceWeight 這一步算出來就已經是「百分比點數」本身
+  // （例如 100 × 0.03 = 3，意思是「+3個百分點」），不需要再乘一次100——上一輪
+  // 這裡多乘了一次100，導致全勤印成「+300%」而不是「+3%」，曠課等其餘幾項因為
+  // 數字本身很小（-0.1、-0.02...），多乘100後的視覺落差沒那麼誇張，比較不容易
+  // 一眼看出來，這輪你比對「全勤」那一項才抓到。
+  const attendanceItem = (name: string, rawScore: number | null) => ({
+    name,
+    rawScore,
+    percentOfTotal: rawScore !== null && attendanceWeight !== null ? rawScore * attendanceWeight : null,
+  });
+
+  return {
+    conduct: {
+      merit1: conductMap['嘉獎'] ?? null,
+      demerit1: conductMap['警告'] ?? null,
+      merit3: conductMap['小功'] ?? null,
+      demerit3: conductMap['小過'] ?? null,
+      merit9: conductMap['大功'] ?? null,
+      demerit9: conductMap['大過'] ?? null,
+    },
+    academicWeights: {
+      midterm: gradingRow ? Number(gradingRow.midterm_weight) * 100 : null,
+      final: gradingRow ? Number(gradingRow.final_weight) * 100 : null,
+      daily: gradingRow ? Number(gradingRow.daily_weight) * 100 : null,
+    },
+    attendanceWeightPercent: attendanceWeight !== null ? attendanceWeight * 100 : null,
+    attendance: [
+      attendanceItem('全勤', 100),
+      attendanceItem('曠課', conductMap['曠課'] ?? null),
+      attendanceItem('遲到', conductMap['遲到'] ?? null),
+      attendanceItem('事假', conductMap['事假'] ?? null),
+      attendanceItem('病假', conductMap['病假'] ?? null),
+      attendanceItem('公假', conductMap['公假'] ?? null),
+    ],
   };
 }

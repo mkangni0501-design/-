@@ -31,6 +31,25 @@ export default function ConductScoresTab() {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 操行成績可以直接按 ENTER 換下一個輸入框（往右：禮貌→衣著→服務→紀律，
+  // 到最後一格再按 ENTER 換下一位學生的禮貌欄），不用每次都用滑鼠點下一格。
+  const inputRefs = useState(() => new Map<string, HTMLInputElement | null>())[0];
+  const FIELDS = ['politeness', 'dress', 'service', 'discipline'] as const;
+  function focusNext(rowIndex: number, fieldIndex: number) {
+    let nextRow = rowIndex;
+    let nextField = fieldIndex + 1;
+    if (nextField >= FIELDS.length) {
+      nextField = 0;
+      nextRow += 1;
+    }
+    const target = rows[nextRow];
+    if (!target) return;
+    const el = inputRefs.get(`${target.enrollment_id}-${FIELDS[nextField]}`);
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }
 
   useEffect(() => {
     (async () => {
@@ -182,18 +201,27 @@ export default function ConductScoresTab() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {rows.map((r, rowIndex) => (
                 <tr key={r.enrollment_id}>
                   <td style={{ border: '1px solid #eee', padding: 6 }}>{r.seat_no}</td>
                   <td style={{ border: '1px solid #eee', padding: 6 }}>{r.name}</td>
-                  {(['politeness', 'dress', 'service', 'discipline'] as const).map((field) => (
+                  {FIELDS.map((field, fieldIndex) => (
                     <td key={field} style={{ border: '1px solid #eee', padding: 4 }}>
                       <input
                         type="number"
                         min={0}
                         max={100}
                         value={r[field]}
+                        ref={(el) => {
+                          inputRefs.set(`${r.enrollment_id}-${field}`, el);
+                        }}
                         onChange={(e) => updateField(r.enrollment_id, field, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            focusNext(rowIndex, fieldIndex);
+                          }
+                        }}
                         style={{ width: 56, padding: 4, fontSize: 13 }}
                       />
                     </td>

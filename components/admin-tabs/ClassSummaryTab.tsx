@@ -4,6 +4,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { isDepartmentLead } from '@/lib/departments';
+import { downloadClassScoreExcel } from '@/lib/excelTemplates';
 
 type SubjectRow = { enrollment_id: string; subject: string; midterm: number | null; final: number | null; daily: number | null };
 type RankRow = {
@@ -94,6 +95,12 @@ export default function ClassSummaryPage() {
   const [gradeRank, setGradeRank] = useState<Record<string, GradeRankRow>>({});
   const [remarks, setRemarks] = useState<Record<string, string>>({});
   const [subjectWeights, setSubjectWeights] = useState<Record<string, number>>({}); // 科目 -> 比重(0~1)，顯示在科目欄位上方的科目%用
+  // enrollment_id -> 依真實出缺勤紀錄自動算出的「出缺席」分數（100 加上倒扣，最低0）。
+  // 「全勤」／「出缺席」這個科目欄位改用這裡的值顯示，不用 subjectData 裡老師手動輸入
+  // 的原始分數（那筆分數不會被排名/總分採用，見 sql/46wire_attendance_and_discipline_adjustments.sql）。
+  const [attendanceAdjustments, setAttendanceAdjustments] = useState<Record<string, number>>({});
+  const [rankLoadError, setRankLoadError] = useState<string | null>(null);
+  const ATTENDANCE_SUBJECT_NAMES = ['全勤', '出缺席'];
   const [canSeeRemarks, setCanSeeRemarks] = useState(false);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<'all' | '期中考' | '期末考' | '平時分'>('all');
@@ -239,12 +246,18 @@ export default function ClassSummaryPage() {
       // statement timeout；改成呼叫這兩支函式後，只會計算「這個班」／「這個班同年級
       // 同部別」的範圍，不會被全校資料量拖慢。可見範圍限制（只有導師/管理員查得到）
       // 維持不變，任課教師呼叫一樣會得到空結果。
-      const { data: rankRows } = await supabase.rpc('class_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
+      // 【2026-08-19】原本這裡只解構 data、完全沒檢查 error——如果這支函式呼叫本身
+      // 出錯（不是「權限篩選後是空的」，是真的執行失敗，例如函式簽名對不上、SQL執行
+      // 階段出錯），畫面上會沒有任何提示，只會看到總分/排名整欄空白，很難跟「單純看
+      // 不到」的情況分開，管理員S反映的狀況已經連續好幾輪查不出原因，可能就是這種
+      // 「其實有錯誤，但被吃掉了」的情形——這裡改成有錯誤就存起來顯示，下次再發生
+      // 同樣的狀況，畫面上會直接看到實際的錯誤訊息，不用再用猜的排查。
+      const { data: rankRows, error: rankErr } = await supabase.rpc('class_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
       const rankMap: Record<string, RankRow> = {};
       (rankRows ?? []).forEach((r: any) => (rankMap[r.enrollment_id] = r));
       setClassRank(rankMap);
 
-      const { data: gradeRows } = await supabase.rpc('grade_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
+      const { data: gradeRows, error: gradeErr } = await supabase.rpc('grade_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
       const gradeMap: Record<string, GradeRankRow> = {};
       (gradeRows ?? []).forEach(
         (r: any) =>
@@ -256,6 +269,26 @@ export default function ClassSummaryPage() {
           })
       );
       setGradeRank(gradeMap);
+      setRankLoadError(
+        rankErr || gradeErr
+          ? `讀取總分/排名時發生錯誤：${[rankErr?.message, gradeErr?.message].filter(Boolean).join('；')}`
+          : null
+      );
+
+      // 出缺席（全勤）自動加扣分：sql/47ranking_average_discipline_access_partial_report_card.sql
+      // 新增的 class_attendance_adjustment_batch()，一次查完全班，不用每個學生各自呼叫一次。
+      // 用途：科目欄位裡「全勤」／「出缺席」那一欄，改成顯示這裡查到的真實計算結果，取代
+      // 老師手動輸入、但實際上不會被排名/總分採用的原始分數（見下面 render 那段的說明；
+      // 對應這次反映「高三忠1號的分數欄位都是100」──那其實是老師手動輸入的舊分數，
+      // 不是系統沒有計算扣分，只是畫面上一直顯示著沒被採用的那個數字，容易讓人誤會）。
+      if (currentTerm) {
+        const { data: attAdjRows } = await supabase.rpc('class_attendance_adjustment_batch', { p_class_id: classId, p_term: currentTerm });
+        const attAdjMap: Record<string, number> = {};
+        (attAdjRows ?? []).forEach((r: any) => (attAdjMap[r.enrollment_id] = Number(r.attendance_score)));
+        setAttendanceAdjustments(attAdjMap);
+      } else {
+        setAttendanceAdjustments({});
+      }
 
       if (canSeeRemarks || isAdmin) {
         const { data: remarkRows } = await supabase
@@ -326,72 +359,137 @@ export default function ClassSummaryPage() {
     }
   }
 
-  async function handlePrintReportCard(enrollmentId: string) {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const accessToken = sessionData.session?.access_token;
-    if (!accessToken) {
-      alert('請重新登入');
-      return;
-    }
-    const res = await fetch(`/api/reports/report-card/${enrollmentId}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+  // 下載成績 EXCEL：對應這輪反映事項 1「提供下載成績功能EXCEL格式」。直接用畫面上
+  // 已經查好、正在顯示的資料組成 Excel，不用另外再查一次資料庫（也保證下載出來的
+  // 數字跟畫面上看到的一致）。
+  function handleDownloadExcel() {
+    if (!classId || enrollments.length === 0) return;
+    downloadClassScoreExcel({
+      className: className || '班級',
+      academicYear: academicYear ?? '',
+      term: term ?? '',
+      viewMode,
+      subjects,
+      examTypes: visibleExamTypes,
+      students: enrollments.map((e) => ({ enrollment_id: e.id, seat_no: e.seat_no, name: e.name })),
+      subjectScores: subjectData,
+      attendanceAdjustments,
+      classRank,
+      gradeRank,
     });
-    if (!res.ok) {
-      // 原本只顯示「產生成績單失敗」，讓人以為整個功能壞了；其實最常見的原因是
-      // 期中考／期末考／平時分還沒有三項都鎖定（見 lib/reportCard.ts），這裡把 API
-      // 回傳的 reason 直接顯示出來，比較清楚要先完成哪一步。
-      let reason = '';
-      try {
-        const body = await res.json();
-        reason = body?.reason ? `\n原因：${body.reason}` : '';
-      } catch {
-        // 回應不是 JSON，忽略，用預設訊息即可
-      }
-      alert('目前還無法產出正式成績單。' + (reason || '請確認期中考／期末考／平時分是否都已鎖定。'));
+  }
+
+  async function handlePrintReportCard(enrollmentId: string) {
+    // 【2026-08-19】同一個「window.open 被瀏覽器靜靜擋掉」的問題（見上面
+    // handleBatchPrintClass 的說明），這裡也一併修正：點擊當下先同步開好空白分頁。
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    const blob = await res.blob();
-    window.open(URL.createObjectURL(blob), '_blank');
+    printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生成績單 PDF，請稍候…</p>');
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        printWindow.close();
+        alert('請重新登入');
+        return;
+      }
+      const res = await fetch(`/api/reports/report-card/${enrollmentId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        printWindow.close();
+        // 原本只顯示「產生成績單失敗」，讓人以為整個功能壞了；其實最常見的原因是
+        // 期中考／期末考／平時分還沒有任一項鎖定（見 lib/reportCard.ts），這裡把 API
+        // 回傳的 reason 直接顯示出來，比較清楚要先完成哪一步。
+        let reason = '';
+        try {
+          const body = await res.json();
+          reason = body?.reason ? `\n原因：${body.reason}` : '';
+        } catch {
+          // 回應不是 JSON，忽略，用預設訊息即可
+        }
+        alert(`目前還無法產出正式成績單。狀態碼 ${res.status}` + (reason || '\n請確認期中考／期末考／平時分是否已鎖定。'));
+        return;
+      }
+      const blob = await res.blob();
+      printWindow.location.href = URL.createObjectURL(blob);
+    } catch (err: any) {
+      printWindow.close();
+      alert('列印成績單發生錯誤：' + (err?.message ?? String(err)));
+    }
   }
 
   // 批次列印「目前這個班」全班成績單（導師印自己班、管理員印目前選到的班都能用）。
   // 教務部門要一次印多班／全校，請到「成績相關設定及查詢」→「批次列印成績單（多班／全校）」分頁。
   async function handleBatchPrintClass(skipIncomplete = false) {
     if (!classId) return;
-    const { data: sessionData } = await supabase.auth.getSession();
-    const accessToken = sessionData.session?.access_token;
-    if (!accessToken) {
-      alert('請重新登入');
+    // 【2026-08-19 修正】「按了沒反應」的根因：window.open() 原本寫在 fetch 之後
+    // （await 過網路請求才呼叫），瀏覽器的彈出視窗封鎖機制只認「使用者點擊當下、
+    // 還沒有任何 await 的那個瞬間」算是「使用者主動開新分頁」，一旦中間經過
+    // await（不管多快），瀏覽器就會把之後的 window.open() 當成「網頁自己偷開視窗」
+    // 直接靜靜擋掉——不會跳出任何錯誤訊息或提示，畫面上就是「按了沒反應」，
+    // 這正好對應這次反映的狀況。改成「點擊當下先同步開一個空白分頁（此時瀏覽器
+        // 還認得是使用者剛點的），等 PDF 真的產生好了，再把那個已經開好的分頁導向
+    // 到 PDF 內容」，就不會被封鎖。另外原本完全沒有 try/catch，fetch 本身如果
+    // 失敗（網路問題）也會是「靜靜地什麼都不顯示」，這裡一併補上。
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    const url = `/api/reports/report-card/batch${skipIncomplete ? '?skipIncomplete=true' : ''}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ classIds: [classId] }),
-    });
+    printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生成績單 PDF，請稍候…</p>');
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        printWindow.close();
+        alert('請重新登入');
+        return;
+      }
+      const url = `/api/reports/report-card/batch${skipIncomplete ? '?skipIncomplete=true' : ''}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ classIds: [classId] }),
+      });
 
-    if (res.status === 409) {
-      const body = await res.json();
-      const names = (body.notReady ?? []).map((s: any) => `${s.studentName}(${s.reason})`).join('、');
-      const confirmSkip = confirm(`以下學生尚未能產出成績單：\n${names}\n\n要跳過這些人、先列印其餘已完成的嗎？`);
-      if (confirmSkip) return handleBatchPrintClass(true);
-      return;
+      if (res.status === 409) {
+        printWindow.close();
+        const body = await res.json();
+        const names = (body.notReady ?? []).map((s: any) => `${s.studentName}(${s.reason})`).join('、');
+        const confirmSkip = confirm(`以下學生尚未能產出成績單：\n${names}\n\n要跳過這些人、先列印其餘已完成的嗎？`);
+        if (confirmSkip) return handleBatchPrintClass(true);
+        return;
+      }
+
+      if (!res.ok) {
+        printWindow.close();
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = body?.error ? `（${body.error}）` : '';
+        } catch {
+          /* 回應不是 JSON 就不附細節，仍然顯示狀態碼 */
+        }
+        alert(`批次列印失敗，請稍後再試。狀態碼 ${res.status}${detail}`);
+        return;
+      }
+
+      const skipped = res.headers.get('X-Skipped-Students');
+      if (skipped) {
+        const list = JSON.parse(decodeURIComponent(skipped));
+        alert(`已跳過 ${list.length} 位尚未鎖定的學生：${list.map((s: any) => s.studentName).join('、')}`);
+      }
+
+      const blob = await res.blob();
+      printWindow.location.href = URL.createObjectURL(blob);
+    } catch (err: any) {
+      printWindow.close();
+      alert('批次列印發生錯誤：' + (err?.message ?? String(err)));
     }
-
-    if (!res.ok) {
-      alert('批次列印失敗，請稍後再試');
-      return;
-    }
-
-    const skipped = res.headers.get('X-Skipped-Students');
-    if (skipped) {
-      const list = JSON.parse(decodeURIComponent(skipped));
-      alert(`已跳過 ${list.length} 位尚未鎖定的學生：${list.map((s: any) => s.studentName).join('、')}`);
-    }
-
-    const blob = await res.blob();
-    window.open(URL.createObjectURL(blob), '_blank');
   }
 
   return (
@@ -399,9 +497,24 @@ export default function ClassSummaryPage() {
       <h1 style={{ fontSize: 16, marginBottom: 4 }}>{className || '班級'} 成績總表</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
         任課教師登入本頁時，只會看到自己授課科目的欄位；總分、排名、評語僅導師與管理員可見。
+        {subjects.some((s) => ATTENDANCE_SUBJECT_NAMES.includes(s)) && (
+          <>「全勤」／「出缺席」欄位是依真實出缺勤紀錄自動計算（全勤100分，曠課/遲到/事假/病假依「整體佔比與加扣分規則」倒扣），不需要老師手動輸入，滑鼠移到格子上可以看到說明。</>
+        )}
       </p>
 
       <style>{`@media print { .no-print { display: none !important; } }`}</style>
+
+      {enrollments.length > 0 && (
+        <button onClick={handleDownloadExcel} className="no-print" style={{ fontSize: 12, padding: '4px 12px', marginBottom: 12 }}>
+          📊 下載成績 Excel（{viewMode === 'all' ? '全部' : EXAM_TYPE_LABEL[viewMode]}）
+        </button>
+      )}
+
+      {rankLoadError && (
+        <p style={{ fontSize: 12, color: '#B3261E', background: '#FDECEA', border: '1px solid #f5c2c7', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
+          ⚠️ {rankLoadError}（總分/排名欄位這次會顯示空白，麻煩把這則錯誤訊息回報）
+        </p>
+      )}
 
       {isAdmin && classOptions.length > 0 && (
         <select
@@ -550,9 +663,16 @@ export default function ClassSummaryPage() {
                   <td style={{ padding: 6 }}>{en.name}</td>
                   {subjects.map((s) => {
                     const row = subjectData[en.id]?.[s];
+                    const isAttendanceSubject = ATTENDANCE_SUBJECT_NAMES.includes(s);
                     return visibleExamTypes.map((et, eti) => (
-                      <td key={s + et} style={{ padding: 6, textAlign: 'center', borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER }}>
-                        {row?.[EXAM_TYPE_FIELD[et]] ?? '—'}
+                      <td
+                        key={s + et}
+                        style={{ padding: 6, textAlign: 'center', borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER }}
+                        title={isAttendanceSubject ? '依真實出缺勤紀錄自動計算，不是老師手動輸入的分數（老師若有在此欄輸入分數，該分數不會被採用）' : undefined}
+                      >
+                        {isAttendanceSubject
+                          ? attendanceAdjustments[en.id] ?? '—'
+                          : row?.[EXAM_TYPE_FIELD[et]] ?? '—'}
                       </td>
                     ));
                   })}
@@ -582,9 +702,17 @@ export default function ClassSummaryPage() {
                   {canSeeRemarks && <td style={{ padding: 6 }}>{remarks[en.id] ?? ''}</td>}
                   {canSeeRemarks && (
                     <td style={{ padding: 6, textAlign: 'center' }}>
-                      <button onClick={() => handlePrintReportCard(en.id)} className="no-print" style={{ fontSize: 12, padding: '2px 8px' }}>
-                        列印
-                      </button>
+                      {viewMode === 'all' ? (
+                        <button onClick={() => handlePrintReportCard(en.id)} className="no-print" style={{ fontSize: 12, padding: '2px 8px' }}>
+                          列印
+                        </button>
+                      ) : (
+                        // 期中/期末/平時單一階段畫面不提供「個人成績單」列印——正式成績單同時
+                        // 呈現上下學期/全學年學業平均與排名，在只看單一階段時印出來意義不大、
+                        // 也容易讓人誤會是正式名次；這幾個階段的個人資料改用上方「下載成績
+                        // Excel」取得。要印正式成績單請切換到「全部」分頁。
+                        <span style={{ fontSize: 12, color: '#ccc' }}>—</span>
+                      )}
                     </td>
                   )}
                 </tr>

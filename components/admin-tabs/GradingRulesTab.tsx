@@ -20,6 +20,11 @@ type ConductDefault = { item: string; points: number };
 export default function GradingRulesAdminPage() {
   const perms = useDepartmentPermissions();
   const canWriteDirect = perms.isSystemAdmin || isDepartmentLead(perms.myDepartments, 'academic');
+  // 出缺勤/獎懲加扣分規則（conduct_point_defaults）的寫入權限跟上面「期中/期末/平時
+  // 整體佔比」不是同一組——資料庫政策（sql/22department_policy_rewrite_complete.sql）
+  // 是系統管理員或「訓導部門主管」才能寫，不是教務部門主管，這裡分開判斷，避免只教務
+  // 主管誤以為自己能存卻被資料庫悄悄擋下（RLS 更新 0 筆不會報錯）。
+  const canWriteConductDefaults = perms.isSystemAdmin || isDepartmentLead(perms.myDepartments, 'discipline');
 
   const [rules, setRules] = useState<GradingRule[]>([]);
   const [ruleForm, setRuleForm] = useState({ academic_year: new Date().getFullYear(), term: '上學期', midterm_weight: 0.35, final_weight: 0.35, daily_weight: 0.3 });
@@ -27,8 +32,16 @@ export default function GradingRulesAdminPage() {
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   const [adjForm, setAdjForm] = useState({ academic_year: new Date().getFullYear(), term: '上學期', name: '', points: '' });
   const [conductDefaults, setConductDefaults] = useState<ConductDefault[]>([]);
+  // 出缺勤/獎懲預設加扣分參考值：改成可以直接編輯（見下方 handleSaveConductDefault），
+  // editedConductPoints 存「使用者正在編輯、還沒存檔」的暫存值，用 item 當 key。
+  const [editedConductPoints, setEditedConductPoints] = useState<Record<string, string>>({});
+  const [savingConductItem, setSavingConductItem] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedAdj, setSelectedAdj] = useState<Set<string>>(new Set());
+  // 目前生效中的「全勤／出缺席」科目比重（＝出缺席%），依年級各自可能不同，
+  // 這裡只是唯讀顯示、方便對照，真正的編輯入口仍在「科目與比重設定」頁
+  // （因為比重是依年級各自設定，這裡沒有年級篩選器，不適合直接編輯）。
+  const [attendanceWeights, setAttendanceWeights] = useState<{ academic_year: number; term: string; grade_level: string; subject: string; weight: number }[]>([]);
 
   function toggleSelectAdj(id: string) {
     setSelectedAdj((prev) => {
@@ -74,8 +87,38 @@ export default function GradingRulesAdminPage() {
     setAdjustments((a ?? []) as Adjustment[]);
     const { data: c, error: cErr } = await supabase.from('conduct_point_defaults').select('*').order('item');
     setConductDefaults((c ?? []) as ConductDefault[]);
-    const firstError = rErr ?? aErr ?? cErr;
+    setEditedConductPoints({});
+    const { data: cw, error: cwErr } = await supabase
+      .from('curriculum')
+      .select('academic_year, term, grade_level, subject, weight')
+      .in('subject', ['全勤', '出缺席'])
+      .order('academic_year', { ascending: false })
+      .order('grade_level');
+    setAttendanceWeights((cw ?? []) as any[]);
+    const firstError = rErr ?? aErr ?? cErr ?? cwErr;
     setLoadError(firstError ? '讀取整體佔比與加扣分規則失敗：' + firstError.message : null);
+  }
+
+  // 出缺勤/獎懲預設加扣分參考值：儲存單一項目的分數（例如「曠課」改成 -0.15）。
+  // 這張表從建立以來（sql/7conduct_defaults.sql）就沒有任何畫面可以編輯，只能直接
+  // 改資料庫；sql/46wire_attendance_and_discipline_adjustments.sql 已經把這張表接上
+  // 「總分自動加扣分」，所以這裡改成真的可以存檔，不然管理者永遠找不到地方調整。
+  async function handleSaveConductDefault(item: string) {
+    const raw = editedConductPoints[item];
+    if (raw === undefined) return;
+    const points = Number(raw);
+    if (Number.isNaN(points)) {
+      alert('請輸入數字（扣分請輸入負數，例如曠課可能是 -3.33，代表換算成3%比重後影響總分-0.1）');
+      return;
+    }
+    setSavingConductItem(item);
+    const { error } = await supabase.from('conduct_point_defaults').update({ points }).eq('item', item);
+    setSavingConductItem(null);
+    if (error) {
+      alert('儲存失敗：' + error.message);
+      return;
+    }
+    load();
   }
 
   useEffect(() => {
@@ -353,20 +396,94 @@ export default function GradingRulesAdminPage() {
       </section>
 
       <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 14, marginBottom: 8 }}>出缺勤/獎懲預設加扣分參考值</h2>
+        <h2 style={{ fontSize: 14, marginBottom: 8 }}>出缺勤/獎懲加扣分規則（曠課、遲到、事假…等每一項的扣分／加分點數）</h2>
         <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
-          僅供參考記錄，目前不會自動套用到總成績（出缺勤暫不影響總成績，見規格文件）。導師登記獎懲時可以參考這裡的預設分數。
+          這裡的數字會自動套用到總成績：學生只要有曠課／遲到／事假／病假等紀錄，「出缺席」分數＝
+          100 加上下面對應項目的點數（負數＝倒扣）加總；獎懲事件（嘉獎/小功/大功/警告/小過/大過）的
+          點數則加減到操行成績。改這裡的數字，之後新產生的成績單/總分排名會立刻套用新的點數；
+          已經發生的舊出缺勤/獎懲紀錄，各自記錄「當時」的點數，不會被追溯修改。
         </p>
+        {!canWriteConductDefaults && (
+          <p style={{ fontSize: 12, color: '#A36A00', background: '#FFF8E1', border: '1px solid #f0d98a', borderRadius: 8, padding: '8px 12px', marginBottom: 8 }}>
+            這組數字只有系統管理員或訓導部門主管能修改，您目前的帳號沒有寫入權限（下面的輸入框會唯讀）。
+          </p>
+        )}
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: 6 }}>項目</th>
+              <th style={{ textAlign: 'right', padding: 6 }}>分數（負數＝扣分）</th>
+              <th style={{ padding: 6 }}></th>
+            </tr>
+          </thead>
           <tbody>
-            {conductDefaults.map((c) => (
-              <tr key={c.item} style={{ borderTop: '1px solid #eee' }}>
-                <td style={{ padding: 6 }}>{c.item}</td>
-                <td style={{ padding: 6, textAlign: 'right' }}>{c.points}</td>
-              </tr>
-            ))}
+            {conductDefaults.map((c) => {
+              const edited = editedConductPoints[c.item] ?? String(c.points);
+              const dirty = editedConductPoints[c.item] !== undefined && Number(editedConductPoints[c.item]) !== c.points;
+              return (
+                <tr key={c.item} style={{ borderTop: '1px solid #eee' }}>
+                  <td style={{ padding: 6 }}>{c.item}</td>
+                  <td style={{ padding: 6, textAlign: 'right' }}>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={edited}
+                      disabled={!canWriteConductDefaults}
+                      onChange={(e) => setEditedConductPoints({ ...editedConductPoints, [c.item]: e.target.value })}
+                      style={{ width: 90, padding: 4, textAlign: 'right' }}
+                    />
+                  </td>
+                  <td style={{ padding: 6, textAlign: 'center' }}>
+                    <button
+                      disabled={!canWriteConductDefaults || !dirty || savingConductItem === c.item}
+                      onClick={() => handleSaveConductDefault(c.item)}
+                      style={{ fontSize: 12, padding: '4px 10px' }}
+                    >
+                      {savingConductItem === c.item ? '儲存中…' : '儲存'}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
+      </section>
+
+      <section style={{ marginTop: 32 }}>
+        <h2 style={{ fontSize: 14, marginBottom: 8 }}>出缺席佔比（%）目前設定值</h2>
+        <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
+          「全勤」的加分比重（例如 3% → 全勤學生出缺席分數多 3 分）不是在這一頁設定，
+          而是跟其他科目一樣，在「科目與比重設定」頁新增/編輯一個科目名稱為「全勤」或
+          「出缺席」的列（依年級各自設定）。這裡列出目前資料庫裡已經有的設定值方便對照；
+          要新增或修改，請到「科目與比重設定」頁操作。
+        </p>
+        {attendanceWeights.length === 0 ? (
+          <p style={{ fontSize: 13, color: '#A36A2D' }}>
+            目前資料庫裡查不到任何科目名稱為「全勤」或「出缺席」的比重設定──這代表對應年級的學生
+            出缺席不會自動加分（曠課/事假等倒扣仍然照上面的點數計算，只是「全勤加分」那部分是 0）。
+          </p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: 6 }}>學年/學期</th>
+                <th style={{ textAlign: 'left', padding: 6 }}>年級</th>
+                <th style={{ textAlign: 'left', padding: 6 }}>科目名稱</th>
+                <th style={{ textAlign: 'right', padding: 6 }}>比重（換算成加分％）</th>
+              </tr>
+            </thead>
+            <tbody>
+              {attendanceWeights.map((w, i) => (
+                <tr key={i} style={{ borderTop: '1px solid #eee' }}>
+                  <td style={{ padding: 6 }}>{w.academic_year} {w.term}</td>
+                  <td style={{ padding: 6 }}>{w.grade_level}</td>
+                  <td style={{ padding: 6 }}>{w.subject}</td>
+                  <td style={{ padding: 6, textAlign: 'right' }}>{(w.weight * 100).toFixed(1)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
     </div>
   );

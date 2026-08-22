@@ -25,6 +25,7 @@ import {
 } from '@/lib/teacherLetters';
 import { getTeacherLetterSettings, saveTeacherLetterSettings, TeacherLetterSettings } from '@/lib/teacherLetterSettings';
 import { buildCertificateContent, buildAppointmentContent } from '@/lib/teacherLetterContent';
+import { supabase } from '@/lib/supabaseClient';
 
 // 開發人員區「聘書」：把「0808.xlsm」（原本用Excel VBA巨集手動列印）的邏輯搬到網頁上，
 // 「歷年教師資料」「自聘教師資料」「當年教師資料」3張資料表改成網頁管理，提供「下載範本」
@@ -495,11 +496,27 @@ function PrintSection({ userId }: { userId: string | null }) {
       alert('請選擇要列印的教師');
       return;
     }
+    // 【2026-08-19】PDF 改成呼叫伺服器端 API（見 app/api/reports/teacher-letter/route.tsx
+    // 的說明：原本在瀏覽器端直接產生 PDF，中文字型在瀏覽器環境讀不到，是「Unknown font
+    // format」的根因）。這裡也順便把「強制下載」改成「開新分頁預覽（可以直接列印）」，
+    // 跟成績單的列印功能一致；window.open 一樣要在還沒有任何 await 之前先同步呼叫，
+    // 不然會被瀏覽器的彈出視窗封鎖機制擋掉又沒有任何提示（同一個坑，見成績單那邊的
+    // 說明）。docx 檔案本來就是「下載」而不是「預覽列印」的性質，維持原本下載的做法。
+    const printWindow = format === 'pdf' ? window.open('', '_blank') : null;
+    if (format === 'pdf' && !printWindow) {
+      alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
+      return;
+    }
+    if (printWindow) {
+      printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生 PDF，請稍候…</p>');
+    }
     setGenerating(format);
     try {
       const calcDate = new Date();
       let fileBase = '';
       let blob: Blob;
+      let pdfKind: 'certificate' | 'appointment' | null = null;
+      let pdfContent: any = null;
 
       if (category === '在職證明') {
         const row = certOptions.find((r) => r.id === selectedCertId);
@@ -507,9 +524,8 @@ function PrintSection({ userId }: { userId: string | null }) {
         const content = buildCertificateContent(row, settings, calcDate);
         fileBase = `在職證明_${row.name}`;
         if (format === 'pdf') {
-          const { pdf } = await import('@react-pdf/renderer');
-          const { CertificateDocument } = await import('@/lib/TeacherLetterPdfDocuments');
-          blob = await pdf(<CertificateDocument data={content} />).toBlob();
+          pdfKind = 'certificate';
+          pdfContent = content;
         } else {
           const { buildCertificateDocxBlob } = await import('@/lib/TeacherLetterDocx');
           blob = await buildCertificateDocxBlob(content);
@@ -523,22 +539,48 @@ function PrintSection({ userId }: { userId: string | null }) {
         const content = buildAppointmentContent(row, settings, calcDate);
         fileBase = `${category}_${row.name}`;
         if (format === 'pdf') {
-          const { pdf } = await import('@react-pdf/renderer');
-          const { AppointmentDocument } = await import('@/lib/TeacherLetterPdfDocuments');
-          blob = await pdf(<AppointmentDocument data={content} />).toBlob();
+          pdfKind = 'appointment';
+          pdfContent = content;
         } else {
           const { buildAppointmentDocxBlob } = await import('@/lib/TeacherLetterDocx');
           blob = await buildAppointmentDocxBlob(content);
         }
       }
 
-      const url = URL.createObjectURL(blob);
+      if (format === 'pdf' && pdfKind) {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+        if (!accessToken) {
+          printWindow?.close();
+          alert('請重新登入');
+          return;
+        }
+        const res = await fetch('/api/reports/teacher-letter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+          body: JSON.stringify({ kind: pdfKind, content: pdfContent, fileBase }),
+        });
+        if (!res.ok) {
+          printWindow?.close();
+          const body = await res.json().catch(() => ({}));
+          alert(`產生列印檔失敗，狀態碼 ${res.status}${body.error ? '：' + body.error : ''}`);
+          return;
+        }
+        blob = await res.blob();
+        if (printWindow) {
+          printWindow.location.href = URL.createObjectURL(blob);
+        }
+        return;
+      }
+
+      const url = URL.createObjectURL(blob!);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${fileBase}.${format === 'pdf' ? 'pdf' : 'docx'}`;
+      a.download = `${fileBase}.docx`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err: any) {
+      printWindow?.close();
       alert('產生列印檔失敗：' + err.message);
     } finally {
       setGenerating('');

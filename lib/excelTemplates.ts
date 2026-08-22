@@ -8,8 +8,28 @@ import { SPECIFIC_GRADE_LEVELS } from './gradeMapping';
 // 確保它只會在瀏覽器裡執行，不會在建置(build)或伺服器端渲染時被載入。
 let _xlsx: typeof XLSXNS | null = null;
 async function loadXLSX(): Promise<typeof XLSXNS> {
-  if (!_xlsx) _xlsx = await import('xlsx');
-  return _xlsx;
+  if (_xlsx) return _xlsx;
+  try {
+    _xlsx = await import('xlsx');
+    return _xlsx;
+  } catch (err: any) {
+    // ChunkLoadError：瀏覽器要載入 'xlsx' 這個套件對應的 JS 檔案（webpack chunk）
+    // 時失敗，最常見的原因是「網站剛部署過新版本，瀏覽器頁面還停留在舊版本」——
+    // 新版本的 chunk 檔名（含 hash）跟瀏覽器記憶體裡的舊版本頁面所預期的不一樣，
+    // 導致要下載的檔案在伺服器上已經不存在了。這種情況通常重新整理網頁（讀取最新
+    // 版本的頁面）就能解決，不是每次都要清瀏覽器快取那麼麻煩，這裡幫使用者自動
+    // 確認要不要重新整理，而不是讓他們看到一串英文錯誤訊息不知道要做什麼。
+    const isChunkError = err?.name === 'ChunkLoadError' || /loading chunk/i.test(String(err?.message ?? ''));
+    if (isChunkError && typeof window !== 'undefined') {
+      const shouldReload = window.confirm(
+        '下載功能需要的元件載入失敗，這通常是因為網站剛更新過版本、頁面還停留在舊版本造成的。\n\n是否要重新整理網頁後再試一次？'
+      );
+      if (shouldReload) {
+        window.location.reload();
+      }
+    }
+    throw err;
+  }
 }
 
 function aoa(XLSX: typeof XLSXNS, rows: any[][]): XLSXNS.WorkSheet {
@@ -528,3 +548,199 @@ export async function downloadDeveloperAllTemplate() {
   sheets.forEach(({ name, ws }) => XLSX.utils.book_append_sheet(wb, ws, name));
   download(XLSX, wb, '開發人員區_全部表格_範本.xlsx');
 }
+
+/* ------------------------------------------------------------------ */
+/* 13. 班級成績總表：下載成績 EXCEL 格式                                  */
+/* ------------------------------------------------------------------ */
+// 對應這輪反映事項 1：「期中」「期末」「平時」目前只能全班列印成績總表，沒有下載
+// EXCEL 的功能——這裡直接把【班級成績總表】頁（ClassSummaryTab.tsx）已經在畫面上
+// 顯示的資料（不用另外查資料庫）整理成一份 Excel，第一列科目名稱、第二列
+// 期中/期末/平時/總分/平均/班排/年排的子欄位，每個學生一列，欄位順序、名稱都
+// 跟畫面上的表格一致，方便對照，也方便老師拿去用 Excel 自己加總/篩選。
+export type ClassScoreExcelParams = {
+  className: string;
+  academicYear: number | string;
+  term: string;
+  viewMode: 'all' | '期中考' | '期末考' | '平時分';
+  subjects: string[]; // 已經依比重排序、篩掉比重=0 的科目清單
+  examTypes: ('期中考' | '期末考' | '平時分')[]; // viewMode==='all' 時是三種都有，否則只有一種
+  students: { enrollment_id: string; seat_no: number; name: string }[];
+  subjectScores: Record<string, Record<string, { midterm: number | null; final: number | null; daily: number | null }>>; // enrollment_id -> subject -> {期中/期末/平時}
+  attendanceAdjustments: Record<string, number>; // enrollment_id -> 出缺席自動計算分數（取代「全勤」「出缺席」科目手動輸入值）
+  classRank: Record<
+    string,
+    {
+      total_score?: number | null;
+      class_rank?: number | null;
+      midterm_total?: number | null;
+      midterm_average?: number | null;
+      midterm_class_rank?: number | null;
+      final_total?: number | null;
+      final_average?: number | null;
+      final_class_rank?: number | null;
+      daily_total?: number | null;
+      daily_average?: number | null;
+      daily_class_rank?: number | null;
+    }
+  >;
+  gradeRank: Record<string, { grade_rank?: number | null; midterm_grade_rank?: number | null; final_grade_rank?: number | null; daily_grade_rank?: number | null }>;
+};
+
+const EXAM_TYPE_SHORT: Record<'期中考' | '期末考' | '平時分', string> = { 期中考: '期中', 期末考: '期末', 平時分: '平時' };
+const EXAM_TYPE_FIELD_KEY: Record<'期中考' | '期末考' | '平時分', 'midterm' | 'final' | 'daily'> = { 期中考: 'midterm', 期末考: 'final', 平時分: 'daily' };
+const ATTENDANCE_SUBJECT_NAMES = ['全勤', '出缺席'];
+
+export async function downloadClassScoreExcel(p: ClassScoreExcelParams) {
+  const XLSX = await loadXLSX();
+
+  const header1: any[] = ['座號', '姓名'];
+  const header2: any[] = ['', ''];
+  p.subjects.forEach((s) => {
+    p.examTypes.forEach((et, i) => {
+      header1.push(i === 0 ? s : '');
+      header2.push(EXAM_TYPE_SHORT[et]);
+    });
+  });
+  p.examTypes.forEach((et) => {
+    header1.push(EXAM_TYPE_SHORT[et], '', '', '');
+    header2.push('總分', '平均(*比重)', '班排名', '年級排名');
+  });
+  if (p.viewMode === 'all') {
+    header1.push('全學期', '', '');
+    header2.push('總分', '班排名', '年級排名');
+  }
+
+  const rows: any[][] = [header1, header2];
+  p.students.forEach((stu) => {
+    const row: any[] = [stu.seat_no, stu.name];
+    p.subjects.forEach((s) => {
+      const isAttendance = ATTENDANCE_SUBJECT_NAMES.includes(s);
+      p.examTypes.forEach((et) => {
+        if (isAttendance) {
+          row.push(p.attendanceAdjustments[stu.enrollment_id] ?? '');
+        } else {
+          const v = p.subjectScores[stu.enrollment_id]?.[s]?.[EXAM_TYPE_FIELD_KEY[et]];
+          row.push(v ?? '');
+        }
+      });
+    });
+    const cr = p.classRank[stu.enrollment_id] ?? {};
+    const gr = p.gradeRank[stu.enrollment_id] ?? {};
+    p.examTypes.forEach((et) => {
+      if (et === '期中考') row.push(cr.midterm_total ?? '', cr.midterm_average ?? '', cr.midterm_class_rank ?? '', gr.midterm_grade_rank ?? '');
+      else if (et === '期末考') row.push(cr.final_total ?? '', cr.final_average ?? '', cr.final_class_rank ?? '', gr.final_grade_rank ?? '');
+      else row.push(cr.daily_total ?? '', cr.daily_average ?? '', cr.daily_class_rank ?? '', gr.daily_grade_rank ?? '');
+    });
+    if (p.viewMode === 'all') {
+      row.push(cr.total_score ?? '', cr.class_rank ?? '', gr.grade_rank ?? '');
+    }
+    rows.push(row);
+  });
+
+  const ws = aoa(XLSX, rows);
+  // 科目名稱跨欄合併（每個科目底下有幾個考試類型欄位，就合併幾欄）
+  const merges: XLSXNS.Range[] = [];
+  let col = 2;
+  p.subjects.forEach(() => {
+    if (p.examTypes.length > 1) merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + p.examTypes.length - 1 } });
+    col += p.examTypes.length;
+  });
+  p.examTypes.forEach(() => {
+    merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + 3 } });
+    col += 4;
+  });
+  if (p.viewMode === 'all') merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + 2 } });
+  (ws as any)['!merges'] = merges;
+
+  const wb = XLSX.utils.book_new();
+  const sheetLabel = p.viewMode === 'all' ? '全部' : EXAM_TYPE_SHORT[p.viewMode as '期中考' | '期末考' | '平時分'];
+  XLSX.utils.book_append_sheet(wb, ws, '成績總表');
+  download(XLSX, wb, `${p.className}_${p.academicYear}${p.term}_${sheetLabel}成績.xlsx`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 14. 批次下載多班／全校成績 EXCEL（一班一個分頁）                        */
+/* ------------------------------------------------------------------ */
+// 對應反映事項「增加批次列印各班成績表(總分、期中、期末、平時)，現在只能一個班
+// 一個班按」——重用上面 downloadClassScoreExcel 同一套組表邏輯，差別是這裡一次
+// 接收多個班級的資料，每個班級各自變成活頁簿裡的一個分頁，一次下載一個檔案。
+export async function downloadMultiClassScoreExcel(classes: (ClassScoreExcelParams & { sheetName: string })[]) {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+
+  const usedNames = new Set<string>();
+  for (const p of classes) {
+    const header1: any[] = ['座號', '姓名'];
+    const header2: any[] = ['', ''];
+    p.subjects.forEach((s) => {
+      p.examTypes.forEach((et, i) => {
+        header1.push(i === 0 ? s : '');
+        header2.push(EXAM_TYPE_SHORT[et]);
+      });
+    });
+    p.examTypes.forEach((et) => {
+      header1.push(EXAM_TYPE_SHORT[et], '', '', '');
+      header2.push('總分', '平均(*比重)', '班排名', '年級排名');
+    });
+    if (p.viewMode === 'all') {
+      header1.push('全學期', '', '');
+      header2.push('總分', '班排名', '年級排名');
+    }
+
+    const rows: any[][] = [header1, header2];
+    p.students.forEach((stu) => {
+      const row: any[] = [stu.seat_no, stu.name];
+      p.subjects.forEach((s) => {
+        const isAttendance = ATTENDANCE_SUBJECT_NAMES.includes(s);
+        p.examTypes.forEach((et) => {
+          if (isAttendance) {
+            row.push(p.attendanceAdjustments[stu.enrollment_id] ?? '');
+          } else {
+            const v = p.subjectScores[stu.enrollment_id]?.[s]?.[EXAM_TYPE_FIELD_KEY[et]];
+            row.push(v ?? '');
+          }
+        });
+      });
+      const cr = p.classRank[stu.enrollment_id] ?? {};
+      const gr = p.gradeRank[stu.enrollment_id] ?? {};
+      p.examTypes.forEach((et) => {
+        if (et === '期中考') row.push(cr.midterm_total ?? '', cr.midterm_average ?? '', cr.midterm_class_rank ?? '', gr.midterm_grade_rank ?? '');
+        else if (et === '期末考') row.push(cr.final_total ?? '', cr.final_average ?? '', cr.final_class_rank ?? '', gr.final_grade_rank ?? '');
+        else row.push(cr.daily_total ?? '', cr.daily_average ?? '', cr.daily_class_rank ?? '', gr.daily_grade_rank ?? '');
+      });
+      if (p.viewMode === 'all') {
+        row.push(cr.total_score ?? '', cr.class_rank ?? '', gr.grade_rank ?? '');
+      }
+      rows.push(row);
+    });
+
+    const ws = aoa(XLSX, rows);
+    const merges: XLSXNS.Range[] = [];
+    let col = 2;
+    p.subjects.forEach(() => {
+      if (p.examTypes.length > 1) merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + p.examTypes.length - 1 } });
+      col += p.examTypes.length;
+    });
+    p.examTypes.forEach(() => {
+      merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + 3 } });
+      col += 4;
+    });
+    if (p.viewMode === 'all') merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + 2 } });
+    (ws as any)['!merges'] = merges;
+
+    // Excel 分頁名稱不能超過31字元、不能重複、不能含特殊符號，這裡簡單處理一下。
+    let name = p.sheetName.replace(/[\\/*?:[\]]/g, '').slice(0, 31) || 'Sheet';
+    let dedupeName = name;
+    let n = 2;
+    while (usedNames.has(dedupeName)) {
+      dedupeName = `${name.slice(0, 28)}(${n})`;
+      n++;
+    }
+    usedNames.add(dedupeName);
+    XLSX.utils.book_append_sheet(wb, ws, dedupeName);
+  }
+
+  const label = classes.length === 1 ? classes[0].sheetName : `${classes.length}個班級`;
+  download(XLSX, wb, `批次成績_${label}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
