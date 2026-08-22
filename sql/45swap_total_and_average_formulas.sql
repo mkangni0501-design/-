@@ -59,3 +59,5 @@ group by ss.enrollment_id;
 -- class_rankings / grade_rankings / class_rankings_for_class / grade_rankings_for_class
 -- 都是直接把 student_examtype_totals 的欄位原樣帶出去（沒有另外重新計算），所以這幾個
 -- view／函式不用跟著改，{type}_total／{type}_average 的意義已經自動對調過來了。
+
+NOTIFY pgrst, 'reload schema';

@@ -434,3 +434,11 @@ create policy homeroom_and_admin_only_conduct_scores on conduct_scores
 -- 其他班級資料（每個都只回傳呼叫者指定的那個 enrollment_id 自己的名次/是否就緒，
 -- 不是整班/整校名單），但正式使用情境只有 lib/reportCard.ts 用 supabaseAdmin 呼叫，
 -- 其他地方不需要用到這三個函式。
+
+-- 【重要】新增資料表（例如上面的 conduct_scores）後，Supabase 的 API 層（PostgREST）
+-- 有自己的一份「schema cache」，不會馬上知道多了一張新表——沒重新整理的話，前端會看到
+-- 「Could not find the table 'public.xxx' in the schema cache」這個錯誤，即使資料表
+-- 其實已經建立成功。這裡明確通知它重新整理一次，減少需要手動處理的機會；如果套用後
+-- 前端還是看到一樣的錯誤，麻煩到 Supabase 後台「Settings → API」手動點一次
+-- 「Reload schema」，或是等 1~2 分鐘它會自動刷新。
+NOTIFY pgrst, 'reload schema';
