@@ -156,11 +156,13 @@ export default function LoginPage() {
       }
     }
 
-    if (card === 'teacher') {
-      router.push(appUser.role === 'homeroom_teacher' ? '/attendance/weekly' : '/admin');
-    } else {
-      router.push('/admin');
-    }
+    // 【修正】原本導師（homeroom_teacher）登入後會被直接導去「一週出缺勤」這個單一
+    // 功能頁面，跳過教師權限的功能目錄；其他教師角色才會進 /admin 看到目錄。
+    // 這樣導師登入後看不到自己還有哪些功能可以用，要自己想辦法找路回目錄。
+    // 統一都先進 /admin——這裡本來就會依角色判斷（isAdminRole && viewMode==='admin'
+    // 才顯示六大分類的管理後台，否則顯示攤平的「教學作業」清單），所以不管是導師
+    // 還是一般教師，登入後都會直接看到自己權限範圍內的教師功能目錄。
+    router.push('/admin');
   }
 
   // ---------- 第一步：三張角色卡片 ----------

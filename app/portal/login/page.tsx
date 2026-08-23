@@ -30,22 +30,32 @@ function PortalLoginPageInner() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       const session = data.session;
+      // 從驗證信連結回來時，網址會帶著當初輸入的登入代碼，先幫忙帶入
+      const codeFromUrl = searchParams.get('code');
       if (!session) {
         setChecking(false);
-        // 從驗證信連結回來時，網址會帶著當初輸入的登入代碼，先幫忙帶入
-        const codeFromUrl = searchParams.get('code');
         if (codeFromUrl) setLoginCode(codeFromUrl);
         return;
       }
       setSignedInEmail(session.user.email ?? null);
 
-      // 已經綁定過，直接進入
-      const { data: existing } = await supabase.from('portal_accounts').select('id').eq('auth_user_id', session.user.id).maybeSingle();
-      if (existing) {
-        router.push('/portal');
-        return;
+      // 【修正】家長如果有兩個以上小孩，每個小孩各自有獨立的登入代碼，但綁定的是
+      // 同一個 auth_user_id（同一個信箱帳號）。原本這裡有兩個問題：
+      // 1. 用 .maybeSingle() 查「是否已經綁定過」，一旦這個信箱已經綁過兩個以上小孩
+      //    （對到兩筆以上 portal_accounts），.maybeSingle() 會回傳錯誤，導致誤判、
+      //    卡在奇怪的中間狀態，這就是家長反映「兩個以上小孩、建立完成後登入會出錯」
+      //    的根因。這裡改成用一般查詢＋看筆數，不管綁過幾個小孩都不會出錯。
+      // 2. 只要「綁過任何一個小孩」就直接導去 /portal，完全沒機會繼續綁第二個小孩——
+      //    只有當網址沒有帶新的登入代碼時，才代表這次只是單純回來查詢、可以直接進入；
+      //    如果網址帶著新的登入代碼（例如正在新增第二個小孩、點的是新的驗證信連結），
+      //    就算已經綁過其他小孩，也要留在這一頁讓他把新代碼繼續綁下去。
+      if (!codeFromUrl) {
+        const { data: existing } = await supabase.from('portal_accounts').select('id').eq('auth_user_id', session.user.id).limit(1);
+        if (existing && existing.length > 0) {
+          router.push('/portal');
+          return;
+        }
       }
-      const codeFromUrl = searchParams.get('code');
       if (codeFromUrl) setLoginCode(codeFromUrl);
       setChecking(false);
     })();

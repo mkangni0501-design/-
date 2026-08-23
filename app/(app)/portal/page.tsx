@@ -104,21 +104,37 @@ export default function ParentPortalPage() {
         .select('id, term, classes(academic_year, class_name, grade_level)')
         .eq('student_no', selected.student_no);
 
-      const results: TermRecord[] = [];
-      for (const e of enrollRows ?? []) {
-        const cls: any = (e as any).classes;
-        const { data: totalRow } = await supabase.from('student_total_scores').select('total_score').eq('enrollment_id', e.id).maybeSingle();
-        const { data: classRankRow } = await supabase
+      // 【效能修正】原本這裡對每一筆學期紀錄各自再發 3 個查詢（總分／班排名／年級排名），
+      // 一個小孩讀了幾個學期就是幾十個查詢，一個一個等下來，這就是家長反映「顯示小孩成績
+      // 速度非常慢」的根因。改成不管有幾個學期，總分／班排名／年級排名各自只用一個
+      // `.in('enrollment_id', [...])` 查詢把全部學期一次抓回來，再用 Map 兜回每個學期，
+      // 查詢次數從「學期數 × 3」固定變成 3 次，且三個查詢彼此獨立、用 Promise.all 同時發送。
+      const enrollIds = (enrollRows ?? []).map((e) => e.id);
+      // .in() 帶空陣列在某些情況下語意不明確，跟其他頁面一樣用不存在的假 id 墊底，
+      // 沒有任何學期資料時三個查詢都自然查不到東西、回傳空陣列。
+      const safeEnrollIds = enrollIds.length > 0 ? enrollIds : ['00000000-0000-0000-0000-000000000000'];
+      const [{ data: totalRows }, { data: classRankRows }, { data: gradeRankRows }] = await Promise.all([
+        supabase.from('student_total_scores').select('enrollment_id, total_score').in('enrollment_id', safeEnrollIds),
+        supabase
           .from('class_rankings')
-          .select('class_rank, midterm_total, midterm_class_rank, final_total, final_class_rank, daily_total, daily_class_rank')
-          .eq('enrollment_id', e.id)
-          .maybeSingle();
-        const { data: gradeRankRow } = await supabase
+          .select('enrollment_id, class_rank, midterm_total, midterm_class_rank, final_total, final_class_rank, daily_total, daily_class_rank')
+          .in('enrollment_id', safeEnrollIds),
+        supabase
           .from('grade_rankings')
-          .select('grade_rank, midterm_grade_rank, final_grade_rank, daily_grade_rank')
-          .eq('enrollment_id', e.id)
-          .maybeSingle();
-        results.push({
+          .select('enrollment_id, grade_rank, midterm_grade_rank, final_grade_rank, daily_grade_rank')
+          .in('enrollment_id', safeEnrollIds),
+      ]);
+
+      const totalMap = new Map((totalRows ?? []).map((r: any) => [r.enrollment_id, r]));
+      const classRankMap = new Map((classRankRows ?? []).map((r: any) => [r.enrollment_id, r]));
+      const gradeRankMap = new Map((gradeRankRows ?? []).map((r: any) => [r.enrollment_id, r]));
+
+      const results: TermRecord[] = (enrollRows ?? []).map((e) => {
+        const cls: any = (e as any).classes;
+        const totalRow: any = totalMap.get(e.id);
+        const classRankRow: any = classRankMap.get(e.id);
+        const gradeRankRow: any = gradeRankMap.get(e.id);
+        return {
           enrollment_id: e.id,
           academic_year: cls.academic_year,
           term: (e as any).term,
@@ -136,31 +152,27 @@ export default function ParentPortalPage() {
           daily_total: classRankRow?.daily_total ?? null,
           daily_class_rank: classRankRow?.daily_class_rank ?? null,
           daily_grade_rank: gradeRankRow?.daily_grade_rank ?? null,
-        });
-      }
+        };
+      });
       results.sort((a, b) => a.academic_year - b.academic_year || a.term.localeCompare(b.term));
       setRecords(results);
 
-      // 歷年出缺勤彙總（依狀態計數）+ 事假/病假/曠課累計節數（用來跟示警門檻比較）
-      const { data: attendanceRows } = await supabase.from('attendance').select('status').eq('student_no', selected.student_no);
+      // 出缺勤彙總／基本資料／監護人資料／修改申請紀錄彼此互不相依，原本依序一個一個等，
+      // 改成同時發送，一樣能減少總等待時間。
+      const [{ data: attendanceRows }, { data: studentRow }, { data: guardianRows }] = await Promise.all([
+        supabase.from('attendance').select('status').eq('student_no', selected.student_no),
+        supabase.from('students').select('address, phone').eq('student_no', selected.student_no).single(),
+        supabase.from('guardians').select('id, relation, name, phone').eq('student_no', selected.student_no),
+        loadEditRequests(selected.student_no),
+      ]);
+
       const counts: Record<string, number> = {};
       (attendanceRows ?? []).forEach((r: any) => (counts[r.status] = (counts[r.status] ?? 0) + 1));
       setAttendanceCounts(counts);
       setAbsencePeriods((counts['事假'] ?? 0) + (counts['病假'] ?? 0) + (counts['曠課'] ?? 0));
 
-      // 基本資料
-      const { data: studentRow } = await supabase.from('students').select('address, phone').eq('student_no', selected.student_no).single();
       setProfile((studentRow as any) ?? {});
-
-      // 監護人資料
-      const { data: guardianRows } = await supabase
-        .from('guardians')
-        .select('id, relation, name, phone')
-        .eq('student_no', selected.student_no);
       setGuardians((guardianRows ?? []) as Guardian[]);
-
-      // 修改申請紀錄
-      await loadEditRequests(selected.student_no);
     })();
   }, [selected]);
 
