@@ -1,20 +1,45 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { ReportCardData, ReportCardStyleConfig, TermBlock, DEFAULT_REPORT_CARD_STYLE } from '@/lib/ReportCardDocument';
+import path from 'path';
 
 const SCHOOL_NAME = '泰國清萊雲南會館附屬華雲學校'; // 依實際校名調整
+
+// 校徽／校園照片的內建預設值（真實圖檔，來自你提供的「外頁修正.xlsx」內嵌圖片，
+// 見 public/images/school-logo.png／campus-photo.jpg）。這裡組路徑用 'path' 這個
+// Node.js 專用模組沒問題——這個檔案（lib/reportCard.ts）本來就只給伺服器端的
+// API Route 用（因為要用 supabaseAdmin 的服務金鑰，本來就不能被瀏覽器端引用），
+// 不會被打包進瀏覽器的程式碼。管理員如果之後在【成績單樣式設定】頁自己上傳了
+// 圖片，會優先使用管理員上傳的，這裡的內建預設值只在管理員還沒上傳時當底。
+function defaultImagePaths() {
+  const dir = path.join(process.cwd(), 'public', 'images');
+  return { logoUrl: path.join(dir, 'school-logo.png'), campusPhotoUrl: path.join(dir, 'campus-photo.jpg') };
+}
 
 // 目前生效中的成績單樣式設定（顏色/字級/邊框/文字標籤，不含資料綁定，見
 // components/admin-tabs/ReportCardStyleTab.tsx／sql/46wire_attendance_and_discipline_adjustments.sql
 // 新增的 report_card_style 表）。管理員還沒上傳過自訂樣式時，回傳內建預設值。
 export async function getActiveReportCardStyle(): Promise<ReportCardStyleConfig> {
+  const defaults = defaultImagePaths();
   const { data } = await supabaseAdmin.from('report_card_style').select('config').eq('is_active', true).maybeSingle();
-  if (!data?.config) return DEFAULT_REPORT_CARD_STYLE;
+  if (!data?.config) {
+    return { ...DEFAULT_REPORT_CARD_STYLE, layout: { ...DEFAULT_REPORT_CARD_STYLE.layout, ...defaults } };
+  }
   // 用預設值當底，讓管理員上傳的設定檔即使漏了某些欄位也不會整份壞掉（只覆蓋有填的部分）。
+  const layoutFromDb = (data.config as any).layout ?? {};
   return {
     colors: { ...DEFAULT_REPORT_CARD_STYLE.colors, ...(data.config as any).colors },
     sizes: { ...DEFAULT_REPORT_CARD_STYLE.sizes, ...(data.config as any).sizes },
     labels: { ...DEFAULT_REPORT_CARD_STYLE.labels, ...(data.config as any).labels },
-    layout: { ...DEFAULT_REPORT_CARD_STYLE.layout, ...(data.config as any).layout },
+    layout: {
+      ...DEFAULT_REPORT_CARD_STYLE.layout,
+      ...defaults,
+      ...layoutFromDb,
+      // layoutFromDb 裡如果 logoUrl/campusPhotoUrl 是空字串（管理員上傳過又移除），
+      // 上面 ...layoutFromDb 展開後會蓋回空字串，這裡再補一次「空字串就用內建預設」，
+      // 確保「移除自訂圖片」之後會自動退回真的校徽/照片，不會變成完全沒有圖。
+      logoUrl: layoutFromDb.logoUrl || defaults.logoUrl,
+      campusPhotoUrl: layoutFromDb.campusPhotoUrl || defaults.campusPhotoUrl,
+    },
   };
 }
 

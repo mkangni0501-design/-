@@ -50,7 +50,18 @@ export function registerNotoSansTC() {
       { src: path.join(fontsDir, 'NotoSansThai-Bold.ttf'), fontWeight: 700 },
     ],
   });
-  // react-pdf 預設會嘗試連字（ligature）跟字距微調計算，中文字型不需要、反而偶爾會拖慢
-  // 排版速度，關掉沒有副作用。
-  Font.registerHyphenationCallback((word) => [word]);
+  // 【2026-08-23 修正】react-pdf 判斷「這段文字要在哪裡換行」，是先把整段文字用
+  // 空白切成一個一個「word」，再呼叫這支 callback 決定每個 word 內部還能不能繼續
+  // 切（能切的地方才是允許自動換行的地方）。原本這裡不管什麼文字都直接回傳
+  // `[word]`（整個 word 原封不動、不能再切）——英文這樣沒問題（word 本來就是靠
+  // 空白分隔的一個單字，不應該被從中間拆斷），但中文/泰文本來就沒有空白分隔
+  // 每個字/詞，一整段話（例如導師評語）會被當成「一個 word」，既然這個 word
+  // 又不能再切，整段話就完全沒有任何允許換行的地方，超出容器寬度時只會整段
+  // 溢出去，不會自動換行——這就是成績單「導師評語」文字太長時會整行超出頁面、
+  // 而不是自動換行變成好幾行的根因。
+  // 改成只有偵測到中文（含中文標點）或泰文字元時，才把這個 word 拆成一個一個
+  // 單獨的字（每個字之間都變成允許換行的地方，符合中文本來就能逐字換行的習慣）；
+  // 純英文/數字的 word 維持原本「整個不拆」，不會把英文單字從中間拆斷。
+  const CJK_OR_THAI = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3000-\u303f\uff00-\uffef\u0e00-\u0e7f]/;
+  Font.registerHyphenationCallback((word) => (CJK_OR_THAI.test(word) ? Array.from(word) : [word]));
 }

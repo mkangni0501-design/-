@@ -130,10 +130,19 @@ export type ReportCardStyleConfig = {
 
 export const DEFAULT_REPORT_CARD_STYLE: ReportCardStyleConfig = {
   colors: {
-    yearBoxBg: '#BDD7EE',
-    termBoxBg: '#A9D18E',
+    // 【2026-08-23 依「成績單正反.xlsx」實際儲存格底色/字色核對後修正】原本
+    // yearBoxBg是藍色、termBoxBg是另一種偏灰的綠色，但樣本檔案裡「2862學年度」
+    // 跟「下學期」這兩格其實是同一種鮮綠色（Excel色碼 92D050），不是一藍一綠、
+    // 也不是這裡原本用的偏灰綠——這裡兩個都改成 92D050。同一批也發現「99號」
+    // 那格（infoValueGreenBg）原本用的也是那個偏灰綠，樣本其實也是同一種92D050，
+    // 一併修正；另外樣本這幾格字的顏色也跟原本預設的黑色不同：「2862學年度下學期」
+    // 是藍字、「99號」是紅字、「高三／忠班」也是藍字，這幾個顏色會在下面 JSX
+    // 那幾個 <Text> 直接加 color，不放在這個共用色票裡（因為只有這幾個字要上色，
+    // 其他大部分文字還是黑色，放共用色票反而不好對應）。
+    yearBoxBg: '#92D050',
+    termBoxBg: '#92D050',
     infoValueBg: '#FFF2CC',
-    infoValueGreenBg: '#A9D18E',
+    infoValueGreenBg: '#92D050',
     sectionTitleBg: '#F2F2F2',
     cellLeftLabelBg: '#FFF9E6',
     borderColor: '#000000',
@@ -203,7 +212,11 @@ function buildStyles(config: ReportCardStyleConfig) {
       outer: { border: BORDER, flex: 1 },
 
       headerRow: { flexDirection: 'row', borderBottom: BORDER, alignItems: 'stretch' },
-      schoolName: { flex: 3, textAlign: 'center', fontSize: config.sizes.titleFontSize, fontWeight: 700, padding: 10, justifyContent: 'center' },
+      // 【2026-08-23 依「成績單正反.xlsx」欄寬逐格核對後修正】原本 schoolName:yearBox:
+      // termBox:titleBox 的比例是 3:1:1:1.4，跟樣本檔案實際合併儲存格的欄寬比例
+      // （3.75:1:0.83:1.25）對不太起來——尤其 termBox（下學期）樣本其實比 yearBox
+      // （學年度）窄一些，不是原本以為的一樣寬。這裡照樣本比例調整。
+      schoolName: { flex: 3.75, textAlign: 'center', fontSize: config.sizes.titleFontSize, fontWeight: 700, padding: 10, justifyContent: 'center' },
       yearBox: {
         flex: 1,
         textAlign: 'center',
@@ -215,7 +228,7 @@ function buildStyles(config: ReportCardStyleConfig) {
         justifyContent: 'center',
       },
       termBox: {
-        flex: 1,
+        flex: 0.83,
         textAlign: 'center',
         fontSize: config.sizes.headerFontSize,
         fontWeight: 700,
@@ -224,7 +237,7 @@ function buildStyles(config: ReportCardStyleConfig) {
         borderLeft: BORDER,
         justifyContent: 'center',
       },
-      titleBox: { flex: 1.4, textAlign: 'center', fontSize: config.sizes.titleFontSize, fontWeight: 700, padding: 10, borderLeft: BORDER, justifyContent: 'center' },
+      titleBox: { flex: 1.25, textAlign: 'center', fontSize: config.sizes.titleFontSize, fontWeight: 700, padding: 10, borderLeft: BORDER, justifyContent: 'center' },
 
       infoRow: { flexDirection: 'row', borderBottom: BORDER },
       infoLabel: { padding: 8, fontSize: base * 1.13, justifyContent: 'center' },
@@ -237,7 +250,10 @@ function buildStyles(config: ReportCardStyleConfig) {
         textAlign: 'center',
       },
       infoValueGreen: {
-        padding: 8,
+        // padding 比 infoValue 小一點：「99號」三個字在這麼窄的欄位（6%）裡，
+        // 原本沿用 infoValue 的 padding: 8 會擠到自動換行變成「99-\n號」，樣本
+        // 檔案裡這格其實是一行顯示完，這裡把左右內距縮小讓它塞得下一行。
+        padding: 4,
         fontSize: base * 1.3,
         fontWeight: 700,
         backgroundColor: config.colors.infoValueGreenBg,
@@ -246,7 +262,10 @@ function buildStyles(config: ReportCardStyleConfig) {
       },
 
       body: { flexDirection: 'row', flex: 1 },
-      leftCol: { flex: 1.55, borderRight: BORDER },
+      // 【2026-08-23 依「成績單正反.xlsx」欄寬逐格核對後修正】左表（科目成績）：右側面板
+      // （出席／懲獎記錄）原本的比例是 1.55:1，跟樣本檔案實際欄寬比例（1.362:1）有落差，
+      // 這裡照樣本調整，右側面板變得比原本略寬一些。
+      leftCol: { flex: 1.362, borderRight: BORDER },
       rightCol: { flex: 1 },
 
       pageInner: { flexDirection: 'row', flex: 1 },
@@ -267,22 +286,47 @@ function buildStyles(config: ReportCardStyleConfig) {
       scoreCol: { width: `${scoreColWidth}%` },
       annualCol: { width: `${config.layout.annualColWidthPercent}%` },
 
-      attnItemCol: { width: '30%' },
-      attnValCol: { width: '23.33%' },
+      attnItemCol: { width: '21.17%' },
+      attnValCol: { width: '26.28%' },
+      // 【2026-08-23 新增】給「全班人數／全班名次」那一列合併用：這一列的標籤
+      // 「全班人數」「全班名次」是4個中文字，如果只用跟「項目」欄一樣寬的
+      // attnItemCol（本來是給「曠課」這種2個字的標籤用），會塞不下、跟旁邊的
+      // 數值文字疊在一起。改成標籤格併「項目＋上學期」兩欄的寬度（給4個字
+      // 足夠空間），數值格併「下學期＋合計」兩欄的寬度——併的還是同一組格線
+      // 上的欄位，只是併法不同，最終這一列的左緣/中線/右緣還是精準對在
+      // 「項目/上學期/下學期/合計」表頭同樣的格線上，不會跟上面的格線對不齊。
+      attnLabelWideCol: { width: `${21.17 + 26.28}%` },
+      attnValGroupCol: { width: `${26.28 * 2}%` },
 
       signBox: { flex: 1, borderLeft: BORDER, minHeight: 50, padding: 5 },
       signLabel: { fontSize: base, fontWeight: 700, textAlign: 'center', marginBottom: 3 },
 
-      remarkBox: { minHeight: 70, padding: 6 },
+      // 【2026-08-23 修正】原本 minHeight:70，評語文字一長就會把框「撐高」，進而把
+      // 整張內頁撐過一頁（見上面 fitRemarkFontSize 的說明）。改成固定 height（不是
+      // minHeight）+ overflow:'hidden'，框本身永遠是這個高度，不會再被內容撐大，
+      // 配合文字自動縮字級/必要時截斷，保證內頁永遠剛好一頁。
+      remarkBox: { height: 66, padding: 6, overflow: 'hidden' },
       remarkLabel: { fontSize: base, fontWeight: 700, marginBottom: 3 },
       remarkText: { fontSize: base, lineHeight: 1.5 },
     }),
   };
 }
 
-function fmt(n: number | null | undefined): string {
+// 【2026-08-23 依你附的「成績單正反.xlsx」逐格核對數字格式後修正】原本左表所有分數
+// 欄位（不管是「上/下學期各自的期中/期末/平時/總分」還是「全學年」那一欄）通通共用
+// 同一支函式：整數就印整數，不是整數就印到小數點後兩位。實際跟樣本檔案逐格核對
+// 儲存格格式後發現，這其實是兩種不同的格式，樣本裡沒有混用：
+// - 上/下學期各自的「期中/期末/平時/總分」八欄，儲存格格式都是「0」（無條件四捨五入
+//   到整數，不顯示小數）——例如才藝總分 81.95 其實印出來是「82」、常識平時 51.5
+//   印出來是「52」，不是原始小數。
+// - 「全學年」那一欄（含操行成績/禮貌/衣著/服務/紀律的全學年平均）儲存格格式固定是
+//   小數兩位（例如 85 印成「85.00」、75 印成「75.00」），不會因為剛好是整數就省略
+//   小數點，跟上面「不是整數才印小數」的判斷剛好相反。
+// 這裡拆成兩支函式：fmtRounded()用在前者（四捨五入到整數），annualTotal()／
+// annualAverage()（下面兩支，专門給「全學年」欄用）改成固定 toFixed(2)。
+function fmtRounded(n: number | null | undefined): string {
   if (n === null || n === undefined) return '';
-  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+  return String(Math.round(n));
 }
 function pct(n: number): string {
   return `${Math.round(n * 100)}%`;
@@ -308,6 +352,17 @@ function formatPrintDate(iso: string): string {
   return `公元${cnDigits(d.getFullYear())}年${cnDayOrMonth(d.getMonth() + 1)}月${cnDayOrMonth(d.getDate())}日`;
 }
 
+// 【2026-08-23 用實際樣本數字核對出來的浮點數誤差修正】上面 Math.round(x*100)/100 這種
+// 寫法在「剛好卡在0.5」的情況下，會因為 JavaScript 浮點數表示誤差而四捨五入錯方向——
+// 例如才藝科目全學年平均應該是 (81.95+66.5)/2=74.225，正常四捨五入到小數兩位是
+// 74.23，但 74.225 在電腦裡實際存成 74.224999999999994，乘以100取整反而變成74.22，
+// 差了0.01分，跟樣本檔案（74.23）對不起來；同樣的問題也出現在華測科目
+// （64.725 應為64.73，卻算成64.72）。這裡改用一個能修正這種浮點誤差的四捨五入
+// 寫法：先用 toPrecision(15) 把乘以100之後多出來的浮點誤差「修圓」掉，再取整數。
+function round2(n: number): number {
+  return Math.round(Number((n * 100).toPrecision(15))) / 100;
+}
+
 // 學年成績（左表最右邊那一欄）：目前只有一個學期有資料時，這欄本來就該是空白——
 // 要等上/下學期都有資料，才有「一整個學年」可以算。實際合併公式（例如上下學期
 // 各佔多少比重）要跟學校確認後再補，這裡先只處理「兩學期都有資料時顯示什麼」
@@ -322,17 +377,57 @@ function annualTotal(subject: string, terms: ReportCardData['terms']): string {
   const spring = terms.上學期?.subjects.find((x) => x.subject === subject)?.total;
   const fall = terms.下學期?.subjects.find((x) => x.subject === subject)?.total;
   if (spring == null && fall == null) return '';
-  if (spring == null) return fmt(fall!);
-  if (fall == null) return fmt(spring);
-  return fmt(Math.round(((spring + fall) / 2) * 100) / 100);
+  if (spring == null) return fall!.toFixed(2);
+  if (fall == null) return spring.toFixed(2);
+  return round2((spring + fall) / 2).toFixed(2);
 }
 
 // 通用版的「兩學期平均」，給學業平均/操行成績這幾列（不是逐科目、是單一數字）用。
 function annualAverage(spring: number | null | undefined, fall: number | null | undefined): string {
   if (spring == null && fall == null) return '';
-  if (spring == null) return fmt(fall!);
-  if (fall == null) return fmt(spring);
-  return fmt(Math.round(((spring + fall) / 2) * 100) / 100);
+  if (spring == null) return fall!.toFixed(2);
+  if (fall == null) return spring.toFixed(2);
+  return round2((spring + fall) / 2).toFixed(2);
+}
+
+// 【2026-08-23 新增】導師評語自動縮字：對應「請控制好大小，讓正、反面永遠維持
+// 一頁」——這個框本來是 minHeight:70（內容多了就自動長高），內頁其他部分
+// （科目成績表/出缺席懲獎表）已經是固定版面，評語框一旦被長文字撐高，就會把
+// 整張內頁的總高度撐過一張 A4，react-pdf 偵測到放不下時會自動另開一頁接著印，
+// 變成「內頁變兩頁」，跟外頁（永遠剛好一頁）合起來就不是「正反面各一頁」了。
+// 改成把框高度固定住（見下面 ReportCardDocument 裡 remarkBox 的 height + 
+// overflow:'hidden'），配合這裡依字數換算出的字級，讓文字自動縮小去塞進固定
+// 高度的框裡；真的多到縮到最小字級還放不下，直接截斷加「…」，寧可看不到
+// 導師評語的最後幾句，也不要讓整份成績單多印出一頁。這幾個字數級距是實際用
+// pdftoppm 把渲染結果轉成圖片、逐一核對排版後校準出來的，不是憑感覺猜的門檻。
+// 【2026-08-23 新增】科目名稱字級：現在中文字可以正常逐字換行了（見 pdfFonts.ts
+// 的修正說明），連帶讓「出缺席」這種3個字的科目名稱，在原本只給2個字寬度設計
+// 的科目欄（跟「國文」「英文」這些2字科目共用同一欄寬）裡，從「勉強塞好」
+// 變成「真的換行成出缺／席兩行」——換行本身沒有錯（是文字排版引擎修好之後
+// 的正常行為），但2個字硬被拆成兩行看起來很怪。科目欄寬度是照學校 Excel
+// 範本比例校準過的，不能因為單一科目名稱而任意加寬，所以改成：3個字以上的
+// 科目名稱字級稍微縮小一點，讓它塞在原本的欄寬內還是維持一行，2個字的科目
+// 名稱不受影響、字級跟以前一樣。
+function subjectLabelFontSize(name: string, base: number): number {
+  if (name.length >= 4) return base * 0.72;
+  if (name.length >= 3) return base * 0.82;
+  return base;
+}
+
+function fitRemarkFontSize(text: string): number {
+  const len = text.length;
+  if (len <= 60) return 11;
+  if (len <= 100) return 9.5;
+  if (len <= 150) return 8.5;
+  if (len <= 210) return 7.5;
+  return 6.5;
+}
+// 字級縮到最小（6.5）大概還能塞下的字數上限，超過就直接截斷——避免評語真的
+// 異常長（例如貼了一整段文章）時，就算用最小字級還是會溢出固定高度的框。
+const REMARK_MAX_CHARS = 260;
+function truncateRemark(text: string): string {
+  if (text.length <= REMARK_MAX_CHARS) return text;
+  return text.slice(0, REMARK_MAX_CHARS - 1) + '…';
 }
 
 function ScoreTable({
@@ -353,8 +448,44 @@ function ScoreTable({
   const primary = terms.上學期 ?? terms.下學期;
   const subjects = primary?.subjects ?? [];
   const base = config.sizes.baseFontSize;
+  // 【2026-08-24 補充】光靠 flex:1 讓「科目列＋學業平均＋操行成績」這個區塊
+  // 撐滿/縮進可用高度，科目「少」的方向沒問題（flex-grow 正常運作，用
+  // pdftoppm 渲染5科測試過，列高會自動變高撐滿、紀律精準對齊右邊簽章列）。
+  // 但科目「多」的方向：react-pdf 底層的 Yoga 排版引擎，就算個別列已經設定
+  // minHeight:0 + overflow:'hidden'，還是不會把列高縮到比文字本身單行自然
+  // 高度更矮（這是 Yoga 對文字內容量測的已知限制，不是這裡 flex 設定的問題）。
+  // 實際用15科渲染測試過：不縮小字體的話，超過約12~13科這個可用高度就會不夠塞，
+  // 整張表被擠到自動另開一頁。這裡改成科目數超過10科時，字體/padding 跟著
+  // 等比例縮小（下限 0.5），科目數
+  // 不多的班級（≤10科，目前多數班級的正常情況）完全不受影響、維持原本字級。
+  const denseScale = subjects.length <= 9 ? 1 : Math.max(0.5, 9 / subjects.length);
+  const denseFontSize = base * denseScale;
+  const densePadding = Math.max(1, Math.round(3 * denseScale));
   return (
-    <View>
+    // 【2026-08-24 修正】原本這裡是普通 <View>（不會撐滿 leftCol 拉伸後的高度，
+    // 只會長到「內容自然高度」），科目列數（subjects.length）依班級/年級不同，
+    // 少則5、6科（例如高三下學期選修結束後），多則15科以上（含才藝/出缺席等）。
+    // 這造成兩個問題：
+    // 1. 科目少的班級：整張表內容自然高度遠小於 rightCol 被拉伸後的高度，
+    //    「紀律」那一列會停在表格自然高度的地方，跟 rightCol 用 flex:1 撐到底部\
+    //    的「簽章列」對不上——這正是反映「導師/訓導/教務/校長簽章需要下移對齊
+    //    紀律」的根因：簽章列被撐到頁面最底，但紀律因為科目少、表格本身沒那麼高，
+    //    停在中間，兩者中間出現一大截沒對齊的空白。
+    // 2. 科目多的班級：用 pdftoppm 實際渲染測試（15科）發現，表格自然高度會超過
+    //    一整頁能容納的高度，react-pdf 偵測到內頁放不下，直接把整個科目列表格
+    //    另外開一頁接著印，變成「反面（內頁）印成兩頁」，右邊出席/懲獎面板卻仍然
+    //    留在第一頁——不只格線對不齊，版面直接整個錯開。
+    // 兩個問題根因相同：科目列表格的高度是「內容自然高度」，不會隨科目數量
+    // 自動縮放去剛好塞滿/塞進 leftCol 實際可用的高度。改成外層包一個 flex:1，
+    // 「科目列＋學業平均＋操行成績」這個數量會變動的區塊也一起用 flex 依比例
+    // 分配剩餘高度（操行成績本身是5列，給 flex:5，其他每列 flex:1）——不管
+    // 科目有幾科，這個區塊永遠精準撐滿 leftCol 可用高度的100%，「紀律」的底線
+    // 永遠等於 leftCol／rightCol 共用的那個容器底部，這樣 rightCol 用 flex:1
+    // 撐到底部的簽章列，不管科目多寡都會精準對齊紀律，同時科目多的時候每列
+    // 高度會自動等比例縮小以塞進同一頁，不會再另外多開一頁。表頭兩列（科目/
+    // 比重/上下學期/學年成績、期中/期末/平時/總分）跟期中期末平時比重列維持
+    // 固定高度不參與縮放，避免表頭在科目很少時被拉得不成比例地高。
+    <View style={{ flex: 1 }}>
       {/* 科目/比重/學期表頭 */}
       <View style={styles.row}>
         <View style={[styles.cellHeadFirst, styles.subjectCol, { justifyContent: 'center' }]}>
@@ -363,10 +494,16 @@ function ScoreTable({
         <View style={[styles.cellHead, styles.weightCol]}>
           <Text>{labels.weight}</Text>
         </View>
-        <View style={[styles.cellHead, { width: '39%' }]}>
+        {/* 【2026-08-23 修正格線對齊】這兩格原本寫死 39%，跟下面「期中/期末/平時/
+            總分」四個小格實際寬度（scoreColWidth，依科目/比重/全學年欄位可調整後
+            自動算出來的剩餘寬度平分）對不起來——兩者沒有用同一個數字來源，
+            8.33+8.33+39+39+16.67 加起來甚至超過100%，導致這一列（連同同一列裡的
+            科目/比重/學年成績）被引擎整列等比例縮小，跟下面所有列的格線對不齊。
+            改成跟下面一樣用 scoreColWidth*4 計算，兩者永遠是同一個數字，格線永遠對齊。 */}
+        <View style={[styles.cellHead, { width: `${scoreColWidth * 4}%` }]}>
           <Text>上學期</Text>
         </View>
-        <View style={[styles.cellHead, { width: '39%' }]}>
+        <View style={[styles.cellHead, { width: `${scoreColWidth * 4}%` }]}>
           <Text>下學期</Text>
         </View>
         <View style={[styles.cellHead, styles.annualCol]}>
@@ -421,38 +558,38 @@ function ScoreTable({
       {subjects.map((s) => {
         const fall = terms.下學期?.subjects.find((x) => x.subject === s.subject);
         return (
-          <View style={styles.row} key={s.subject}>
-            <View style={[styles.cellLeftLabel, styles.subjectCol]}>
-              <Text>{s.subject}</Text>
+          <View style={[styles.row, { flex: 1, minHeight: 0, overflow: 'hidden' }]} key={s.subject}>
+            <View style={[styles.cellLeftLabel, styles.subjectCol, { padding: densePadding }]}>
+              <Text style={{ fontSize: subjectLabelFontSize(s.subject, denseFontSize) }}>{s.subject}</Text>
             </View>
-            <View style={[styles.cell, styles.weightCol]}>
+            <View style={[styles.cell, styles.weightCol, { fontSize: denseFontSize, padding: densePadding }]}>
               <Text>{pct(s.weight)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(s.midterm)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(s.midterm)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(s.final)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(s.final)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(s.daily)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(s.daily)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(s.total)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(s.total)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(fall?.midterm)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(fall?.midterm)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(fall?.final)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(fall?.final)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(fall?.daily)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(fall?.daily)}</Text>
             </View>
-            <View style={[styles.cell, styles.scoreCol]}>
-              <Text>{fmt(fall?.total)}</Text>
+            <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+              <Text>{fmtRounded(fall?.total)}</Text>
             </View>
-            <View style={[styles.cell, styles.annualCol]}>
+            <View style={[styles.cell, styles.annualCol, { fontSize: denseFontSize, padding: densePadding }]}>
               <Text>{annualTotal(s.subject, terms)}</Text>
             </View>
           </View>
@@ -467,22 +604,21 @@ function ScoreTable({
           「出缺席」列，所以拿掉了。 */}
 
       {/* 學業平均 */}
-      <View style={styles.row}>
-        <View style={[styles.cellLeftLabel, styles.subjectCol]}>
+      <View style={[styles.row, { flex: 1, minHeight: 0, overflow: 'hidden' }]}>
+        <View style={[styles.cellLeftLabel, { width: `${config.layout.subjectColWidthPercent + config.layout.weightColWidthPercent}%`, fontSize: denseFontSize, padding: densePadding }]}>
           <Text>{labels.academicAverage}</Text>
         </View>
-        <View style={[styles.cell, styles.weightCol]} />
         {(['midterm', 'final', 'daily', 'total'] as const).map((k) => (
-          <View key={'sa' + k} style={[styles.cell, styles.scoreCol]}>
-            <Text>{fmt(terms.上學期?.academicAverage[k])}</Text>
+          <View key={'sa' + k} style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+            <Text>{fmtRounded(terms.上學期?.academicAverage[k])}</Text>
           </View>
         ))}
         {(['midterm', 'final', 'daily', 'total'] as const).map((k) => (
-          <View key={'fa' + k} style={[styles.cell, styles.scoreCol]}>
-            <Text>{fmt(terms.下學期?.academicAverage[k])}</Text>
+          <View key={'fa' + k} style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
+            <Text>{fmtRounded(terms.下學期?.academicAverage[k])}</Text>
           </View>
         ))}
-        <View style={[styles.cell, styles.annualCol]}>
+        <View style={[styles.cell, styles.annualCol, { fontSize: denseFontSize, padding: densePadding }]}>
           <Text>{annualAverage(terms.上學期?.academicAverage.total, terms.下學期?.academicAverage.total)}</Text>
         </View>
       </View>
@@ -500,7 +636,7 @@ function ScoreTable({
           2個給等第」，下學期比照辦理，等第的顯示空間因此也跟著變大（從占全部下學期
           後面的固定17%，改成跟著 scoreCol 的實際寬度走）。最後全學年平均欄維持在
           最右邊不變（跟樣本一致）。 */}
-      <View style={{ flexDirection: 'row', borderBottom: BORDER, minHeight: 22 * 5 }}>
+      <View style={{ flexDirection: 'row', borderBottom: BORDER, flex: 5, minHeight: 0, overflow: 'hidden' }}>
         <View style={{ flexDirection: 'column', width: `${config.layout.subjectColWidthPercent + config.layout.weightColWidthPercent}%` }}>
           {(
             [
@@ -511,7 +647,7 @@ function ScoreTable({
               { label: labels.conductDiscipline, key: 'discipline' as const },
             ]
           ).map(({ label, key }, i) => (
-            <View style={[styles.cellLeftLabel, { minHeight: 22, borderBottom: i < 4 ? BORDER : 'none' }]} key={label}>
+            <View style={[styles.cellLeftLabel, { flex: 1, minHeight: 0, overflow: 'hidden', padding: densePadding, fontSize: denseFontSize, borderBottom: i < 4 ? BORDER : 'none' }]} key={label}>
               <Text>{label}</Text>
             </View>
           ))}
@@ -519,37 +655,37 @@ function ScoreTable({
 
         {/* 上學期：分數(2欄寬) + 等第(2欄寬，貫穿五列) */}
         <View style={{ width: `${scoreColWidth * 4}%`, flexDirection: 'row', borderLeft: BORDER }}>
-          <View style={{ width: `${scoreColWidth * 2}%` }}>
+          <View style={{ width: `${scoreColWidth * 2}%`, flexDirection: 'column' }}>
             {(['overall', 'politeness', 'dress', 'service', 'discipline'] as const).map((key, i) => (
-              <View key={key} style={{ minHeight: 22, justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
-                <Text style={{ fontSize: base }}>{fmt(terms.上學期?.conduct[key])}</Text>
+              <View key={key} style={{ flex: 1, minHeight: 0, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
+                <Text style={{ fontSize: denseFontSize }}>{fmtRounded(terms.上學期?.conduct[key])}</Text>
               </View>
             ))}
           </View>
           <View style={{ width: `${scoreColWidth * 2}%`, alignItems: 'center', justifyContent: 'center', borderLeft: BORDER }}>
-            <Text style={{ fontSize: base * 2.6, fontWeight: 700 }}>{conductGradeLabel(terms.上學期?.conduct.overall ?? null)}</Text>
+            <Text style={{ fontSize: denseFontSize * 2.6, fontWeight: 700 }}>{conductGradeLabel(terms.上學期?.conduct.overall ?? null)}</Text>
           </View>
         </View>
 
         {/* 下學期：分數(2欄寬) + 等第(2欄寬，貫穿五列) */}
         <View style={{ width: `${scoreColWidth * 4}%`, flexDirection: 'row', borderLeft: BORDER }}>
-          <View style={{ width: `${scoreColWidth * 2}%` }}>
+          <View style={{ width: `${scoreColWidth * 2}%`, flexDirection: 'column' }}>
             {(['overall', 'politeness', 'dress', 'service', 'discipline'] as const).map((key, i) => (
-              <View key={key} style={{ minHeight: 22, justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
-                <Text style={{ fontSize: base }}>{fmt(terms.下學期?.conduct[key])}</Text>
+              <View key={key} style={{ flex: 1, minHeight: 0, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
+                <Text style={{ fontSize: denseFontSize }}>{fmtRounded(terms.下學期?.conduct[key])}</Text>
               </View>
             ))}
           </View>
           <View style={{ width: `${scoreColWidth * 2}%`, alignItems: 'center', justifyContent: 'center', borderLeft: BORDER }}>
-            <Text style={{ fontSize: base * 2.6, fontWeight: 700 }}>{conductGradeLabel(terms.下學期?.conduct.overall ?? null)}</Text>
+            <Text style={{ fontSize: denseFontSize * 2.6, fontWeight: 700 }}>{conductGradeLabel(terms.下學期?.conduct.overall ?? null)}</Text>
           </View>
         </View>
 
         {/* 全學年平均：跟其他列一樣，維持在最右邊 */}
-        <View style={{ width: `${config.layout.annualColWidthPercent}%`, borderLeft: BORDER }}>
+        <View style={{ width: `${config.layout.annualColWidthPercent}%`, borderLeft: BORDER, flexDirection: 'column' }}>
           {(['overall', 'politeness', 'dress', 'service', 'discipline'] as const).map((key, i) => (
-            <View key={key} style={{ minHeight: 22, justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
-              <Text style={{ fontSize: base }}>{annualAverage(terms.上學期?.conduct[key], terms.下學期?.conduct[key])}</Text>
+            <View key={key} style={{ flex: 1, minHeight: 0, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
+              <Text style={{ fontSize: denseFontSize }}>{annualAverage(terms.上學期?.conduct[key], terms.下學期?.conduct[key])}</Text>
             </View>
           ))}
         </View>
@@ -582,11 +718,25 @@ function AttendanceDisciplinePanel({
 }) {
   const spring = terms.上學期;
   const fall = terms.下學期;
-  const attnKeys = ['曠課', '遲到', '病假', '事假', '公假'] as const;
+  // 【2026-08-22】全勤原本是獨立另外一列，排在曠課/遲到/病假/事假/公假這五列的
+  // 後面、還隔了一個空白列（因為原本的迴圈跑6次但 attnKeys 只有5項，第6次是空的，
+  // 全勤是另外加的第7列）。照你附的樣本檔案，全勤其實是跟其他五項同一欄、緊接在
+  // 公假下面的第6項，不是另外分開的一列——這裡把 attnKeys 補上「全勤」變成6項，
+  // 跟懲獎那邊剛好6項（嘉獎/小功/大功/警告/小過/大過）對齊，迴圈跑到第6次時改成
+  // 顯示「是/否」文字而不是次數，下面原本另外寫的那一整塊全勤列就拿掉了。
+  const attnKeys = ['曠課', '遲到', '病假', '事假', '公假', '全勤'] as const;
   const discKeys = ['嘉獎', '小功', '大功', '警告', '小過', '大過'] as const;
 
   return (
-    <View>
+    // 【2026-08-23 修正】原本這個 View 沒有 flex:1，本身只會長到「內容自然高度」，
+    // 但外層 rightCol（body 這個 row 的 alignItems 預設 stretch）會被拉伸到跟
+    // leftCol（科目成績表，內容通常比較高）一樣高，兩者高度對不上時，rightCol
+    // 底下就會多出一截空白，導師/訓導/教務/校長簽章那一列因此没有跟著往下延伸到
+    // 跟左邊「操行成績」那個區塊（科目成績表最後一列）齊平，最後一條橫線也就對不齊。
+    // 加上 flex:1 讓這個 View 真的撐滿 rightCol 拉伸後的高度，多出來的空間交給
+    // 下面「簽章列」（也加了 flex:1）去吸收——簽章格本來就需要留白給人簽名，
+    // 這樣同時解決「格線對齊」跟「簽名空間太小」兩件事。
+    <View style={{ flex: 1 }}>
       <View style={styles.row}>
         <View style={[styles.sectionTitle, { width: '50%' }]}>
           <Text>{labels.attendanceRecordTitle}</Text>
@@ -624,8 +774,9 @@ function AttendanceDisciplinePanel({
       {[0, 1, 2, 3, 4, 5].map((i) => {
         const attnKey = attnKeys[i];
         const discKey = discKeys[i];
-        const springV = attnKey ? spring?.attendance[attnKey] : undefined;
-        const fallV = attnKey ? fall?.attendance[attnKey] : undefined;
+        const isPerfectRow = attnKey === '全勤';
+        const springV = isPerfectRow ? undefined : attnKey ? spring?.attendance[attnKey as '曠課' | '遲到' | '病假' | '事假' | '公假'] : undefined;
+        const fallV = isPerfectRow ? undefined : attnKey ? fall?.attendance[attnKey as '曠課' | '遲到' | '病假' | '事假' | '公假'] : undefined;
         const total = (springV ?? 0) + (fallV ?? 0);
         const dSpringV = spring?.discipline[discKey];
         const dFallV = fall?.discipline[discKey];
@@ -636,13 +787,13 @@ function AttendanceDisciplinePanel({
               <Text>{attnKey ?? ''}</Text>
             </View>
             <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{attnKey ? springV ?? '' : ''}</Text>
+              <Text>{isPerfectRow ? (spring ? (spring.isPerfectAttendance ? '是' : '否') : '') : attnKey ? springV ?? '' : ''}</Text>
             </View>
             <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{attnKey ? fallV ?? '' : ''}</Text>
+              <Text>{isPerfectRow ? (fall ? (fall.isPerfectAttendance ? '是' : '否') : '') : attnKey ? fallV ?? '' : ''}</Text>
             </View>
             <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{attnKey ? total : ''}</Text>
+              <Text>{isPerfectRow ? [spring, fall].filter((t) => t?.isPerfectAttendance).length || '' : attnKey ? total : ''}</Text>
             </View>
             <View style={[styles.cellLeftLabel, styles.attnItemCol, { borderLeft: BORDER }]}>
               <Text>{discKey}</Text>
@@ -659,29 +810,19 @@ function AttendanceDisciplinePanel({
           </View>
         );
       })}
-      {/* 全勤（獨立一列，跟上面五個假別放在一起看，樣本裡是"是/否"文字，不是次數） */}
-      <View style={styles.row}>
-        <View style={[styles.cellLeftLabel, styles.attnItemCol]}>
-          <Text>{labels.perfectAttendance}</Text>
-        </View>
-        <View style={[styles.cell, styles.attnValCol]}>
-          <Text>{spring ? (spring.isPerfectAttendance ? '是' : '否') : ''}</Text>
-        </View>
-        <View style={[styles.cell, styles.attnValCol]}>
-          <Text>{fall ? (fall.isPerfectAttendance ? '是' : '否') : ''}</Text>
-        </View>
-        <View style={[styles.cell, styles.attnValCol]}>
-          <Text>{[spring, fall].filter((t) => t?.isPerfectAttendance).length || ''}</Text>
-        </View>
-        <View style={[styles.cell, { width: '50%' }, { borderLeft: BORDER }]} />
-      </View>
 
-      {/* 全班人數／全班名次 */}
+      {/* 全班人數／全班名次
+          【2026-08-23 修正格線對齊】原本這裡另外用 25%/25%/25%/25% 分四格，
+          跟上面「項目/上學期/下學期/合計」實際的欄寬（attnItemCol／attnValCol）
+          是兩組不同的數字，格線對不上。改成沿用同一組欄寬常數：標籤格
+          （全班人數／全班名次）跟「項目」欄同寬，數值格（內含上下學期兩行）
+          跟「上學期＋下學期＋合計」三欄合併後同寬，這樣這一列的直線就會跟
+          上面表頭、以及每一列資料的直線切齊。 */}
       <View style={[styles.row, { minHeight: 22 }]}>
-        <View style={[styles.sectionTitle, { width: '25%' }]}>
+        <View style={[styles.sectionTitle, styles.attnLabelWideCol]}>
           <Text>{labels.classSize}</Text>
         </View>
-        <View style={{ width: '25%', borderLeft: BORDER }}>
+        <View style={[styles.attnValGroupCol, { borderLeft: BORDER }]}>
           <View style={{ borderBottom: BORDER, padding: 2 }}>
             <Text style={{ fontSize: 7 }}>上學期 {spring?.classSize ?? ''}</Text>
           </View>
@@ -689,10 +830,10 @@ function AttendanceDisciplinePanel({
             <Text style={{ fontSize: 7 }}>下學期 {fall?.classSize ?? ''}</Text>
           </View>
         </View>
-        <View style={[styles.sectionTitle, { width: '25%', borderLeft: BORDER }]}>
+        <View style={[styles.sectionTitle, styles.attnLabelWideCol, { borderLeft: BORDER }]}>
           <Text>{labels.classRank}</Text>
         </View>
-        <View style={{ width: '25%', borderLeft: BORDER }}>
+        <View style={[styles.attnValGroupCol, { borderLeft: BORDER }]}>
           <View style={{ borderBottom: BORDER, padding: 2 }}>
             <Text style={{ fontSize: 7 }}>上學期 {spring?.classRank ?? ''}</Text>
           </View>
@@ -702,20 +843,23 @@ function AttendanceDisciplinePanel({
         </View>
       </View>
 
-      {/* 升留級／家長簽章及建議：升留級目前無資料來源（先留空）；只有印「下學期／學年
-          成績」的成績單（上下學期都有資料，可以算出整年總成績）時這格才會出現，
-          上學期單獨列印時整格空白，連標籤都不顯示。 */}
+      {/* 升留級／家長簽章及建議：升留級目前無資料來源，「值」先留空白；但標籤本身
+          （2026-08-24 依回饋修正）不再跟著「是否印下學期／學年成績」隱藏——原本
+          `spring && fall` 這個條件只印下學期／學年成績單時才顯示「升留級」三個字，
+          上學期單獨列印時（例如這次的範例）整格連標籤都是空的，看起來像漏印。
+          改成標籤永遠顯示，需要真的有升留級資料來源以後，再補上對應的「值」即可。 */}
       <View style={[styles.row, { minHeight: 34 }]}>
         <View style={[styles.sectionTitle, { width: '25%' }]}>
-          <Text>{spring && fall ? labels.promotionStatus : ''}</Text>
+          <Text>{labels.promotionStatus}</Text>
         </View>
         <View style={[styles.sectionTitle, { width: '75%', borderLeft: BORDER }]}>
           <Text>{labels.parentSignature}</Text>
         </View>
       </View>
 
-      {/* 簽章列 */}
-      <View style={[styles.row, { minHeight: 30, borderBottom: 'none' }]}>
+      {/* 簽章列：flex:1 讓這一列吃掉 rightCol 被拉伸出來的剩餘高度，讓底線跟左邊
+          「操行成績」區塊（科目成績表最後一列）的底線切齊，同時簽名欄位也比較寬敞。 */}
+      <View style={[styles.row, { minHeight: 30, borderBottom: 'none', flex: 1 }]}>
         {[labels.homeroomSign, labels.disciplineSign, labels.academicSign, labels.principalSign].map((label, i) => (
           <View key={label} style={[styles.signBox, i === 0 ? { borderLeft: 0 } : {}]}>
             <Text style={styles.signLabel}>{label}</Text>
@@ -758,110 +902,144 @@ function CoverPage({
   // （用減號），不是「+0.00%」——只有真的是正數（目前只有「全勤」）才印加號。
   const fmtImpact = (n: number | null) => (n === null ? '' : `(${n > 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}%)`);
 
-  // 【2026-08-21 依你提供的實際樣本圖重新排版】直式（portrait，不是內頁那張橫式），
-  // 版面分三個橫向區塊：
-  //   上半：左＝標題（泰文+中文）、中＝操行成績評量標準、右＝校徽
-  //   中半：左＝校園照片＋標語、中＝獎懲/學業佔比計算方式、右＝泰文+中文校名
-  //   下半：左＝班級/姓名/座號/學號欄位、右＝全勤加分及扣分說明
-  // 校徽跟校園照片目前沒有拿到圖檔，先用色塊＋文字佔位；圖檔給我之後可以直接換成
-  // 真的圖片（<Image src=... />），不用再調整版面結構。
+  // 【2026-08-22 依你附的「外頁修正.xlsx」逐格重排】這份檔案你已經精簡過表格結構，
+  // 這次直接讀了合併儲存格範圍＋兩張內嵌圖片（校徽、校園照片，之前都是色塊佔位，
+  // 這次直接把真正的圖檔抽出來放進來了：public/images/school-logo.png／
+  // campus-photo.jpg）。對照樣本，版面分三個橫向區塊：
+  //   上：左＝標題（泰文+中文）、中＝操行成績評量標準（標籤+5行級距）、右＝校徽
+  //   中：左＝校園照片＋「敦品勵學／崇德養志」、中＝出缺席加扣分、右＝泰文+中文校名
+  //   下：左＝班級/姓名/座號/學號、中＝學業成績計算方式→特殊表現計算方式（依序，
+  //       這次的順序跟上一版不一樣：樣本裡是先出缺席、再學業佔比、最後才是獎懲，
+  //       不是我上一輪猜的順序）
+  // 校徽/校園照片如果你在【成績單樣式設定】頁另外上傳了圖片，會優先使用你上傳的，
+  // 沒有上傳的話用這裡內建的真實校徽/校園照片（不再是色塊佔位）。
+  // logoSrc／photoSrc：優先用管理員在【成績單樣式設定】頁上傳的圖片
+  // （layout.logoUrl／campusPhotoUrl），沒有上傳的話，lib/reportCard.ts 的
+  // getActiveReportCardStyle() 會自動補上系統內建的真實校徽/校園照片路徑
+  // （public/images/school-logo.png／campus-photo.jpg）——這裡刻意不直接用
+  // path.join(process.cwd(),...) 組路徑，是因為這個檔案會被 ReportCardStyleTab.tsx
+  // （瀏覽器端的管理頁面）引用到型別定義，'path' 是 Node.js 專用模組，如果這裡
+  // import 'path'，瀏覽器端的頁面會直接建置失敗——把「組路徑」這件事移到
+  // lib/reportCard.ts（本來就是純伺服器端專用的檔案）處理，這裡只負責「有給圖就用，
+  // 沒有就顯示色塊佔位」。
+  const logoSrc = layout.logoUrl;
+  const photoSrc = layout.campusPhotoUrl;
+
   return (
     <Page size="A4" orientation="landscape" style={{ padding: 20, fontFamily: 'NotoSansTC', fontSize: 9 }}>
-      <View style={{ flexDirection: 'row', marginBottom: 14 }}>
-        <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 9, marginBottom: 2, fontFamily: 'NotoSansThai' }}>หนังสือแจ้งผลการเรียน</Text>
-          <Text style={{ fontSize: 18, fontWeight: 700 }}>學生成績通知書</Text>
+      {/* 【2026-08-23 修正】原本是三個橫向色塊（18%/46%/36% 高），每個色塊裡面又
+          各自切三欄，但三欄的寬度比例三個橫向色塊還兜不起來（第一個色塊是
+          1:1.6:0.6，另外兩個是1:1.6:1），沒有一個是「三等分」。改成外頁就是三個
+          等寬（各自 flex:1，剛好各佔1/3寬度）的直式欄位——即符合「正面三大區塊
+          各1/3」的要求，也才是真正的「三折頁」（實際列印後沿兩條欄位分隔線對摺，
+          會摺成三等分的折頁小冊子，不是單純的排版分區）。原本每個色塊內部「上
+          （18%）／中（46%）／下（36%）」的高度比例維持不變，只是改成在每一欄
+          內部各自往下堆疊，不是橫向切三塊。 */}
+      {/* 【2026-08-24 依回饋修正】外頁文字全部放大、並統一改成置中對齊——原本標題／
+          校名等少數幾處是置中，其餘（操行標準、出缺席加扣分、學業計算方式、班級
+          姓名等資訊、校名區塊）都還是預設靠左（右折頁的校名區塊則是靠右
+          alignItems:'flex-end'/textAlign:'right'），這次統一：每個區塊的容器都
+          加上 alignItems:'center'，文字統一 textAlign:'center'，字級整體調大
+          （約放大20~50%，依原本字級大小分別微調，優先保留原本的相對層級關係——
+          標題還是最大、內文列表次之），並用這次同一份 pdftoppm 渲染流程確認在
+          三個區塊各自的高度（18%／46%／36%）裡都還放得下、沒有溢出。 */}
+      <View style={{ flexDirection: 'row', flex: 1 }}>
+        {/* 左折頁：標題 → 校園照片 → 班級/姓名/座號/學號 */}
+        <View style={{ flex: 1, paddingRight: 10 }}>
+          <View style={{ height: '18%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 12, marginBottom: 3, fontFamily: 'NotoSansThai', textAlign: 'center' }}>หนังสือแจ้งผลการเรียน</Text>
+            <Text style={{ fontSize: 23, fontWeight: 700, textAlign: 'center' }}>學生成績通知書</Text>
+          </View>
+          <View style={{ height: '46%', alignItems: 'center' }}>
+            {photoSrc ? (
+              <Image src={photoSrc} style={{ width: '100%', height: '82%', objectFit: 'cover', marginBottom: 4 }} />
+            ) : (
+              <View style={{ width: '100%', height: '82%', backgroundColor: '#BFD7EA', alignItems: 'center', justifyContent: 'center', marginBottom: 4 }}>
+                <Text style={{ fontSize: 7, color: '#556' }}>（校園照片）</Text>
+              </View>
+            )}
+            <Text style={{ fontSize: 15, fontWeight: 700, textAlign: 'center' }}>敦品勵學　崇德養志</Text>
+          </View>
+          <View style={{ height: '36%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 13, lineHeight: 2.4, textAlign: 'center' }}>
+              班級：　{data.gradeLevel}{data.className}{'\n'}
+              姓名：　{data.studentName}{'\n'}
+              座號：　{String(data.seatNo).padStart(2, '0')}{'\n'}
+              學號：　{data.studentNo}
+            </Text>
+          </View>
         </View>
-        <View style={{ flex: 1.6, textAlign: 'center' }}>
-          <Text style={{ fontSize: 10, fontWeight: 700, marginBottom: 4 }}>學生操行成績之評量標準</Text>
-          <Text style={{ fontSize: 8, lineHeight: 1.7 }}>
-            一、九十分以上至一百分者為優等。{'\n'}
-            二、八十分以上不滿九十分者為甲等。{'\n'}
-            三、七十分以上不滿八十分者為乙等。{'\n'}
-            四、六十分以上不滿七十分者為丙等。{'\n'}
-            五、不滿六十分者為丁等（不及格）。
-          </Text>
-        </View>
-        <View style={{ flex: 0.6, alignItems: 'center', justifyContent: 'flex-start' }}>
-          {layout.logoUrl ? (
-            <Image src={layout.logoUrl} style={{ width: 44, height: 44 }} />
-          ) : (
-            // 校徽圖檔還沒設定，先用色塊佔位——去【成績單樣式設定】頁上傳圖片後，
-            // 這裡會自動換成真的圖片，不用改程式碼。
-            <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: '#E8B4B8', alignItems: 'center', justifyContent: 'center' }}>
-              <Text style={{ fontSize: 6, textAlign: 'center' }}>校徽</Text>
-            </View>
-          )}
-        </View>
-      </View>
 
-      <View style={{ flexDirection: 'row', marginBottom: 14, minHeight: 150 }}>
-        <View style={{ flex: 1, alignItems: 'center' }}>
-          {layout.campusPhotoUrl ? (
-            <Image src={layout.campusPhotoUrl} style={{ width: '100%', height: 100, marginBottom: 6 }} />
-          ) : (
-            // 校園照片還沒設定，先用色塊佔位，同上，上傳後自動換成真的照片。
-            <View style={{ width: '100%', height: 100, backgroundColor: '#BFD7EA', alignItems: 'center', justifyContent: 'center', marginBottom: 6 }}>
-              <Text style={{ fontSize: 7, color: '#556' }}>（校園照片）</Text>
-            </View>
-          )}
-          <Text style={{ fontSize: 11, fontWeight: 700, textAlign: 'center' }}>敦品勵學　崇德養志</Text>
-        </View>
-
-        <View style={{ flex: 1.6, paddingHorizontal: 8 }}>
-          <Text style={{ fontSize: 9, marginBottom: 4 }}>學生特殊表現經訓導簽核，計算方式如下：</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 9, lineHeight: 1.8 }}>
-                嘉獎 {p.conduct.merit1 !== null ? `+${p.conduct.merit1}` : '－'} 分{'\n'}
-                小功 {p.conduct.merit3 !== null ? `+${p.conduct.merit3}` : '－'} 分{'\n'}
-                大功 {p.conduct.merit9 !== null ? `+${p.conduct.merit9}` : '－'} 分
-              </Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 9, lineHeight: 1.8 }}>
-                警告 {p.conduct.demerit1 ?? '－'} 分{'\n'}
-                小過 {p.conduct.demerit3 ?? '－'} 分{'\n'}
-                大過 {p.conduct.demerit9 ?? '－'} 分
-              </Text>
+        {/* 中折頁：操行成績標準 → 出缺席加扣分 → 學業成績計算方式／特殊表現計算方式 */}
+        <View style={{ flex: 1, paddingHorizontal: 10 }}>
+          <View style={{ height: '18%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 13, fontWeight: 700, marginBottom: 4, textAlign: 'center' }}>操行成績標準：</Text>
+            <Text style={{ fontSize: 10.5, lineHeight: 1.6, textAlign: 'center' }}>
+              90分以上至100分者為優等{'\n'}
+              80分以上不滿90分者為甲等{'\n'}
+              70分以上不滿80分者為乙等{'\n'}
+              60分以上不滿70分者為丙等{'\n'}
+              不滿60分者為丁等（不及格）
+            </Text>
+          </View>
+          <View style={{ height: '46%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 11.5, marginBottom: 4, textAlign: 'center' }}>
+              出缺席加分及扣分{p.attendanceWeightPercent !== null ? `（佔學業成績比重 ${fmtPct(p.attendanceWeightPercent)}）` : ''}：
+            </Text>
+            <Text style={{ fontSize: 11.5, lineHeight: 1.9, textAlign: 'center' }}>
+              {p.attendance.map((a) => `${a.name}\u3000${fmtScore(a.rawScore)} 分\u3000${fmtImpact(a.percentOfTotal)}`).join('\n')}
+            </Text>
+          </View>
+          <View style={{ height: '36%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 10.5, marginBottom: 2, textAlign: 'center' }}>學業成績計算方式：</Text>
+            <Text style={{ fontSize: 10.5, lineHeight: 1.5, marginBottom: 5, textAlign: 'center' }}>
+              期中考 {fmtPct(p.academicWeights.midterm)}{'\n'}
+              期末考 {fmtPct(p.academicWeights.final)}{'\n'}
+              平時分 {fmtPct(p.academicWeights.daily)}
+            </Text>
+            <Text style={{ fontSize: 10.5, marginBottom: 2, textAlign: 'center' }}>特殊表現計算方式：</Text>
+            <View style={{ flexDirection: 'row', width: '100%' }}>
+              <View style={{ flex: 1, alignItems: 'center' }}>
+                <Text style={{ fontSize: 10.5, lineHeight: 1.5, textAlign: 'center' }}>
+                  嘉獎 {p.conduct.merit1 !== null ? `+${p.conduct.merit1}` : '－'} 分{'\n'}
+                  小功 {p.conduct.merit3 !== null ? `+${p.conduct.merit3}` : '－'} 分{'\n'}
+                  大功 {p.conduct.merit9 !== null ? `+${p.conduct.merit9}` : '－'} 分
+                </Text>
+              </View>
+              <View style={{ flex: 1, alignItems: 'center' }}>
+                <Text style={{ fontSize: 10.5, lineHeight: 1.5, textAlign: 'center' }}>
+                  警告 {p.conduct.demerit1 ?? '－'} 分{'\n'}
+                  小過 {p.conduct.demerit3 ?? '－'} 分{'\n'}
+                  大過 {p.conduct.demerit9 ?? '－'} 分
+                </Text>
+              </View>
             </View>
           </View>
-          <Text style={{ fontSize: 9, marginBottom: 4 }}>學業成績計算方式如下：</Text>
-          <Text style={{ fontSize: 9, lineHeight: 1.8 }}>
-            期中考 {fmtPct(p.academicWeights.midterm)}{'\n'}
-            期末考 {fmtPct(p.academicWeights.final)}{'\n'}
-            平時分 {fmtPct(p.academicWeights.daily)}
-          </Text>
         </View>
 
-        <View style={{ flex: 1, alignItems: 'flex-end', paddingLeft: 8 }}>
-          <Text style={{ fontSize: 11, fontWeight: 700, textAlign: 'right', fontFamily: 'NotoSansThai' }}>โรงเรียนหัวหยุน</Text>
-          <Text style={{ fontSize: 8, textAlign: 'right', marginBottom: 2, fontFamily: 'NotoSansThai' }}>โดย</Text>
-          <Text style={{ fontSize: 8, textAlign: 'right', marginBottom: 8, fontFamily: 'NotoSansThai' }}>สมาคมยูนนาน จังหวัดเชียงราย</Text>
-          <Text style={{ fontSize: 14, fontWeight: 700, textAlign: 'right' }}>清萊雲南會館附屬</Text>
-          <Text style={{ fontSize: 14, fontWeight: 700, textAlign: 'right' }}>華雲學校</Text>
+        {/* 右折頁：校徽 → 泰文/中文校名 → （留白） */}
+        <View style={{ flex: 1, paddingLeft: 10 }}>
+          <View style={{ height: '18%', alignItems: 'center', justifyContent: 'flex-start' }}>
+            {logoSrc ? (
+              <Image src={logoSrc} style={{ width: 60, height: 60 }} />
+            ) : (
+              // logoSrc 沒有值（理論上 lib/reportCard.ts 的 getActiveReportCardStyle()
+              // 已經會補上內建的真實校徽圖檔路徑，這裡的色塊只是最後一層保險，
+              // 例如直接呼叫這個元件、沒有經過 getActiveReportCardStyle() 的情境）。
+              <View style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: '#E8B4B8', alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ fontSize: 6, textAlign: 'center' }}>校徽</Text>
+              </View>
+            )}
+          </View>
+          <View style={{ height: '46%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 14, fontWeight: 700, textAlign: 'center', fontFamily: 'NotoSansThai' }}>โรงเรียนหัวหยุน</Text>
+            <Text style={{ fontSize: 10, textAlign: 'center', marginBottom: 2, fontFamily: 'NotoSansThai' }}>โดย</Text>
+            <Text style={{ fontSize: 10, textAlign: 'center', marginBottom: 8, fontFamily: 'NotoSansThai' }}>สมาคมยูนนาน จังหวัดเชียงราย</Text>
+            <Text style={{ fontSize: 17, fontWeight: 700, textAlign: 'center' }}>清萊雲南會館附屬</Text>
+            <Text style={{ fontSize: 17, fontWeight: 700, textAlign: 'center' }}>華雲學校</Text>
+          </View>
+          <View style={{ height: '36%' }} />
         </View>
-      </View>
-
-      <View style={{ flexDirection: 'row' }}>
-        <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 10, lineHeight: 2.4 }}>
-            班級：　{data.gradeLevel}{data.className}班{'\n'}
-            姓名：　{data.studentName}{'\n'}
-            座號：　{String(data.seatNo).padStart(2, '0')}{'\n'}
-            學號：　{data.studentNo}
-          </Text>
-        </View>
-        <View style={{ flex: 1.6, paddingHorizontal: 8 }}>
-          <Text style={{ fontSize: 9, marginBottom: 4 }}>
-            全勤加分及缺曠病事假扣分如下
-            {p.attendanceWeightPercent !== null ? `（出缺席佔學業成績比重 ${fmtPct(p.attendanceWeightPercent)}）` : ''}：
-          </Text>
-          <Text style={{ fontSize: 9, lineHeight: 1.9 }}>
-            {p.attendance.map((a) => `${a.name} ${fmtScore(a.rawScore)} 分 ${fmtImpact(a.percentOfTotal)}`).join('\n')}
-          </Text>
-        </View>
-        <View style={{ flex: 1 }} />
       </View>
 
       <View style={{ position: 'absolute', bottom: 20, right: 26 }}>
@@ -878,6 +1056,10 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
   // ScoreTable 內的操行成績區塊需要跟其他列一樣的「分數欄寬度」才能對齊格線
   // （見 buildStyles() 裡的說明），這裡用同一條公式算一次，往下傳給 ScoreTable。
   const scoreColWidth = (100 - config.layout.subjectColWidthPercent - config.layout.weightColWidthPercent - config.layout.annualColWidthPercent) / 8;
+  // 導師評語：依字數自動決定字級，並在極端情況下截斷，確保 remarkBox 固定高度
+  // 塞得下（見 fitRemarkFontSize／truncateRemark 的說明）。
+  const remarkDisplay = truncateRemark(data.remark ?? '');
+  const remarkFontSize = fitRemarkFontSize(remarkDisplay);
   return (
     <Document>
       {config.layout.showCoverPage && <CoverPage data={data} styles={styles} BORDER={BORDER} labels={labels} layout={config.layout} />}
@@ -889,39 +1071,44 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
                 <Text>{data.school}</Text>
               </View>
               <View style={styles.yearBox}>
-                <Text>
+                <Text style={{ color: '#0000FF' }}>
                   {data.academicYear} {labels.academicYearSuffix}
                 </Text>
               </View>
               <View style={styles.termBox}>
-                <Text>{data.currentTerm}</Text>
+                <Text style={{ color: '#0000FF' }}>{data.currentTerm}</Text>
               </View>
               <View style={styles.titleBox}>
                 <Text>{labels.title}</Text>
               </View>
             </View>
             <View style={styles.infoRow}>
-              <View style={[styles.infoLabel, { width: '6%' }]}>
+              {/* 【2026-08-23 依「成績單正反.xlsx」欄寬逐格核對後修正】原本這一列（學號／
+                  學生姓名／班級座號）的欄寬比例是估算的，跟樣本檔案實際的欄寬不太一樣，
+                  尤其「學生姓名：」那格明顯偏窄（原本8%，樣本其實是14.65%）、後面「高三／
+                  忠班／99號」三格明顯偏寬（原本9%/9%/8%，樣本其實三格一樣寬、都是6.08%）。
+                  這裡照樣本欄位的實際寬度比例重新對齊。 */}
+              <View style={[styles.infoLabel, { width: '8%' }]}>
                 <Text>學號：</Text>
               </View>
-              <View style={[styles.infoValue, { width: '12%' }]}>
+              <View style={[styles.infoValue, { width: '10%' }]}>
                 <Text>{data.studentNo}</Text>
               </View>
-              <View style={[styles.infoLabel, { width: '38%' }]} />
-              <View style={[styles.infoLabel, { width: '8%' }]}>
+              <View style={[styles.infoLabel, { width: '37%' }]} />
+              <View style={[styles.infoLabel, { width: '15%' }]}>
                 <Text>學生姓名：</Text>
               </View>
-              <View style={[styles.infoValue, { width: '10%' }]}>
+              <View style={[styles.infoValue, { width: '12%' }]}>
                 <Text>{data.studentName}</Text>
               </View>
-              <View style={[styles.infoValue, { width: '9%' }]}>
-                <Text>{data.gradeLevel}</Text>
+              <View style={[styles.infoValue, { width: '6%' }]}>
+                <Text style={{ color: '#0000FF' }}>{data.gradeLevel}</Text>
               </View>
-              <View style={[styles.infoValue, { width: '9%' }]}>
-                <Text>{data.className}班</Text>
+              <View style={[styles.infoValue, { width: '6%' }]}>
+                <Text style={{ color: '#0000FF' }}>{data.className}</Text>
               </View>
-              <View style={[styles.infoValueGreen, { width: '8%' }]}>
-                <Text>{String(data.seatNo).padStart(2, '0')}號</Text>
+              <View style={[styles.infoValueGreen, { width: '6%' }]}>
+                <Text style={{ color: '#FF0000' }}>{String(data.seatNo).padStart(2, '0')}號</Text>
               </View>
             </View>
 
@@ -936,7 +1123,7 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
 
             <View style={[styles.remarkBox, { borderTop: BORDER }]}>
               <Text style={styles.remarkLabel}>{labels.remark}</Text>
-              <Text style={styles.remarkText}>{data.remark}</Text>
+              <Text style={[styles.remarkText, { fontSize: remarkFontSize, lineHeight: 1.4 }]}>{remarkDisplay}</Text>
             </View>
           </View>
 
