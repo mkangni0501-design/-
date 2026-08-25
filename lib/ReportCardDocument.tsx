@@ -194,6 +194,13 @@ export const DEFAULT_REPORT_CARD_STYLE: ReportCardStyleConfig = {
   },
 };
 
+// 內頁左表（科目成績）跟右側面板（出席/懲獎記錄）的寬度比例，依「成績單正反.xlsx」
+// 樣本核對出來的常數（見下面 buildStyles() 裡 leftCol/rightCol 的說明）。獨立拉出來
+// 是因為「導師評語」框（remarkBox）的寬度要跟左表對齊到同一條格線，兩個地方共用
+// 同一組常數，之後如果比例要再調整，只需要改這裡一個地方。
+const LEFT_COL_FLEX = 1.362;
+const RIGHT_COL_FLEX = 1;
+
 function buildStyles(config: ReportCardStyleConfig) {
   const BORDER = `${config.sizes.borderWidth}pt solid ${config.colors.borderColor}`;
   const base = config.sizes.baseFontSize;
@@ -265,8 +272,8 @@ function buildStyles(config: ReportCardStyleConfig) {
       // 【2026-08-23 依「成績單正反.xlsx」欄寬逐格核對後修正】左表（科目成績）：右側面板
       // （出席／懲獎記錄）原本的比例是 1.55:1，跟樣本檔案實際欄寬比例（1.362:1）有落差，
       // 這裡照樣本調整，右側面板變得比原本略寬一些。
-      leftCol: { flex: 1.362, borderRight: BORDER },
-      rightCol: { flex: 1 },
+      leftCol: { flex: LEFT_COL_FLEX, borderRight: BORDER },
+      rightCol: { flex: RIGHT_COL_FLEX },
 
       pageInner: { flexDirection: 'row', flex: 1 },
       dateStrip: { width: 26, borderLeft: BORDER, alignItems: 'center', justifyContent: 'center' },
@@ -305,7 +312,13 @@ function buildStyles(config: ReportCardStyleConfig) {
       // 整張內頁撐過一頁（見上面 fitRemarkFontSize 的說明）。改成固定 height（不是
       // minHeight）+ overflow:'hidden'，框本身永遠是這個高度，不會再被內容撐大，
       // 配合文字自動縮字級/必要時截斷，保證內頁永遠剛好一頁。
-      remarkBox: { height: 66, padding: 6, overflow: 'hidden' },
+      // 【2026-08-25 依回饋修正】原本這裡沒有設定寬度，預設吃滿整列（跟左表+右側
+      // 出席/懲獎面板加起來一樣寬），評語框看起來像是延伸到「出席記錄」欄位底下。
+      // 改成只到「學年成績」欄（左表最右一欄）跟「出席記錄」（右側面板最左欄）
+      // 中間那條格線為止，寬度比例跟 leftCol/rightCol 用同一組常數換算，兩邊改
+      // 版面比例時（例如以後樣本欄寬再調整）這裡會自動跟著對齊，不用另外維護
+      // 一個寫死的百分比。右邊（原本 rightCol 底下）留白，不畫格線也不放文字。
+      remarkBox: { width: `${(LEFT_COL_FLEX / (LEFT_COL_FLEX + RIGHT_COL_FLEX)) * 100}%`, height: 66, padding: 6, overflow: 'hidden', borderRight: BORDER },
       remarkLabel: { fontSize: base, fontWeight: 700, marginBottom: 3 },
       remarkText: { fontSize: base, lineHeight: 1.5 },
     }),
@@ -373,20 +386,22 @@ function round2(n: number): number {
 // 原本是空的（只有 return ''，一直沒有真的實作），成績單「全學年」那一欄會一直是
 // 空白，這輪一併補上。只有一個學期有資料時（例如下學期還沒開始），直接顯示那個
 // 學期的總分，不會因為缺另一半而顯示空白或錯誤數字。
+// 【2026-08-25 依回饋修正】原本只要上/下學期任一學期有資料就會顯示那個學期的
+// 總分/平均（缺另一半時直接顯示現有那學期的數字），這次回饋改成：只要下學期
+// 還沒有資料，學年成績欄一律顯示空白，不要顯示「只有上學期」的數字——避免
+// 看起來像是「這就是學年成績」造成誤會，等下學期資料真的登錄了，兩學期都有
+// 資料的時候才計算並顯示學年成績（上下學期簡單平均）。
 function annualTotal(subject: string, terms: ReportCardData['terms']): string {
   const spring = terms.上學期?.subjects.find((x) => x.subject === subject)?.total;
   const fall = terms.下學期?.subjects.find((x) => x.subject === subject)?.total;
-  if (spring == null && fall == null) return '';
-  if (spring == null) return fall!.toFixed(2);
-  if (fall == null) return spring.toFixed(2);
+  if (spring == null || fall == null) return '';
   return round2((spring + fall) / 2).toFixed(2);
 }
 
 // 通用版的「兩學期平均」，給學業平均/操行成績這幾列（不是逐科目、是單一數字）用。
+// 【2026-08-25 依回饋修正】同上，兩學期都有資料才顯示，否則空白。
 function annualAverage(spring: number | null | undefined, fall: number | null | undefined): string {
-  if (spring == null && fall == null) return '';
-  if (spring == null) return fall!.toFixed(2);
-  if (fall == null) return spring.toFixed(2);
+  if (spring == null || fall == null) return '';
   return round2((spring + fall) / 2).toFixed(2);
 }
 
@@ -414,17 +429,28 @@ function subjectLabelFontSize(name: string, base: number): number {
   return base;
 }
 
+// 【2026-08-25 依「導師評語欄位只到學年成績/出席紀錄中間格線」的回饋修正】
+// remarkBox 寬度從原本「跟外層一樣寬（100%）」改成只到左表（leftCol）右緣
+// 為止（見上面 remarkBox 樣式），寬度縮成原本的 LEFT_COL_FLEX/(LEFT_COL_FLEX+
+// RIGHT_COL_FLEX) ≈ 57.7%。同一個字級在變窄的框裡，一行能放的字數會等比例
+//變少，原本用「整個外層寬度」校準出來的字數級距（60/100/150/210/260）如果
+// 照舊沿用，長一點的評語會在變窄的框裡換行換更多行，超出固定高度（66pt）、
+// 又撐出下一頁——已經實際用 pdftoppm 渲染驗證過這個回歸（評語變成印到第3頁）。
+// 這裡把每個字級距，跟著寬度縮小的同一個比例（REMARK_WIDTH_RATIO）等比例
+// 縮小，讓「這個字數大概能在一行放幾個字」的假設跟新的框寬重新對上。
+const REMARK_WIDTH_RATIO = LEFT_COL_FLEX / (LEFT_COL_FLEX + RIGHT_COL_FLEX);
 function fitRemarkFontSize(text: string): number {
   const len = text.length;
-  if (len <= 60) return 11;
-  if (len <= 100) return 9.5;
-  if (len <= 150) return 8.5;
-  if (len <= 210) return 7.5;
+  if (len <= 60 * REMARK_WIDTH_RATIO) return 11;
+  if (len <= 100 * REMARK_WIDTH_RATIO) return 9.5;
+  if (len <= 150 * REMARK_WIDTH_RATIO) return 8.5;
+  if (len <= 210 * REMARK_WIDTH_RATIO) return 7.5;
   return 6.5;
 }
 // 字級縮到最小（6.5）大概還能塞下的字數上限，超過就直接截斷——避免評語真的
 // 異常長（例如貼了一整段文章）時，就算用最小字級還是會溢出固定高度的框。
-const REMARK_MAX_CHARS = 260;
+// 跟上面同理，也依 REMARK_WIDTH_RATIO 等比例縮小。
+const REMARK_MAX_CHARS = Math.round(260 * REMARK_WIDTH_RATIO);
 function truncateRemark(text: string): string {
   if (text.length <= REMARK_MAX_CHARS) return text;
   return text.slice(0, REMARK_MAX_CHARS - 1) + '…';
@@ -655,28 +681,28 @@ function ScoreTable({
 
         {/* 上學期：分數(2欄寬) + 等第(2欄寬，貫穿五列) */}
         <View style={{ width: `${scoreColWidth * 4}%`, flexDirection: 'row', borderLeft: BORDER }}>
-          <View style={{ width: `${scoreColWidth * 2}%`, flexDirection: 'column' }}>
+          <View style={{ flex: 3, flexDirection: 'column' }}>
             {(['overall', 'politeness', 'dress', 'service', 'discipline'] as const).map((key, i) => (
               <View key={key} style={{ flex: 1, minHeight: 0, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
                 <Text style={{ fontSize: denseFontSize }}>{fmtRounded(terms.上學期?.conduct[key])}</Text>
               </View>
             ))}
           </View>
-          <View style={{ width: `${scoreColWidth * 2}%`, alignItems: 'center', justifyContent: 'center', borderLeft: BORDER }}>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', borderLeft: BORDER }}>
             <Text style={{ fontSize: denseFontSize * 2.6, fontWeight: 700 }}>{conductGradeLabel(terms.上學期?.conduct.overall ?? null)}</Text>
           </View>
         </View>
 
         {/* 下學期：分數(2欄寬) + 等第(2欄寬，貫穿五列) */}
         <View style={{ width: `${scoreColWidth * 4}%`, flexDirection: 'row', borderLeft: BORDER }}>
-          <View style={{ width: `${scoreColWidth * 2}%`, flexDirection: 'column' }}>
+          <View style={{ flex: 3, flexDirection: 'column' }}>
             {(['overall', 'politeness', 'dress', 'service', 'discipline'] as const).map((key, i) => (
               <View key={key} style={{ flex: 1, minHeight: 0, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', borderBottom: i < 4 ? BORDER : 'none' }}>
                 <Text style={{ fontSize: denseFontSize }}>{fmtRounded(terms.下學期?.conduct[key])}</Text>
               </View>
             ))}
           </View>
-          <View style={{ width: `${scoreColWidth * 2}%`, alignItems: 'center', justifyContent: 'center', borderLeft: BORDER }}>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', borderLeft: BORDER }}>
             <Text style={{ fontSize: denseFontSize * 2.6, fontWeight: 700 }}>{conductGradeLabel(terms.下學期?.conduct.overall ?? null)}</Text>
           </View>
         </View>
@@ -705,16 +731,60 @@ function conductGradeLabel(score: number | null): string {
   return '丁';
 }
 
+// 【2026-08-25 新增】右側面板「導師/訓導/教務/校長簽章」那一列，格線需要下移對齊
+// 左表「服務」那一列（操行成績區塊 操行成績/禮貌/衣著/服務/紀律 共5列的倒數第2列），
+// 不能用固定高度（原本 minHeight:34），因為左表「服務」的實際位置會隨科目數量變動——
+// 左表科目列＋學業平均＋操行成績區塊是用 flex 比例（科目數N + 1 + 5 個單位）平分
+// leftCol 可用高度，科目愈多每一列愈矮，「服務」的位置也跟著往下移，右側簽章列的
+// 起始高度要跟著同一個比例算，才能不管科目數多寡都精準對齊。
+// 下面三個常數是用 pdftoppm 把內頁實際渲染成圖片、逐像素量出來的固定值（在預設
+// 樣式 DEFAULT_REPORT_CARD_STYLE 下）：
+// - H_BODY_PT：內頁「表格主體」（科目成績表＋右側面板，不含最上面校名/學號列、
+//   最下面導師評語框）的固定高度——這個高度只由頁面尺寸/外頁邊界/表頭列高/
+//   導師評語框高度決定，不會隨科目數量變動。
+// - LEFT_HEADER_FIXED_PT：左表「科目/比重/上下學期/學年成績」＋「期中/期末/平時/
+//   總分」＋「期中期末平時佔比%」這三列固定表頭的高度（科目列從這裡往下才開始）。
+// - RIGHT_FIXED_BEFORE_PROMOTION_PT：右側面板「出席記錄/懲獎記錄」標題列＋表頭列＋
+//   6列資料（曠課/遲到/病假/事假/公假/全勤）＋「全班人數/全班名次」列，這幾列固定
+//   高度的總和（升留級/簽章這兩列之前的部分）。
+// 如果之後管理員在後台把字級（sizes.baseFontSize 等）調整很多，這三個常數理論上
+// 會跟著實際渲染高度小幅偏移，屆時建議重新渲染一份 PDF 用同樣方式量測校正；
+// 一般調整（顏色/文字標籤/欄寬比例）不影響這幾個常數。
+const H_BODY_PT = 417.6;
+const LEFT_HEADER_FIXED_PT = 56.88;
+const RIGHT_FIXED_BEFORE_PROMOTION_PT = 220.32;
+
+function promotionRowHeight(subjectCount: number): number {
+  const units = subjectCount + 6; // 科目列(N) + 學業平均(1) + 操行成績區塊(5)
+  const unitHeight = (H_BODY_PT - LEFT_HEADER_FIXED_PT) / units;
+  // 簽章列要從「服務」列頂端開始（操行成績區塊倒數第2列），也就是留給簽章列的
+  // 高度剛好是「服務＋紀律」兩列的高度（2個單位），升留級/簽章列之前的區塊
+  // （這裡的 promotion 列）要把其餘高度全部撐滿。
+  // SAFETY_MARGIN_PT：上面三個常數是從實際渲染的 PDF 用像素量出來、再換算成 pt
+  // 的，量測跟四捨五入難免有零點幾 pt 的誤差；這個誤差如果讓算出來的高度「剛好
+  // 比實際可用空間多一點點」，就會讓整頁內容溢出、多印出一張幾乎空白的第3頁
+  // （已經實際渲染測試踩到這個狀況）。這裡預留一點緩衝，讓算出來的高度寧可
+  // 稍微「保守」（矮一點點），差額會被下面「簽章列」的 flex:1 自動吸收，
+  // 不影響視覺——但可以確保不會因為零點幾 pt 的誤差就多印一頁。
+  const SAFETY_MARGIN_PT = 15;
+  const raw = H_BODY_PT - RIGHT_FIXED_BEFORE_PROMOTION_PT - 2 * unitHeight - SAFETY_MARGIN_PT;
+  // 科目數極端多時 unitHeight 會很小，理論上 raw 會趨近一個較大的正值，不會變負；
+  // 這裡加個保底避免萬一算出異常值時整列高度塌陷看不見文字。
+  return Math.max(raw, 20);
+}
+
 function AttendanceDisciplinePanel({
   terms,
   styles,
   BORDER,
   labels,
+  subjectCount,
 }: {
   terms: ReportCardData['terms'];
   styles: ReturnType<typeof buildStyles>['sheet'];
   BORDER: string;
   labels: ReportCardStyleConfig['labels'];
+  subjectCount: number;
 }) {
   const spring = terms.上學期;
   const fall = terms.下學期;
@@ -847,8 +917,11 @@ function AttendanceDisciplinePanel({
           （2026-08-24 依回饋修正）不再跟著「是否印下學期／學年成績」隱藏——原本
           `spring && fall` 這個條件只印下學期／學年成績單時才顯示「升留級」三個字，
           上學期單獨列印時（例如這次的範例）整格連標籤都是空的，看起來像漏印。
-          改成標籤永遠顯示，需要真的有升留級資料來源以後，再補上對應的「值」即可。 */}
-      <View style={[styles.row, { minHeight: 34 }]}>
+          改成標籤永遠顯示，需要真的有升留級資料來源以後，再補上對應的「值」即可。
+          【2026-08-25 修正】高度原本固定 minHeight:34，改成用 promotionRowHeight()
+          依科目數量動態算出來的高度——見上面該函式的說明，目的是讓下面「簽章列」
+          的頂端精準對齊左表「服務」那一列。 */}
+      <View style={[styles.row, { height: promotionRowHeight(subjectCount) }]}>
         <View style={[styles.sectionTitle, { width: '25%' }]}>
           <Text>{labels.promotionStatus}</Text>
         </View>
@@ -1117,7 +1190,7 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
                 <ScoreTable terms={data.terms} styles={styles} BORDER={BORDER} labels={labels} config={config} scoreColWidth={scoreColWidth} />
               </View>
               <View style={styles.rightCol}>
-                <AttendanceDisciplinePanel terms={data.terms} styles={styles} BORDER={BORDER} labels={labels} />
+                <AttendanceDisciplinePanel terms={data.terms} styles={styles} BORDER={BORDER} labels={labels} subjectCount={(data.terms.上學期 ?? data.terms.下學期)?.subjects.length ?? 0} />
               </View>
             </View>
 
