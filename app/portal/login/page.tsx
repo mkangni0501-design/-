@@ -128,8 +128,8 @@ function PortalLoginPageInner() {
       <h1 style={{ fontSize: 18, marginBottom: 8 }}>家長／學生查詢入口</h1>
       <p style={{ fontSize: 13, color: '#666', marginBottom: 24 }}>
         {verificationEnabled
-          ? '請輸入學校提供的登入代碼（格式為 HY+學號）與登記的信箱，系統會寄一封驗證信到該信箱，點開連結即可完成登入。'
-          : '請輸入學校提供的登入代碼（格式為 HY+學號）與登記的信箱，送出後即可直接進入查詢。'}
+          ? '請輸入學校提供的登入代碼（家長為 HY+學號，學生本人為 HYS+學號）與登記的信箱，系統會寄一封驗證信到該信箱，點開連結即可完成登入。'
+          : '請輸入學校提供的登入代碼（家長為 HY+學號，學生本人為 HYS+學號）與登記的信箱，送出後即可直接進入查詢。'}
       </p>
 
       {!signedInEmail ? (
