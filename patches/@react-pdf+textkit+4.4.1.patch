@@ -1,0 +1,55 @@
+diff --git a/node_modules/@react-pdf/textkit/lib/textkit.cjs b/node_modules/@react-pdf/textkit/lib/textkit.cjs
+index 7879740..9997120 100644
+--- a/node_modules/@react-pdf/textkit/lib/textkit.cjs
++++ b/node_modules/@react-pdf/textkit/lib/textkit.cjs
+@@ -2932,6 +2932,7 @@ var opts = {
+  * @param {Object[]} breaks
+  * @returns {AttributedString[]} attributed strings
+  */
++var CJK_OR_THAI_HYPHEN_SKIP = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3000-\u303f\uff00-\uffef\u0e00-\u0e7f]/;
+ var breakLines = function breakLines(string, nodes, breaks) {
+   var start = 0;
+   var end = null;
+@@ -2945,7 +2946,12 @@ var breakLines = function breakLines(string, nodes, breaks) {
+     if (node.type === 'penalty') {
+       end = prevNode.value.end;
+       line = slice(start, end, string);
+-      line = insertGlyph(line.length, HYPHEN, line);
++      // 【patch-package: react-pdf-cjk-hyphen-fix】見 textkit.js 同一段的說明：
++      // 中文/泰文字元逐字斷行不應該插入英文連字號。
++      var lastChar = string.string[end - 1];
++      if (!CJK_OR_THAI_HYPHEN_SKIP.test(lastChar || '')) {
++        line = insertGlyph(line.length, HYPHEN, line);
++      }
+     } else {
+       end = node.value.end;
+       line = slice(start, end, string);
+diff --git a/node_modules/@react-pdf/textkit/lib/textkit.js b/node_modules/@react-pdf/textkit/lib/textkit.js
+index 9c407c8..fe05497 100644
+--- a/node_modules/@react-pdf/textkit/lib/textkit.js
++++ b/node_modules/@react-pdf/textkit/lib/textkit.js
+@@ -2918,6 +2918,7 @@ var opts = {
+  * @param {Object[]} breaks
+  * @returns {AttributedString[]} attributed strings
+  */
++var CJK_OR_THAI_HYPHEN_SKIP = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3000-\u303f\uff00-\uffef\u0e00-\u0e7f]/;
+ var breakLines = function breakLines(string, nodes, breaks) {
+   var start = 0;
+   var end = null;
+@@ -2931,7 +2932,15 @@ var breakLines = function breakLines(string, nodes, breaks) {
+     if (node.type === 'penalty') {
+       end = prevNode.value.end;
+       line = slice(start, end, string);
+-      line = insertGlyph(line.length, HYPHEN, line);
++      // 【patch-package: react-pdf-cjk-hyphen-fix】原本這裡不管在哪裡斷行，
++      // 只要是這種「penalty」型態的斷點，一律在斷行處插入一個英文連字號「-」——
++      // 這是為了英文單字中間斷行（hyphenation）設計的，但中文/泰文本來就是
++      // 逐字斷行、字跟字中間本來就不該出現連字號。這裡改成：斷行點前一個字如果
++      // 是中文/泰文字元，就不要插入這個連字號字元，其餘（英文）情況維持原本行為。
++      var lastChar = string.string[end - 1];
++      if (!CJK_OR_THAI_HYPHEN_SKIP.test(lastChar || '')) {
++        line = insertGlyph(line.length, HYPHEN, line);
++      }
+     } else {
+       end = node.value.end;
+       line = slice(start, end, string);
