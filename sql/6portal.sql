@@ -12,7 +12,10 @@
 create table if not exists portal_accounts (
   id uuid primary key default gen_random_uuid(),
   student_no text not null references students(student_no) on delete cascade,
-  login_code text not null unique,       -- 'HY' || 學號，例如 HY0123 / HY262034，建立帳號時自動產生
+  login_code text not null unique,       -- 家長：'HY' || 學號（例如 HY0123）；學生本人：'HY' || 學號 || 'S'（例如 HY0123S）。
+                                          -- 【2026-08-23】兩種身分要用不同代碼，login_code 是 unique，同一個學生的
+                                          -- 家長帳號跟學生本人帳號不能共用同一組代碼，否則第二個會建立失敗。
+                                          -- 建立時由 app/(app)/admin/students/portal-accounts/page.tsx 自動產生。
   email text not null,                   -- 校方登記的家長/學生信箱，登入時必須跟這個一致（可直接帶入監護人資料的email）
   relation text not null default '家長', -- 家長／學生本人
   auth_user_id uuid references auth.users(id), -- 第一次成功登入且比對相符後才會填入
