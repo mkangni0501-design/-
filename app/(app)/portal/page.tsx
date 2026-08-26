@@ -306,6 +306,33 @@ export default function ParentPortalPage() {
     <main style={{ maxWidth: 640, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 16, marginBottom: 16 }}>家長／學生查詢入口</h1>
 
+      {/* 【2026-08-26 新增】社團／才藝課選社（/portal/clubs）這個頁面本來就有，
+          資料庫、選社邏輯都做好了，但這個入口頁完全沒有任何連結指向它——
+          學生登入後不管怎麼點都找不到「社團設定」在哪裡，等於功能做了卻沒有
+          入口，這正是「社團設定資料尚未看到」這個回饋的根因。這裡補上一個
+          明顯的連結，不放進上面「成績／課表／通知」的分頁切換裡，是因為選社
+          只有學生本人能操作（家長不行，見 /portal/clubs 頁面本身的說明），
+          獨立成一個連結，點了才進去，跟其他分頁的「查詢」性質分開。 */}
+      {!loadingAccounts && !loadError && linkedStudents.length > 0 && (
+        <button
+          type="button"
+          onClick={() => router.push('/portal/clubs')}
+          style={{
+            display: 'inline-block',
+            marginBottom: 16,
+            padding: '8px 16px',
+            background: '#2C2C2A',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 6,
+            fontSize: 13,
+            cursor: 'pointer',
+          }}
+        >
+          社團／才藝課選社 →
+        </button>
+      )}
+
       {linkedStudents.length > 1 && (
         <select
           value={selected?.id}

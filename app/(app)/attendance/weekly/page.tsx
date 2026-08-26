@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { supabase, getCurrentAppUser, isAdminInCurrentView, getCurrentTeacherId } from '@/lib/supabaseClient';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { departmentForGrade } from '@/lib/gradeMapping';
 import { getEffectivePeriodCount, WEEKDAY_LABELS } from '@/lib/periodConfig';
@@ -20,7 +20,13 @@ import { downloadScoreAttendanceTemplate } from '@/lib/excelTemplates';
 import ErrorBanner from '@/components/ErrorBanner';
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
-const BACKDATE_GRACE_DAYS = 7; // 導師在1週內補登不需要提出修正申請，超過則需送出申請
+// 【2026-08-26 依回饋修正】這裡原本是寫死的常數 BACKDATE_GRACE_DAYS = 7，跟「出缺席示警
+// 門檻設定」頁裡訓導處可以調整的「出缺席補登逾期天數」（attendance_alert_settings.
+// backfill_overdue_days）完全是兩回事——訓導處在後台改了那個數字，存進資料庫，但這裡
+// 從來沒有讀取過那個欄位，教師端看到的補登期限永遠是寫死的 7 天，跟後台設定值沒套用
+// 這個問題的根源。改成預設值（DEFAULT_BACKDATE_GRACE_DAYS，行為當作「讀不到設定時的
+// 備援值」），實際判斷改用下面從資料庫讀回來、可隨後台設定變動的 backdateGraceDays state。
+const DEFAULT_BACKDATE_GRACE_DAYS = 7;
 
 type StudentRow = { student_no: string; seat_no: number; name: string };
 type ClassOption = { id: string; label: string; grade_level: string };
@@ -89,6 +95,9 @@ export default function WeeklyAttendancePage() {
   // 會跳出提示讓導師自行選擇是否寄送通知信（同時留下紀錄給管理者查看）。
   const [teacherId, setTeacherId] = useState<string | null>(null);
   const [alertThreshold, setAlertThreshold] = useState<number | null>(null);
+  // 【2026-08-26 新增】出缺席補登逾期天數，改成從 attendance_alert_settings 讀取
+  // （見下面 useEffect），不再用寫死的常數。讀不到資料時退回 DEFAULT_BACKDATE_GRACE_DAYS。
+  const [backdateGraceDays, setBackdateGraceDays] = useState<number>(DEFAULT_BACKDATE_GRACE_DAYS);
   const [notifyQueue, setNotifyQueue] = useState<{ student_no: string; name: string; count: number }[]>([]);
   const [notifyBusy, setNotifyBusy] = useState(false);
   const notifyPrompt = notifyQueue[0] ?? null;
@@ -112,10 +121,27 @@ export default function WeeklyAttendancePage() {
 
   const weekStart = useMemo(() => getMonday(pivotDate), [pivotDate]);
 
+  // 【2026-08-26 新增】依回饋修正：整班/整週被鎖定時，申請開放的表單原本要導師先點一次
+  // 「申請開放」按鈕才會出現（showOpenRequest 預設 false），等於「打開頁面看到鎖定訊息」
+  // 跟「看到可以填寫的申請表單」中間多了一次不必要的點擊。改成偵測到鎖定狀態時就自動展開
+  // 表單，不用再多點一次。（isAdmin 不受鎖定影響，不需要這個表單，所以只在非管理員時展開。）
+  useEffect(() => {
+    if (locked && !isAdmin) setShowOpenRequest(true);
+  }, [locked, isAdmin]);
+
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from('attendance_alert_settings').select('threshold_periods').eq('id', 1).maybeSingle();
-      if (data) setAlertThreshold(data.threshold_periods);
+      // 【2026-08-26 修正】一併讀 backfill_overdue_days，讓補登期限跟著訓導處在
+      // 「出缺席示警門檻設定」頁調整的值走，而不是永遠用寫死的 7 天。
+      const { data } = await supabase
+        .from('attendance_alert_settings')
+        .select('threshold_periods, backfill_overdue_days')
+        .eq('id', 1)
+        .maybeSingle();
+      if (data) {
+        setAlertThreshold(data.threshold_periods);
+        if (typeof data.backfill_overdue_days === 'number') setBackdateGraceDays(data.backfill_overdue_days);
+      }
     })();
   }, []);
 
@@ -297,7 +323,7 @@ export default function WeeklyAttendancePage() {
     if (isAdmin) return true;
     if (!isHomeroom) return false;
     if (locked) return false; // 已鎖定：需送出「申請開放」，由管理員審核後才能再登錄
-    return daysAgo(dateStr) <= BACKDATE_GRACE_DAYS;
+    return daysAgo(dateStr) <= backdateGraceDays;
   }
 
   async function checkAndPromptNotify(student_no: string) {
@@ -345,27 +371,40 @@ export default function WeeklyAttendancePage() {
   async function handleSubmitCorrectionRequest() {
     if (!requestCell) return;
     const { student_no, dateStr, period } = requestCell;
-    const { data: attRow } = await supabase
+    // 【2026-08-26 修正】原本沒有檢查這個查詢本身的 error，只看 attRow 是否為空——
+    // 如果查詢本身失敗（例如網路問題、權限問題），data 一樣會是 null，會被誤判成
+    // 「這個時段還沒有出缺勤紀錄」這個不相關、誤導的訊息，導師看到錯誤但完全猜不出
+    // 真正原因。改成先檢查 error，查詢真的失敗時顯示真正的錯誤訊息。
+    const { data: attRow, error: findErr } = await supabase
       .from('attendance')
       .select('id')
       .eq('student_no', student_no)
       .eq('record_date', dateStr)
       .eq('period_no', period)
       .maybeSingle();
+    if (findErr) {
+      alert('查詢出缺勤紀錄失敗：' + findErr.message);
+      return;
+    }
     if (!attRow) {
       alert('這個時段目前還沒有出缺勤紀錄，這種情況無法送出修正申請，請聯絡管理員直接補登。');
       return;
     }
-    const { data: teacherRow } = await supabase.from('teachers').select('id').eq('app_user_id', me?.id).maybeSingle();
-    if (!teacherRow) {
+    const requesterTeacherId = await getCurrentTeacherId();
+    if (!requesterTeacherId) {
       alert('找不到您的教師資料，無法送出申請');
       return;
     }
+    // 【2026-08-26 新增】補上 academic_year/term——欄位本來就存在（sql/9），
+    // 之前送出申請時完全沒有帶這兩個值，一律是 null。
+    const currentTerm = await resolveCurrentTerm();
     const { error } = await supabase.from('correction_requests').insert({
-      requested_by: teacherRow.id,
+      requested_by: requesterTeacherId,
       data_type: '出缺勤',
       record_id: attRow.id,
       reason: requestReason || null,
+      academic_year: currentTerm?.academic_year ?? null,
+      term: currentTerm?.term ?? null,
     });
     if (error) {
       alert('送出申請失敗：' + error.message);
@@ -380,17 +419,20 @@ export default function WeeklyAttendancePage() {
   // 這裡不指定 record_id，改用 scope/scope_ref 標示要開放的範圍，由管理員審核後解鎖。
   async function handleSubmitOpenRequest() {
     if (!classId) return;
-    const { data: teacherRow } = await supabase.from('teachers').select('id').eq('app_user_id', me?.id).maybeSingle();
-    if (!teacherRow) {
+    const requesterTeacherId = await getCurrentTeacherId();
+    if (!requesterTeacherId) {
       alert('找不到您的教師資料，無法送出申請');
       return;
     }
+    const currentTerm = await resolveCurrentTerm();
     const { error } = await supabase.from('correction_requests').insert({
-      requested_by: teacherRow.id,
+      requested_by: requesterTeacherId,
       data_type: '出缺勤',
       scope: '班級',
       scope_ref: classId,
       reason: openRequestReason || null,
+      academic_year: currentTerm?.academic_year ?? null,
+      term: currentTerm?.term ?? null,
     });
     if (error) {
       alert('送出申請失敗：' + error.message);
@@ -400,6 +442,7 @@ export default function WeeklyAttendancePage() {
     setShowOpenRequest(false);
     setOpenRequestReason('');
   }
+
 
   // 批次登錄：勾選的每一位學生 × 每一個勾選的日期，把該天所有節次都改成同一個出席狀況。
   async function handleApplyBatchStatus() {
@@ -669,7 +712,7 @@ export default function WeeklyAttendancePage() {
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
         {isAdmin
           ? '管理員可直接登錄／修改任一班級任一天的出缺勤紀錄，不受鎖定與週次限制。'
-          : `導師可直接補登最近 ${BACKDATE_GRACE_DAYS} 天內的紀錄；超過 ${BACKDATE_GRACE_DAYS} 天的既有紀錄需點選後送出修正申請，交由管理員審核。`}
+          : `導師可直接補登最近 ${backdateGraceDays} 天內的紀錄；超過 ${backdateGraceDays} 天的既有紀錄需點選後送出修正申請，交由管理員審核。`}
       </p>
 
       {loading ? (

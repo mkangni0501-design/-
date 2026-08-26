@@ -38,7 +38,10 @@ type StudentRow = { student_no: string; seat_no: number; name: string };
 type ClassOption = { id: string; label: string; grade_level: string };
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
-const BACKDATE_GRACE_DAYS = 7; // 導師在1週內補登不需要提出修正申請，超過則需改到「一週出缺勤」頁送出修正申請
+// 【2026-08-26 依回饋修正】同「一週出缺勤」頁的問題：這裡原本是寫死的常數，跟訓導處
+// 在「出缺席示警門檻設定」頁可調整的 backfill_overdue_days 沒有連動，改成從資料庫讀取，
+// 這個常數只當作讀不到設定時的備援值。
+const DEFAULT_BACKDATE_GRACE_DAYS = 7;
 
 const SOURCE_COLOR: Record<PeriodSource, { bg: string; text: string }> = {
   teach: { bg: '#2C2C2A', text: '#fff' }, // 自己任課節次
@@ -68,6 +71,8 @@ export default function MobileAttendancePage() {
   const [statusMap, setStatusMap] = useState<Record<string, string>>({});
   const [locked, setLocked] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState<number | null>(null);
+  // 【2026-08-26 新增】見上面 DEFAULT_BACKDATE_GRACE_DAYS 的說明。
+  const [backdateGraceDays, setBackdateGraceDays] = useState<number>(DEFAULT_BACKDATE_GRACE_DAYS);
   const [notifyQueue, setNotifyQueue] = useState<{ student_no: string; name: string; count: number }[]>([]);
   const [notifyBusy, setNotifyBusy] = useState(false);
   const notifyPrompt = notifyQueue[0] ?? null;
@@ -345,7 +350,7 @@ export default function MobileAttendancePage() {
   // 導師補登超過1週的日期：改請到「一週出缺勤」頁對個別紀錄送出修正申請，這裡先擋下直接儲存。
   // 只有在編輯「自己導師班的節次」時才適用導師的放寬規則；編輯自己任課、但不是自己導師班的
   // 節次時，仍然照一般任課教師的規則走。
-  const pastGraceWindow = isEditingOwnHomeroom && !isAdmin && daysAgo(date) > BACKDATE_GRACE_DAYS;
+  const pastGraceWindow = isEditingOwnHomeroom && !isAdmin && daysAgo(date) > backdateGraceDays;
 
   function setStatus(studentNo: string, status: string) {
     setStatusMap((prev) => ({ ...prev, [studentNo]: status }));
@@ -353,8 +358,16 @@ export default function MobileAttendancePage() {
 
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from('attendance_alert_settings').select('threshold_periods').eq('id', 1).maybeSingle();
-      if (data) setAlertThreshold(data.threshold_periods);
+      // 【2026-08-26 修正】一併讀 backfill_overdue_days，理由同「一週出缺勤」頁。
+      const { data } = await supabase
+        .from('attendance_alert_settings')
+        .select('threshold_periods, backfill_overdue_days')
+        .eq('id', 1)
+        .maybeSingle();
+      if (data) {
+        setAlertThreshold(data.threshold_periods);
+        if (typeof data.backfill_overdue_days === 'number') setBackdateGraceDays(data.backfill_overdue_days);
+      }
     })();
   }, []);
 
@@ -421,7 +434,7 @@ export default function MobileAttendancePage() {
         />
         {date !== todayStr() && (
           <p style={{ fontSize: 12, color: '#A36A2D', marginTop: 4 }}>
-            正在補登 {date} 的紀錄{isHomeroom && !isAdmin ? `（導師可直接補登導師班 ${BACKDATE_GRACE_DAYS} 天內的紀錄）` : ''}
+            正在補登 {date} 的紀錄{isHomeroom && !isAdmin ? `（導師可直接補登導師班 ${backdateGraceDays} 天內的紀錄）` : ''}
           </p>
         )}
       </div>
@@ -498,7 +511,7 @@ export default function MobileAttendancePage() {
 
       {pastGraceWindow && (
         <p style={{ fontSize: 13, color: '#A32D2D', marginBottom: 8 }}>
-          此日期已超過可直接補登的 {BACKDATE_GRACE_DAYS} 天範圍，請改到「一週出缺勤」頁對個別紀錄送出修正申請，或聯絡管理員直接登錄。
+          此日期已超過可直接補登的 {backdateGraceDays} 天範圍，請改到「一週出缺勤」頁對個別紀錄送出修正申請，或聯絡管理員直接登錄。
         </p>
       )}
 
