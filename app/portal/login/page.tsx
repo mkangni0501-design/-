@@ -37,6 +37,23 @@ function PortalLoginPageInner() {
         if (codeFromUrl) setLoginCode(codeFromUrl);
         return;
       }
+
+      // 【2026-08-28 修正】反映事項「學生登入以後首頁是教師版」：這裡原本只要偵測到
+      // 「有登入中的 session」就當作是家長/學生自己的登入狀態，完全沒有檢查這個
+      // session 到底是不是教職員的——如果同一台裝置/瀏覽器先前有老師登入過沒登出
+      // （或忘記登出），學生這時候點進「家長/學生查詢入口」，看到的會是「目前登入
+      // 信箱：[老師的信箱]」，如果照著往下綁定，等於把老師的帳號權限交給這次登入的
+      // 學生/家長，之後打 /admin 就會看到教師/管理後台。這裡先確認這個 session 背後
+      // 是不是教職員帳號，是的話直接登出、當作「還沒登入」處理，讓真正要查詢的人
+      // 從乾淨的狀態重新輸入自己的登入代碼與信箱。
+      const { data: staffRow } = await supabase.from('app_users').select('id').eq('id', session.user.id).maybeSingle();
+      if (staffRow) {
+        await supabase.auth.signOut();
+        setChecking(false);
+        if (codeFromUrl) setLoginCode(codeFromUrl);
+        return;
+      }
+
       setSignedInEmail(session.user.email ?? null);
 
       // 【修正】家長如果有兩個以上小孩，每個小孩各自有獨立的登入代碼，但綁定的是

@@ -15,6 +15,7 @@ import { PDFDocument } from 'pdf-lib';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { ReportCardDocument } from '@/lib/ReportCardDocument';
 import { getReportCardResult, canAccessClass, getActiveReportCardStyle } from '@/lib/reportCard';
+import { getActiveTemplateBuffer, mergeReportCardDocx, mergeMultipleDocx } from '@/lib/reportCardDocxTemplate';
 
 export async function POST(req: NextRequest) {
   const { classIds } = await req.json();
@@ -82,7 +83,40 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: '目前沒有任何學生可以產出成績單', notReady }, { status: 409 });
   }
 
-  // ---- 5. 逐一產生 PDF，再合併成一份 ----
+  // ---- 5. 輸出格式：預設 PDF，加上 ?format=docx 改成「Word 合併列印」批次版——
+  // 每位學生各自套用同一份範本合併出一份 .docx，再全部接成同一個檔案下載（每位
+  // 學生之間插入分頁），跟原本 PDF 批次列印「合併成一份檔案」的行為一致。----
+  const format = req.nextUrl.searchParams.get('format');
+  if (format === 'docx') {
+    const templateBuffer = await getActiveTemplateBuffer();
+    const studentDocxBuffers: Buffer[] = [];
+    for (const item of readyList) {
+      const result = await getReportCardResult(item.enrollmentId);
+      if ('reason' in result) continue;
+      try {
+        studentDocxBuffers.push(mergeReportCardDocx(templateBuffer, result.data));
+      } catch (err: any) {
+        return NextResponse.json({ error: `合併列印範本套用失敗（學生：${result.studentName}）：${err?.message ?? String(err)}` }, { status: 500 });
+      }
+    }
+    let mergedDocx: Buffer;
+    try {
+      mergedDocx = mergeMultipleDocx(studentDocxBuffers);
+    } catch (err: any) {
+      return NextResponse.json({ error: '批次合併失敗：' + (err?.message ?? String(err)) }, { status: 500 });
+    }
+    const docxHeaders: Record<string, string> = {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'Content-Disposition': `attachment; filename="report-cards-batch.docx"`,
+      'X-Total-Printed': String(readyList.length),
+    };
+    if (notReady.length > 0) {
+      docxHeaders['X-Skipped-Students'] = encodeURIComponent(JSON.stringify(notReady));
+    }
+    return new NextResponse(new Uint8Array(mergedDocx), { headers: docxHeaders });
+  }
+
+  // ---- 5b. 逐一產生 PDF，再合併成一份（原本的輸出方式，維持不變）----
   const mergedPdf = await PDFDocument.create();
   const styleConfig = await getActiveReportCardStyle();
 

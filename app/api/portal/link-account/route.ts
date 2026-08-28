@@ -30,6 +30,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: '這個信箱與學校登記的信箱不一致，請用學校登記的信箱登入' }, { status: 403 });
   }
 
+  // 【2026-08-28 修正】同一個原因（見 app/api/portal/request-login/route.ts 的說明）：
+  // 如果目前這個已登入的 Supabase 帳號同時也是教職員帳號（信箱剛好跟某位老師的教職員
+  // 登入信箱相同），就不能把它綁定成這位學生/家長的 portal_accounts，不然這個人之後
+  // 用同一個瀏覽器 session 直接打 /admin，看到的會是完整的教師/管理後台。
+  const { data: staffRow } = await supabaseAdmin.from('app_users').select('id').eq('id', authData.user.id).maybeSingle();
+  if (staffRow) {
+    return NextResponse.json(
+      {
+        error:
+          '這個信箱同時是教職員登入使用的信箱，不能用來登入家長/學生查詢入口（會拿到教職員帳號的權限）。' +
+          '請聯絡學校，將這位學生/家長登記的信箱改成跟教職員帳號不同的信箱後再試一次。',
+      },
+      { status: 409 }
+    );
+  }
+
   const { error: updateErr } = await supabaseAdmin
     .from('portal_accounts')
     .update({ auth_user_id: authData.user.id })

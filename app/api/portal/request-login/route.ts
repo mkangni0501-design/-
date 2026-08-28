@@ -46,12 +46,39 @@ export async function POST(req: NextRequest) {
     if (verifyErr || !verifyData.session) {
       return NextResponse.json({ error: '建立登入憑證失敗：' + (verifyErr?.message ?? '未知錯誤') }, { status: 500 });
     }
+
+    // 【2026-08-28 修正】反映事項「學生登入以後首頁是教師版」的根因：Supabase 的帳號是
+    // 用「信箱」認的，全站只有一個命名空間——如果這個信箱剛好也是某位教職員登入用的
+    // 信箱（例如老師自己也是某個學生的家長、登記時填了跟教職員帳號同一個信箱；或資料
+    // 建檔時不小心填錯），上面 generateLink()／verifyOtp() 這兩步「核發登入憑證」核發
+    // 到的，就會是「那位教職員原本那個帳號」的 session，不是一個新的、乾淨的家長/學生
+    // 專用身分——因為 Supabase 認的是信箱，不是「這次是要核發哪一種用途的憑證」。
+    // 這裡等於把教職員帳號的完整權限，原封不動核發給任何一個知道「登入代碼＋這個
+    // 信箱」的人，讓他們可以在【家長/學生查詢】這個入口拿到一個貨真價實的教職員登入
+    // session，之後只要瀏覽器網址直接打 /admin，看到的就是完整的教師/管理後台——
+    // 這就是「學生登入卻看到教師版首頁」實際發生的機制，不是畫面顯示邏輯寫錯。
+    // 修法：核發憑證之後，先檢查這個信箱背後的帳號是不是教職員帳號（app_users 有沒有
+    // 這筆），有的話整個擋下來，不綁定 portal_accounts、也不把這組 session 交給前端，
+    // 並提醒學校去改這位學生/家長登記的信箱（不能跟任何教職員帳號共用同一個信箱）。
+    const { data: staffRow } = await supabaseAdmin.from('app_users').select('id').eq('id', verifyData.session.user.id).maybeSingle();
+    if (staffRow) {
+      await supabaseAdmin.auth.admin.signOut(verifyData.session.access_token).catch(() => {});
+      return NextResponse.json(
+        {
+          error:
+            '這個信箱同時是教職員登入使用的信箱，不能用來登入家長/學生查詢入口（會拿到教職員帳號的權限）。' +
+            '請聯絡學校，將這位學生/家長登記的信箱改成跟教職員帳號不同的信箱後再試一次。',
+        },
+        { status: 409 }
+      );
+    }
+
     const { error: bindErr } = await supabaseAdmin
       .from('portal_accounts')
       .update({ auth_user_id: verifyData.session.user.id })
       .eq('id', account.id);
     if (bindErr) {
-      return NextResponse.json({ error: '綁定帳號失敗：' + bindErr.message }, { status: 500 });
+      return NextResponse.json({ error: '綁定失敗：' + bindErr.message }, { status: 500 });
     }
     return NextResponse.json({
       verificationEnabled: false,
