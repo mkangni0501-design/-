@@ -145,7 +145,7 @@ export default function BatchReportCardTab() {
     }
   }
 
-  async function handleBatchPrint(classIds: string[], skipIncomplete = false) {
+  async function handleBatchPrint(classIds: string[], skipIncomplete = false, format: 'pdf' | 'docx' = 'pdf') {
     if (classIds.length === 0) {
       alert('請至少選擇一個班級');
       return;
@@ -162,11 +162,14 @@ export default function BatchReportCardTab() {
       alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生成績單 PDF，請稍候…（多個班級一起列印可能需要一些時間）</p>');
+    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${format === 'docx' ? '（Word 合併列印）' : ' PDF'}，請稍候…（多個班級一起列印可能需要一些時間）</p>`);
     setPrinting(true);
     try {
       const token = (await supabase.auth.getSession()).data.session?.access_token;
-      const url = `/api/reports/report-card/batch${skipIncomplete ? '?skipIncomplete=true' : ''}`;
+      const params = new URLSearchParams();
+      if (skipIncomplete) params.set('skipIncomplete', 'true');
+      if (format === 'docx') params.set('format', 'docx');
+      const url = `/api/reports/report-card/batch${params.toString() ? '?' + params.toString() : ''}`;
 
       const res = await fetch(url, {
         method: 'POST',
@@ -179,7 +182,7 @@ export default function BatchReportCardTab() {
         const body = await res.json();
         const names = (body.notReady ?? []).map((s: any) => `${s.studentName}(${s.reason})`).join('、');
         const confirmSkip = confirm(`以下學生尚未能產出成績單：\n${names}\n\n要跳過這些人、先列印其餘已完成的嗎？`);
-        if (confirmSkip) return handleBatchPrint(classIds, true);
+        if (confirmSkip) return handleBatchPrint(classIds, true, format);
         return;
       }
 
@@ -197,6 +200,16 @@ export default function BatchReportCardTab() {
       }
 
       const blob = await res.blob();
+      if (format === 'docx') {
+        printWindow.close();
+        const a = document.createElement('a');
+        const dUrl = URL.createObjectURL(blob);
+        a.href = dUrl;
+        a.download = 'report-cards-batch.docx';
+        a.click();
+        URL.revokeObjectURL(dUrl);
+        return;
+      }
       const blobUrl = URL.createObjectURL(blob);
       printWindow.location.href = blobUrl;
     } catch (err: any) {
@@ -268,6 +281,23 @@ export default function BatchReportCardTab() {
         }}
       >
         {printing ? '產出中…' : '批次列印所選班級成績單（個人成績單PDF）'}
+      </button>
+
+      <button
+        onClick={() => handleBatchPrint(Array.from(selected), false, 'docx')}
+        disabled={printing || selected.size === 0}
+        style={{
+          marginLeft: 8,
+          padding: '8px 20px',
+          background: printing ? '#ccc' : '#2C6E9E',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 4,
+          fontSize: 13,
+          cursor: printing ? 'default' : 'pointer',
+        }}
+      >
+        {printing ? '產出中…' : '批次列印所選班級成績單（Word 合併列印）'}
       </button>
 
       <button

@@ -92,7 +92,7 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/notifications', href: '/notifications', label: '通知', adminOnly: false },
 
   // ---- 家長／學生 ----
-  { key: '/admin/students/portal-accounts', href: '/admin/students/portal-accounts', label: '建立家長/學生登入帳號', adminOnly: true },
+  { key: '/admin/students/portal-accounts', href: '/admin/students/portal-accounts', label: '家長/學生登入查詢', adminOnly: true },
   { key: '/admin/students/documents', href: '/admin/students/documents', label: '學生歸檔文件查詢', adminOnly: true },
 
   // ---- 開發人員 ----

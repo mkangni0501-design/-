@@ -41,6 +41,12 @@ export type TermBlock = {
   attendanceScore: number;
   discipline: Record<'嘉獎' | '小功' | '大功' | '警告' | '小過' | '大過', number>;
   conduct: { politeness: number | null; dress: number | null; service: number | null; discipline: number | null; overall: number | null };
+  // 這學期各項獎懲（嘉獎/小功/大功/警告/小過/大過）依後台設定的加扣分點數換算後的
+  // 總和（例如嘉獎x1 + 警告x1 = +1-1 = 0），操行成績（conduct.overall）已經把這個
+  // 數字加進去了，這裡另外存一份原始值只是為了能在成績單上（不管 PDF 或 Word 合併
+  // 列印）「秀出這個中間值」，讓人看得出操行總分是怎麼算出來的，不用改到
+  // conduct.overall 本身的算法。
+  disciplineAdjustment: number | null;
   classSize: number | null;
   classRank: number | null;
   stageWeights: { midterm: number; final: number; daily: number } | null;

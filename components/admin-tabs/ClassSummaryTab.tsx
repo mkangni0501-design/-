@@ -379,15 +379,18 @@ export default function ClassSummaryPage() {
     });
   }
 
-  async function handlePrintReportCard(enrollmentId: string) {
+  async function handlePrintReportCard(enrollmentId: string, format: 'pdf' | 'docx' = 'pdf') {
     // 【2026-08-19】同一個「window.open 被瀏覽器靜靜擋掉」的問題（見上面
     // handleBatchPrintClass 的說明），這裡也一併修正：點擊當下先同步開好空白分頁。
+    // Word 合併列印（.docx）瀏覽器不會直接開啟預覽，開的空白分頁只是用來放
+    // 「正在產生」的提示，實際檔案是直接觸發下載，跟 PDF 那條路徑用同一組函式、
+    // 只差在最後怎麼處理拿到的 blob。
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生成績單 PDF，請稍候…</p>');
+    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${format === 'docx' ? '（Word 合併列印）' : ' PDF'}，請稍候…</p>`);
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData.session?.access_token;
@@ -396,7 +399,7 @@ export default function ClassSummaryPage() {
         alert('請重新登入');
         return;
       }
-      const res = await fetch(`/api/reports/report-card/${enrollmentId}`, {
+      const res = await fetch(`/api/reports/report-card/${enrollmentId}${format === 'docx' ? '?format=docx' : ''}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!res.ok) {
@@ -407,7 +410,7 @@ export default function ClassSummaryPage() {
         let reason = '';
         try {
           const body = await res.json();
-          reason = body?.reason ? `\n原因：${body.reason}` : '';
+          reason = body?.error ? `\n${body.error}` : body?.reason ? `\n原因：${body.reason}` : '';
         } catch {
           // 回應不是 JSON，忽略，用預設訊息即可
         }
@@ -415,6 +418,16 @@ export default function ClassSummaryPage() {
         return;
       }
       const blob = await res.blob();
+      if (format === 'docx') {
+        printWindow.close();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `report-card-${enrollmentId}.docx`;
+        a.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
       printWindow.location.href = URL.createObjectURL(blob);
     } catch (err: any) {
       printWindow.close();
@@ -424,7 +437,7 @@ export default function ClassSummaryPage() {
 
   // 批次列印「目前這個班」全班成績單（導師印自己班、管理員印目前選到的班都能用）。
   // 教務部門要一次印多班／全校，請到「成績相關設定及查詢」→「批次列印成績單（多班／全校）」分頁。
-  async function handleBatchPrintClass(skipIncomplete = false) {
+  async function handleBatchPrintClass(skipIncomplete = false, format: 'pdf' | 'docx' = 'pdf') {
     if (!classId) return;
     // 【2026-08-19 修正】「按了沒反應」的根因：window.open() 原本寫在 fetch 之後
     // （await 過網路請求才呼叫），瀏覽器的彈出視窗封鎖機制只認「使用者點擊當下、
@@ -440,7 +453,7 @@ export default function ClassSummaryPage() {
       alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    printWindow.document.write('<p style="font-family:sans-serif;padding:24px">正在產生成績單 PDF，請稍候…</p>');
+    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${format === 'docx' ? '（Word 合併列印）' : ' PDF'}，請稍候…</p>`);
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData.session?.access_token;
@@ -449,7 +462,10 @@ export default function ClassSummaryPage() {
         alert('請重新登入');
         return;
       }
-      const url = `/api/reports/report-card/batch${skipIncomplete ? '?skipIncomplete=true' : ''}`;
+      const params = new URLSearchParams();
+      if (skipIncomplete) params.set('skipIncomplete', 'true');
+      if (format === 'docx') params.set('format', 'docx');
+      const url = `/api/reports/report-card/batch${params.toString() ? '?' + params.toString() : ''}`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
@@ -461,7 +477,7 @@ export default function ClassSummaryPage() {
         const body = await res.json();
         const names = (body.notReady ?? []).map((s: any) => `${s.studentName}(${s.reason})`).join('、');
         const confirmSkip = confirm(`以下學生尚未能產出成績單：\n${names}\n\n要跳過這些人、先列印其餘已完成的嗎？`);
-        if (confirmSkip) return handleBatchPrintClass(true);
+        if (confirmSkip) return handleBatchPrintClass(true, format);
         return;
       }
 
@@ -485,6 +501,16 @@ export default function ClassSummaryPage() {
       }
 
       const blob = await res.blob();
+      if (format === 'docx') {
+        printWindow.close();
+        const a = document.createElement('a');
+        const dUrl = URL.createObjectURL(blob);
+        a.href = dUrl;
+        a.download = `report-cards-batch-${classId}.docx`;
+        a.click();
+        URL.revokeObjectURL(dUrl);
+        return;
+      }
       printWindow.location.href = URL.createObjectURL(blob);
     } catch (err: any) {
       printWindow.close();
@@ -562,6 +588,13 @@ export default function ClassSummaryPage() {
             style={{ fontSize: 12, padding: '4px 12px', borderRadius: 6, background: '#6B5B3A', color: '#fff', border: 'none' }}
           >
             批次列印全班成績單（PDF）
+          </button>
+          <button
+            onClick={() => handleBatchPrintClass(false, 'docx')}
+            className="no-print"
+            style={{ fontSize: 12, padding: '4px 12px', borderRadius: 6, background: '#2C6E9E', color: '#fff', border: 'none' }}
+          >
+            批次列印全班成績單（Word 合併列印）
           </button>
         </div>
       )}
@@ -703,9 +736,19 @@ export default function ClassSummaryPage() {
                   {canSeeRemarks && (
                     <td style={{ padding: 6, textAlign: 'center' }}>
                       {viewMode === 'all' ? (
-                        <button onClick={() => handlePrintReportCard(en.id)} className="no-print" style={{ fontSize: 12, padding: '2px 8px' }}>
-                          列印
-                        </button>
+                        <span style={{ display: 'inline-flex', gap: 4 }}>
+                          <button onClick={() => handlePrintReportCard(en.id)} className="no-print" style={{ fontSize: 12, padding: '2px 8px' }}>
+                            列印
+                          </button>
+                          <button
+                            onClick={() => handlePrintReportCard(en.id, 'docx')}
+                            className="no-print"
+                            title="Word 合併列印"
+                            style={{ fontSize: 12, padding: '2px 8px', color: '#2C6E9E', border: '1px solid #2C6E9E', borderRadius: 4, background: '#fff' }}
+                          >
+                            Word
+                          </button>
+                        </span>
                       ) : (
                         // 期中/期末/平時單一階段畫面不提供「個人成績單」列印——正式成績單同時
                         // 呈現上下學期/全學年學業平均與排名，在只看單一階段時印出來意義不大、

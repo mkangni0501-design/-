@@ -290,6 +290,9 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
     attendanceScore,
     discipline: disciplineCounts,
     conduct,
+    // 見 lib/ReportCardDocument.tsx 的 TermBlock.disciplineAdjustment 說明：跟
+    // conduct.overall 裡加的是同一個數字，這裡另外存一份給成績單顯示用。
+    disciplineAdjustment: disciplineAdj === null || disciplineAdj === undefined ? null : Number(disciplineAdj),
     classSize: classSize ?? null,
     // 全班排名：跟「學業平均-總分」一樣，需要三項都鎖定、總分才穩定，維持只在
     // fullyReady 時顯示，避免印出「還會再變動」的排名讓人誤會是正式名次。
