@@ -5,7 +5,6 @@ import { getCurrentAppUser } from '@/lib/supabaseClient';
 import BackupRestorePanel from '@/components/dev-tools/BackupRestorePanel';
 import BulkExcelPanel from '@/components/dev-tools/BulkExcelPanel';
 import TeacherLettersPanel from '@/components/dev-tools/TeacherLettersPanel';
-import PortalLoginSettingsPanel from '@/components/dev-tools/PortalLoginSettingsPanel';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { hasDepartment } from '@/lib/departments';
 
@@ -56,11 +55,6 @@ export default function DevToolsPage() {
           原本要開Excel用VBA巨集列印的「教師資料」，改成在這裡管理：可以下載範本、整批上傳、下載目前資料，也可以逐筆新增/編輯/刪除。
         </p>
         <TeacherLettersPanel userId={me?.id ?? null} />
-      </section>
-
-      <section id="portal-login-settings">
-        <h2 style={{ fontSize: 14, marginBottom: 4 }}>家長／學生查詢入口設定</h2>
-        <PortalLoginSettingsPanel />
       </section>
     </main>
   );

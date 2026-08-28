@@ -92,7 +92,7 @@ export default function LoginPage() {
   function chooseCard(key: CardKey) {
     setError(null);
     if (key === 'parent') {
-      // 家長／學生查詢入口用的是「登入代碼＋信箱驗證信」機制（不是密碼），
+      // 家長／學生查詢入口用的是「登入代碼＋手機號碼」機制（不是密碼），
       // 沿用既有的 /portal/login 頁面，避免另外做一套不安全的假密碼欄位。
       router.push('/portal/login');
       return;

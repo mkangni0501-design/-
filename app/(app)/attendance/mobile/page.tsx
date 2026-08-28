@@ -68,6 +68,7 @@ export default function MobileAttendancePage() {
   const [periods, setPeriods] = useState<PeriodEntry[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [students, setStudents] = useState<StudentRow[]>([]);
+  const [studentsLoading, setStudentsLoading] = useState(false);
   const [statusMap, setStatusMap] = useState<Record<string, string>>({});
   const [locked, setLocked] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState<number | null>(null);
@@ -282,6 +283,7 @@ export default function MobileAttendancePage() {
     const targetClassId = selectedEntry.classId;
     const periodNo = selectedEntry.period_no;
     (async () => {
+      setStudentsLoading(true);
       // 注意：這裡刻意不用 students(...) 這種自動關聯embed查詢——在這個資料庫上這類查詢會不穩定、
       // 整批失敗又不一定會回報明確錯誤，導致學生名單完全出不來。改成分開查、用 Map 手動兜資料。
       //
@@ -309,6 +311,7 @@ export default function MobileAttendancePage() {
         name: nameByStudentNo.get(r.student_no) ?? '（找不到姓名）',
       }));
       setStudents(rows);
+      setStudentsLoading(false);
 
       const { data: existing } = await supabase
         .from('attendance')
@@ -513,6 +516,20 @@ export default function MobileAttendancePage() {
         <p style={{ fontSize: 13, color: '#A32D2D', marginBottom: 8 }}>
           此日期已超過可直接補登的 {backdateGraceDays} 天範圍，請改到「一週出缺勤」頁對個別紀錄送出修正申請，或聯絡管理員直接登錄。
         </p>
+      )}
+
+      {!studentsLoading && selectedEntry && students.length === 0 && (
+        <div style={{ fontSize: 13, color: '#A36A2D', background: '#FFF7EC', border: '1px solid #F0DCB8', borderRadius: 8, padding: '12px 14px', marginBottom: 12 }}>
+          <p style={{ marginBottom: 6, fontWeight: 600 }}>
+            {selectedEntry.classLabel ? `「${selectedEntry.classLabel}」` : '這個班'}目前查不到任何在學學生。
+          </p>
+          <p style={{ marginBottom: 0 }}>
+            節次跟班級名稱都抓得到、但學生名單是空的，最常見的原因是「同一個班在系統裡被記成兩筆不同的班級資料」
+            （例如排課系統匯入一次、學籍資料手動建立又建了一次，課表掛在其中一筆、學生名單卻掛在另一筆），
+            不是這個班真的沒有學生。請聯絡系統管理員到【班級資料檢查／合併】頁確認這個班是否重複、需要合併；
+            如果確認不是重複班級，也麻煩請管理員檢查一下這個班學生的「在學狀態」是否正確。
+          </p>
+        </div>
       )}
 
       {students.map((s) => (

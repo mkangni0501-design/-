@@ -1,107 +1,138 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-// 家長輸入「登入代碼＋信箱」後，先在這裡檢查兩者是否對得上，
-// 對得上才真的寄驗證信；不對就直接告知失敗，不會寄信給不相符的信箱。
+// 【2026-08-28 改版】家長／學生查詢入口改用「登入代碼＋手機號碼」登入，不再需要
+// 信箱：手機號碼直接比對學籍資料裡本來就有的欄位——學生本人代碼比對
+// students.phone，家長代碼比對這個學生底下任一位監護人（guardians）登記的
+// phone——校方不用再另外幫每個學生/家長手動建立一筆「登入帳號」、也不用維護一份
+// 額外的登入信箱，手機號碼本來就是學籍資料/監護人資料的一部分，改資料的地方也只有
+// 一處（學籍資料維護頁），不會有「學籍資料改了電話、但登入帳號沒有跟著改」這種
+// 兩邊不同步的問題。
 //
-// 【2026-08-19 新增】「是否啟用信箱驗證」開關（portal_login_settings，開發人員區
-// 可以調整）：目前學校用區域網路、連不到校外，寄驗證信這條路走不通，關掉這個開關
-// 之後，這裡改成「不寄信，直接在伺服器端幫這個信箱建立一個已登入的 session」，
-// 用的是 Supabase 官方提供、給後台系統使用、不會觸發寄信的 admin.generateLink()
-// 搭配 verifyOtp() 這個標準做法（在 Supabase 的機制裡，這是「伺服器端直接核發登入
-// 憑證」的正規流程，不是繞過安全機制的土砲寫法），順便直接把 portal_accounts 的
-// auth_user_id 綁好，前端拿到 session 之後就能直接進「家長/學生查詢」頁，不用
-// 再多一個步驟去呼叫 link-account。
-export async function POST(req: NextRequest) {
-  const { loginCode, email } = (await req.json()) as { loginCode: string; email: string };
-  if (!loginCode || !email) return NextResponse.json({ error: '請輸入登入代碼與信箱' }, { status: 400 });
-
-  const { data: account } = await supabaseAdmin
-    .from('portal_accounts')
-    .select('id, email, student_no')
-    .eq('login_code', loginCode.trim().toUpperCase())
-    .maybeSingle();
-
-  if (!account || account.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
-    return NextResponse.json({ error: '登入代碼與信箱不相符，請確認是否輸入正確或洽學校確認' }, { status: 403 });
-  }
-
-  const { data: settings } = await supabaseAdmin.from('portal_login_settings').select('email_verification_enabled').eq('id', true).maybeSingle();
-  // 資料表還沒建（sql/51 還沒執行）或查不到資料時，安全預設值是「維持原本要驗證」，
-  // 不會因為這張表意外是空的，就悄悄變成人人可以不驗證信箱直接登入。
-  const verificationEnabled = settings?.email_verification_enabled ?? true;
-
-  if (!verificationEnabled) {
-    const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
-      type: 'magiclink',
-      email: email.trim(),
-    });
-    if (linkErr || !linkData?.properties?.hashed_token) {
-      return NextResponse.json({ error: '建立登入憑證失敗：' + (linkErr?.message ?? '未知錯誤') }, { status: 500 });
-    }
-    const { data: verifyData, error: verifyErr } = await supabaseAdmin.auth.verifyOtp({
-      type: 'magiclink',
-      token_hash: linkData.properties.hashed_token,
-    });
-    if (verifyErr || !verifyData.session) {
-      return NextResponse.json({ error: '建立登入憑證失敗：' + (verifyErr?.message ?? '未知錯誤') }, { status: 500 });
-    }
-
-    // 【2026-08-28 修正】反映事項「學生登入以後首頁是教師版」的根因：Supabase 的帳號是
-    // 用「信箱」認的，全站只有一個命名空間——如果這個信箱剛好也是某位教職員登入用的
-    // 信箱（例如老師自己也是某個學生的家長、登記時填了跟教職員帳號同一個信箱；或資料
-    // 建檔時不小心填錯），上面 generateLink()／verifyOtp() 這兩步「核發登入憑證」核發
-    // 到的，就會是「那位教職員原本那個帳號」的 session，不是一個新的、乾淨的家長/學生
-    // 專用身分——因為 Supabase 認的是信箱，不是「這次是要核發哪一種用途的憑證」。
-    // 這裡等於把教職員帳號的完整權限，原封不動核發給任何一個知道「登入代碼＋這個
-    // 信箱」的人，讓他們可以在【家長/學生查詢】這個入口拿到一個貨真價實的教職員登入
-    // session，之後只要瀏覽器網址直接打 /admin，看到的就是完整的教師/管理後台——
-    // 這就是「學生登入卻看到教師版首頁」實際發生的機制，不是畫面顯示邏輯寫錯。
-    // 修法：核發憑證之後，先檢查這個信箱背後的帳號是不是教職員帳號（app_users 有沒有
-    // 這筆），有的話整個擋下來，不綁定 portal_accounts、也不把這組 session 交給前端，
-    // 並提醒學校去改這位學生/家長登記的信箱（不能跟任何教職員帳號共用同一個信箱）。
-    const { data: staffRow } = await supabaseAdmin.from('app_users').select('id').eq('id', verifyData.session.user.id).maybeSingle();
-    if (staffRow) {
-      await supabaseAdmin.auth.admin.signOut(verifyData.session.access_token).catch(() => {});
-      return NextResponse.json(
-        {
-          error:
-            '這個信箱同時是教職員登入使用的信箱，不能用來登入家長/學生查詢入口（會拿到教職員帳號的權限）。' +
-            '請聯絡學校，將這位學生/家長登記的信箱改成跟教職員帳號不同的信箱後再試一次。',
-        },
-        { status: 409 }
-      );
-    }
-
-    const { error: bindErr } = await supabaseAdmin
-      .from('portal_accounts')
-      .update({ auth_user_id: verifyData.session.user.id })
-      .eq('id', account.id);
-    if (bindErr) {
-      return NextResponse.json({ error: '綁定失敗：' + bindErr.message }, { status: 500 });
-    }
-    return NextResponse.json({
-      verificationEnabled: false,
-      session: {
-        access_token: verifyData.session.access_token,
-        refresh_token: verifyData.session.refresh_token,
-      },
-      studentNo: account.student_no,
-    });
-  }
-
-  const { error } = await supabaseAdmin.auth.signInWithOtp({
-    email: email.trim(),
-    options: {
-      shouldCreateUser: true,
-      emailRedirectTo: `${req.nextUrl.origin}/portal/login?code=${encodeURIComponent(loginCode.trim().toUpperCase())}`,
-    },
-  });
-
-  if (error) {
-    return NextResponse.json({ error: '驗證信寄送失敗：' + error.message }, { status: 500 });
-  }
-
-  return NextResponse.json({ verificationEnabled: true, success: true });
+// 第一次「登入代碼＋手機號碼」核對成功時，才自動建立/更新 portal_accounts 這筆
+// 綁定紀錄（不用校方事先手動建立帳號），之後同一個瀏覽器就有登入 session，不用每次
+// 都重新核對。
+//
+// 核發登入憑證的技術做法：Supabase 的帳號終究要有個信箱/手機才能建立
+// session，這裡用「登入代碼」本身組一個固定、外部不會用到的內部信箱
+// （例如 hy0123@portal.internal），透過 admin.generateLink()＋verifyOtp() 這組
+// Supabase 官方提供、給後台系統直接核發登入憑證用的標準做法建立 session，
+// 不會真的寄送任何信件，也不需要簡訊服務。因為這個內部信箱是系統自己組出來的、
+// 固定用 @portal.internal 這個不對外的假網域，不可能跟任何教職員真正在用的
+// 學校信箱重複，從源頭就避免了之前「學生登入卻核發到教職員帳號」那個問題
+// （見下面仍保留的 app_users 檢查，屬於第二層保險，正常情況不會觸發）。
+function buildPortalShadowEmail(loginCode: string): string {
+  return `${loginCode.trim().toLowerCase()}@portal.internal`;
 }
 
+// 手機號碼比對：只看數字，並且容忍「有沒有打國碼(+66/66)、有沒有開頭的 0」這兩種
+// 常見的打法差異——例如 0812345678／+66812345678／66812345678 這三種打法其實是
+// 同一支號碼，拿掉國碼跟開頭的 0 之後應該都變成同一串「用戶號碼本身」（812345678）。
+// 這裡刻意不用「比對末幾碼」這種寬鬆做法：早期版本用「比對最後 8 碼」，但泰國
+// 手機號碼開頭 0 之後只有 9 碼，末 8 碼只忽略了第一碼（門號業者碼），會讓
+// 0812345678 跟 0912345678 這種第二碼不同、其餘全部剛好相同的兩支「不同」號碼
+// 被誤判成同一支——這是會讓不該登入的人核對成功的安全問題，所以改成只拿掉
+// 「國碼」「開頭的0」這兩種明確、有意義的格式差異，其餘數字必須完全一致才算對。
+function normalizeDigits(s: string): string {
+  return (s ?? '').replace(/\D/g, '');
+}
+function canonicalPhone(s: string): string {
+  let d = normalizeDigits(s);
+  if (d.startsWith('66') && d.length > 9) d = d.slice(2); // 去掉泰國國碼 66（+66 的 + 已經被 normalizeDigits 拿掉了）
+  if (d.startsWith('0')) d = d.slice(1); // 去掉開頭的 0（國內慣用打法）
+  return d;
+}
+function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ca = canonicalPhone(a ?? '');
+  const cb = canonicalPhone(b ?? '');
+  if (ca.length < 8 || cb.length < 8) return false; // 太短的不算數，避免誤判
+  return ca === cb;
+}
+
+export async function POST(req: NextRequest) {
+  const { loginCode, phone } = (await req.json()) as { loginCode: string; phone: string };
+  if (!loginCode || !phone) return NextResponse.json({ error: '請輸入登入代碼與手機號碼' }, { status: 400 });
+
+  const code = loginCode.trim().toUpperCase();
+  let relation: '學生本人' | '家長';
+  let studentNo: string;
+  if (code.startsWith('HYS')) {
+    relation = '學生本人';
+    studentNo = code.slice(3);
+  } else if (code.startsWith('HY')) {
+    relation = '家長';
+    studentNo = code.slice(2);
+  } else {
+    return NextResponse.json({ error: '登入代碼格式不正確，請確認學校提供的代碼（例如 HY0123 或 HYS0123）' }, { status: 400 });
+  }
+  if (!studentNo) {
+    return NextResponse.json({ error: '登入代碼格式不正確，請確認學校提供的代碼（例如 HY0123 或 HYS0123）' }, { status: 400 });
+  }
+
+  let phoneMatched = false;
+  if (relation === '學生本人') {
+    const { data: studentRow } = await supabaseAdmin.from('students').select('phone').eq('student_no', studentNo).maybeSingle();
+    phoneMatched = !!studentRow && phonesMatch(studentRow.phone, phone);
+  } else {
+    const { data: guardianRows } = await supabaseAdmin.from('guardians').select('phone').eq('student_no', studentNo);
+    phoneMatched = (guardianRows ?? []).some((g: any) => phonesMatch(g.phone, phone));
+  }
+
+  // 不論是「查無此學號」「這位學生/家長沒有登記手機號碼」還是「手機號碼真的對不上」，
+  // 一律回覆同一句籠統的訊息，不細分原因——避免有心人士靠著錯誤訊息的差異，反過來
+  // 猜出「這個學號存不存在」之類的資訊。
+  if (!phoneMatched) {
+    return NextResponse.json(
+      { error: '登入代碼與手機號碼不相符，請確認是否輸入正確；如果手機號碼有變更，請洽學校更新學籍資料後再試' },
+      { status: 403 }
+    );
+  }
+
+  const shadowEmail = buildPortalShadowEmail(code);
+  const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'magiclink',
+    email: shadowEmail,
+  });
+  if (linkErr || !linkData?.properties?.hashed_token) {
+    return NextResponse.json({ error: '建立登入憑證失敗：' + (linkErr?.message ?? '未知錯誤') }, { status: 500 });
+  }
+  const { data: verifyData, error: verifyErr } = await supabaseAdmin.auth.verifyOtp({
+    type: 'magiclink',
+    token_hash: linkData.properties.hashed_token,
+  });
+  if (verifyErr || !verifyData.session) {
+    return NextResponse.json({ error: '建立登入憑證失敗：' + (verifyErr?.message ?? '未知錯誤') }, { status: 500 });
+  }
+
+  // 第二層保險：理論上 @portal.internal 這個內部假網域不會跟任何教職員的真實學校
+  // 信箱重複，這裡還是保留檢查，萬一有人手動把教職員帳號的信箱也設成這個網域，
+  // 一樣整個擋下來，不核發、不綁定。
+  const { data: staffRow } = await supabaseAdmin.from('app_users').select('id').eq('id', verifyData.session.user.id).maybeSingle();
+  if (staffRow) {
+    await supabaseAdmin.auth.admin.signOut(verifyData.session.access_token).catch(() => {});
+    return NextResponse.json({ error: '登入時發生帳號衝突，請聯絡系統管理員協助處理。' }, { status: 409 });
+  }
+
+  const { error: upsertErr } = await supabaseAdmin
+    .from('portal_accounts')
+    .upsert(
+      {
+        student_no: studentNo,
+        login_code: code,
+        relation,
+        auth_user_id: verifyData.session.user.id,
+      },
+      { onConflict: 'login_code' }
+    );
+  if (upsertErr) {
+    return NextResponse.json({ error: '綁定失敗：' + upsertErr.message }, { status: 500 });
+  }
+
+  return NextResponse.json({
+    session: {
+      access_token: verifyData.session.access_token,
+      refresh_token: verifyData.session.refresh_token,
+    },
+    studentNo,
+  });
+}

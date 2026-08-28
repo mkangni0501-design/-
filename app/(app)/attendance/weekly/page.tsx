@@ -820,8 +820,14 @@ export default function WeeklyAttendancePage() {
             ))}
             {students.length === 0 && (
               <tr>
-                <td colSpan={99} style={{ padding: 12, textAlign: 'center', color: '#999' }}>
-                  這個班級目前沒有在學學生
+                <td colSpan={99} style={{ padding: 16, textAlign: 'left', color: '#A36A2D' }}>
+                  <p style={{ marginBottom: 6, fontWeight: 600 }}>{className ? `「${className}」` : '這個班'}目前查不到任何在學學生。</p>
+                  <p style={{ margin: 0, fontWeight: 400 }}>
+                    如果課表節次都看得到、只有學生名單是空的，最常見的原因是「同一個班在系統裡被記成兩筆不同的班級資料」
+                    （例如排課系統匯入一次、學籍資料手動建立又建了一次，課表掛在其中一筆、學生名單卻掛在另一筆），
+                    不是這個班真的沒有學生。請聯絡系統管理員到【班級資料檢查／合併】頁確認這個班是否重複、需要合併；
+                    如果確認不是重複班級，也麻煩請管理員檢查一下這個班學生的「在學狀態」是否正確。
+                  </p>
                 </td>
               </tr>
             )}

@@ -3,139 +3,129 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
-type GuardianOption = { relation: string; email: string | null };
+type GuardianRow = { relation: string; name: string | null; phone: string | null };
+type LookupResult = {
+  studentNo: string;
+  studentName: string | null;
+  studentPhone: string | null;
+  guardians: GuardianRow[];
+  hyLinked: boolean;
+  hysLinked: boolean;
+};
 
+// 【2026-08-28 改版】原本這頁是給校務人員「手動幫每個學生建立家長/學生登入帳號」
+// 用的（要打信箱、按建立）。改成「登入代碼＋手機號碼」登入之後（見
+// app/api/portal/request-login/route.ts），系統會在第一次登入核對成功時自動建立
+// 綁定，不再需要手動建立這個步驟——手機號碼本來就是學籍資料/監護人資料的一部分，
+// 直接抓現有資料比對，不用另外維護一份。
+//
+// 這頁改成「查詢工具」：輸入學號，看得到這個學生／監護人目前登記的手機號碼是什麼
+// （核對登入代碼要用哪一支電話），還有這兩組代碼是不是已經有人登入過，方便校務
+// 人員在把代碼交給家長/學生之前，先確認資料是不是齊全、正確。
 export default function PortalAccountsPage() {
   const [studentNo, setStudentNo] = useState('');
-  const [email, setEmail] = useState('');
-  const [relation, setRelation] = useState('家長');
-  const [guardianOptions, setGuardianOptions] = useState<GuardianOption[]>([]);
-  const [createdCode, setCreatedCode] = useState<{ code: string; relation: string } | null>(null);
+  const [result, setResult] = useState<LookupResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // 學號輸入完離開欄位時，把該生監護人資料裡已經登記的信箱抓出來，點一下就能帶入，不用重打
-  async function handleLookupGuardians() {
-    if (!studentNo) return;
-    const { data } = await supabase.from('guardians').select('relation, email').eq('student_no', studentNo);
-    setGuardianOptions(((data ?? []) as GuardianOption[]).filter((g) => g.email));
-  }
-
-  async function handleCreate(e: React.FormEvent) {
+  async function handleLookup(e: React.FormEvent) {
     e.preventDefault();
-    // 【2026-08-23 修正】原本不管「家長」還是「學生本人」都產生同一組代碼
-    // HY+學號，login_code 在資料庫是 unique，同一個學生只要先建立過一種身分的
-    // 帳號（例如家長），之後再建立另一種身分（學生本人）就會撞號、新增失敗、
-    // 而且錯誤訊息（唯一鍵衝突）對承辦人來說不容易看懂到底哪裡出錯。
-    // 改成依身分在代碼加識別字：家長維持原本「HY+學號」（不影響已經
-    // 發出去的家長代碼），學生本人原本是「HY+學號+S」字尾。
-    // 【2026-08-24 依回饋修正】學生本人代碼改成「HYS+學號」（字首而不是字尾）。
-    // 同時把原本「帶入{監護人}信箱」按鈕的 bug 一併修掉：這個按鈕原本除了帶入
-    // email，還會用 setRelation(g.relation) 把下面「身分」下拉選單的值，直接
-    // 覆蓋成 guardians 表裡的監護人關係（父/母/監護人…），但 portal_accounts.
-    // relation 這個欄位語意上只應該是「家長」或「學生本人」兩種身分別，跟
-    // guardians.relation（父/母/監護人）根本是兩件事——按下這顆按鈕之後，
-    // 「身分」下拉選單的畫面值會變成不在選項清單裡的字串（例如「父」），
-    // 送出時就會把這個不對的值存進 portal_accounts.relation，導致：
-    // 1. 代碼判斷式（下面這行）誤判成「家長」規則產生代碼（因為不等於
-    //    '學生本人'），承辦人卻可能誤以為自己正在建立的是「學生本人」帳號；
-    // 2. 之後任何「依 relation='學生本人' 篩選」的地方（例如社團選社頁只讓
-    //    學生本人身分填志願）都會找不到這筆帳號，看起來就像「學生登入後找不到
-    //    資料」。
-    // 已經改成按鈕只帶入 email、不再動 relation（見下面 guardianOptions 的
-    // onClick），這裡额外再加一層防呆：送出前先確認 relation 一定是這兩個
-    // 合法值之一，不是的話直接擋下來、不送出，避免任何殘留狀態流進資料庫。
-    if (relation !== '家長' && relation !== '學生本人') {
-      alert('身分欄位異常，請重新選擇「家長」或「學生本人」後再送出。');
-      return;
-    }
-    const loginCode = (relation === '學生本人' ? `HYS${studentNo}` : `HY${studentNo}`).toUpperCase();
-    const { error } = await supabase.from('portal_accounts').insert({
-      student_no: studentNo,
-      email,
-      relation,
-      login_code: loginCode,
-    });
-    if (error) {
-      // unique 衝突通常代表這個學生這個身分（家長或學生本人）已經建立過帳號了，
-      // 給承辦人看得懂的提示，而不是直接丟資料庫原始錯誤訊息。
-      if (error.code === '23505' || /duplicate|unique/i.test(error.message)) {
-        alert(`建立失敗：這個學號的「${relation}」帳號已經建立過了（代碼 ${loginCode}），不能重複建立。`);
-      } else {
-        alert('建立失敗：' + error.message);
+    if (!studentNo) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const { data: studentRow, error: studentErr } = await supabase
+        .from('students')
+        .select('student_no, name, phone')
+        .eq('student_no', studentNo)
+        .maybeSingle();
+      if (studentErr) {
+        setError('查詢失敗：' + studentErr.message);
+        return;
       }
-      return;
+      if (!studentRow) {
+        setError('查無此學號');
+        return;
+      }
+      const { data: guardianRows } = await supabase.from('guardians').select('relation, name, phone').eq('student_no', studentNo);
+      const { data: linkedRows } = await supabase
+        .from('portal_accounts')
+        .select('login_code, auth_user_id')
+        .eq('student_no', studentNo);
+      const hyRow = (linkedRows ?? []).find((r: any) => r.login_code === `HY${studentNo}`.toUpperCase());
+      const hysRow = (linkedRows ?? []).find((r: any) => r.login_code === `HYS${studentNo}`.toUpperCase());
+
+      setResult({
+        studentNo: studentRow.student_no,
+        studentName: studentRow.name,
+        studentPhone: studentRow.phone,
+        guardians: (guardianRows ?? []) as GuardianRow[],
+        hyLinked: !!hyRow?.auth_user_id,
+        hysLinked: !!hysRow?.auth_user_id,
+      });
+    } finally {
+      setLoading(false);
     }
-    setCreatedCode({ code: loginCode, relation });
-    setStudentNo('');
-    setEmail('');
-    setGuardianOptions([]);
-    // 注意：relation（身分下拉選單）故意不重設，維持承辦人剛剛選的身分──
-    // 學校常見的操作習慣是連續替同一批學生建立「同一種身分」的帳號（例如
-    // 一次把全班的「學生本人」帳號都建立完，再切換身分建家長帳號），保留
-    // 選擇比每次都要重新選更順手。
   }
 
   return (
-    <main style={{ maxWidth: 420, margin: '0 auto', padding: 24 }}>
-      <h1 style={{ fontSize: 16, marginBottom: 4 }}>建立家長／學生登入帳號</h1>
+    <main style={{ maxWidth: 520, margin: '0 auto', padding: 24 }}>
+      <h1 style={{ fontSize: 16, marginBottom: 4 }}>家長／學生登入查詢</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-        登入代碼會自動產生：家長是「HY+學號」，學生本人是「HYS+學號」，同一個學生的家長跟學生本人可以各建立一組。請把代碼跟登記的信箱一起告訴家長／學生，登入時兩者都要對得上。
+        現在不用手動建立家長／學生的登入帳號了：家長／學生自己在【家長／學生查詢入口】輸入登入代碼（家長 HY+學號、學生本人
+        HYS+學號）跟登記在學籍資料裡的手機號碼，系統會自動核對、自動建立登入。這頁純粹是輸入學號查詢「目前學籍資料登記的手機號碼是什麼」，
+        方便您把代碼交給家長/學生之前，先確認資料齊全、電話正確——如果手機號碼是空的或登記錯誤，麻煩先到學籍資料頁補上/更正，
+        不然會登入不了。
       </p>
 
-      <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <form onSubmit={handleLookup} style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
         <input
           placeholder="學號"
           value={studentNo}
           onChange={(e) => setStudentNo(e.target.value)}
-          onBlur={handleLookupGuardians}
-          style={{ padding: 8 }}
+          style={{ padding: 8, flex: 1 }}
           required
         />
-
-        {guardianOptions.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {guardianOptions.map((g, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => {
-                  // 【2026-08-24 修正】這裡原本還會一併 setRelation(g.relation)，
-                  // 把「身分」下拉選單的值覆蓋成監護人關係（父/母/監護人…），
-                  // 但那個欄位的合法值只有「家長」/「學生本人」兩種，跟這裡的
-                  // g.relation（guardians 表的父/母/監護人）語意完全不同，
-                  // 誤用會把錯的 relation 存進 portal_accounts（詳見上面
-                  // handleCreate 的說明）。這顆按鈕現在只負責帶入 email 這個
-                  // 純粹省打字的功能，「身分」還是要由下面的下拉選單決定。
-                  setEmail(g.email!);
-                }}
-                style={{ fontSize: 12, padding: '4px 10px' }}
-              >
-                帶入{g.relation}信箱（{g.email}）
-              </button>
-            ))}
-          </div>
-        )}
-
-        <input
-          type="email"
-          placeholder="家長／學生的信箱"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={{ padding: 8 }}
-          required
-        />
-        <select value={relation} onChange={(e) => setRelation(e.target.value)} style={{ padding: 8 }}>
-          <option value="家長">家長</option>
-          <option value="學生本人">學生本人</option>
-        </select>
-        <button type="submit" style={{ padding: 12, background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 8 }}>
-          建立帳號
+        <button type="submit" disabled={loading} style={{ padding: '8px 16px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6 }}>
+          {loading ? '查詢中…' : '查詢'}
         </button>
       </form>
 
-      {createdCode && (
-        <p style={{ marginTop: 16, fontSize: 14, padding: 12, background: '#EAF3DE', borderRadius: 8 }}>
-          已建立，登入代碼是 <b>{createdCode.code}</b>，請連同登記的信箱一起告訴{createdCode.relation === '學生本人' ? '學生本人' : '家長'}。
-        </p>
+      {error && <p style={{ color: '#A32D2D', fontSize: 13, marginBottom: 16 }}>{error}</p>}
+
+      {result && (
+        <div style={{ fontSize: 13, lineHeight: 1.8 }}>
+          <p style={{ marginBottom: 12 }}>
+            <strong>{result.studentName}</strong>（學號 {result.studentNo}）
+          </p>
+
+          <div style={{ background: '#FAFAF8', border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+            <p style={{ fontWeight: 600, marginBottom: 4 }}>
+              學生本人代碼：HYS{result.studentNo}　{result.hysLinked && <span style={{ color: '#3B6D11' }}>（已登入過）</span>}
+            </p>
+            <p style={{ color: result.studentPhone ? '#2C2C2A' : '#A32D2D' }}>
+              學籍資料登記的手機號碼：{result.studentPhone || '（尚未登記，需先補上才能登入）'}
+            </p>
+          </div>
+
+          <div style={{ background: '#FAFAF8', border: '1px solid #eee', borderRadius: 8, padding: 12 }}>
+            <p style={{ fontWeight: 600, marginBottom: 4 }}>
+              家長代碼：HY{result.studentNo}　{result.hyLinked && <span style={{ color: '#3B6D11' }}>（已登入過）</span>}
+            </p>
+            {result.guardians.length === 0 ? (
+              <p style={{ color: '#A32D2D' }}>尚未登記任何監護人資料，需先補上才能登入。</p>
+            ) : (
+              result.guardians.map((g, i) => (
+                <p key={i} style={{ color: g.phone ? '#2C2C2A' : '#A32D2D' }}>
+                  {g.relation}
+                  {g.name ? `（${g.name}）` : ''}：{g.phone || '（尚未登記手機號碼）'}
+                </p>
+              ))
+            )}
+            <p style={{ fontSize: 12, color: '#999', marginTop: 4 }}>家長用任一位監護人登記的手機號碼都能登入。</p>
+          </div>
+        </div>
       )}
     </main>
   );
