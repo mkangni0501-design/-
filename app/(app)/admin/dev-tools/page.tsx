@@ -7,6 +7,7 @@ import BulkExcelPanel from '@/components/dev-tools/BulkExcelPanel';
 import TeacherLettersPanel from '@/components/dev-tools/TeacherLettersPanel';
 import PasswordPolicySettingsPanel from '@/components/dev-tools/PasswordPolicySettingsPanel';
 import TeacherLoginHomeSettingsPanel from '@/components/dev-tools/TeacherLoginHomeSettingsPanel';
+import AttendanceScoreExclusionPanel from '@/components/dev-tools/AttendanceScoreExclusionPanel';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { hasDepartment } from '@/lib/departments';
 
@@ -64,9 +65,14 @@ export default function DevToolsPage() {
         <PasswordPolicySettingsPanel />
       </section>
 
-      <section id="teacher-login-home-settings">
+      <section id="teacher-login-home-settings" style={{ marginBottom: 40, paddingBottom: 24, borderBottom: '1px solid #eee' }}>
         <h2 style={{ fontSize: 14, marginBottom: 4 }}>教師登入首頁設定</h2>
         <TeacherLoginHomeSettingsPanel />
+      </section>
+
+      <section id="attendance-score-exclusion">
+        <h2 style={{ fontSize: 14, marginBottom: 4 }}>班級成績總表：出缺席分數排除設定</h2>
+        <AttendanceScoreExclusionPanel />
       </section>
     </main>
   );
