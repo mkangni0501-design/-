@@ -76,3 +76,20 @@ export async function getCurrentTeacherId(): Promise<string | null> {
   const { data } = await supabase.from('teachers').select('id').eq('app_user_id', authData.user.id).maybeSingle();
   return data?.id ?? null;
 }
+
+/**
+ * 這位老師目前是不是「真的有帶班/排課/社團」：用於首頁功能表自動隱藏
+ * 「有 adminOnly:false 但沒有任何指派就打開也是空的」那幾個教學現場功能
+ * （出缺席登錄、社團點名/成績——見 lib/adminModules.ts 的 requiresTeachingAssignment）。
+ * 三種來源只要符合其中一種就算「有」：導師班（classes.homeroom_teacher_id）、
+ * 排課（class_schedule.teacher_id）、社團授課（clubs.teacher_id）。
+ */
+export async function getHasTeachingAssignment(teacherId: string | null): Promise<boolean> {
+  if (!teacherId) return false;
+  const [homeroom, schedule, club] = await Promise.all([
+    supabase.from('classes').select('id').eq('homeroom_teacher_id', teacherId).limit(1),
+    supabase.from('class_schedule').select('id').eq('teacher_id', teacherId).limit(1),
+    supabase.from('clubs').select('id').eq('teacher_id', teacherId).limit(1),
+  ]);
+  return (homeroom.data?.length ?? 0) > 0 || (schedule.data?.length ?? 0) > 0 || (club.data?.length ?? 0) > 0;
+}

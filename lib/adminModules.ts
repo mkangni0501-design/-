@@ -54,6 +54,11 @@ export type AdminModule = {
   href: string;
   label: string;
   adminOnly: boolean; // true＝僅系統設定／學籍管理等管理員功能；false＝一般教學作業／查詢，教師卡片也看得到
+  // true＝這個功能「有沒有東西可以看/操作」實際上還要看這位教師目前有沒有帶班或排課
+  // （沒有導師班、也沒有任何排課的教師打開這些頁面，畫面上永遠是空的，形同看得到但
+  // 不能用）。見 computeVisibleModuleKeys() 的 hasTeachingAssignment 參數：只有
+  // isSystemAdmin 或（管理部門視角）或這位教師「目前真的有帶班/排課/社團」，才會顯示。
+  requiresTeachingAssignment?: boolean;
 };
 
 export const ALL_MODULES: AdminModule[] = [
@@ -67,8 +72,8 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/admin/score-submission-windows', href: '/admin/score-submission-windows', label: '成績上傳時間設定表（期中考/期末考/平時分/出缺勤 開放時間與鎖定）', adminOnly: true },
   { key: '/admin/substitute-teaching', href: '/admin/substitute-teaching', label: '代課安排', adminOnly: true },
   { key: '/admin/clubs', href: '/admin/clubs', label: '社團／才藝課管理（含開課、成績登錄權限、選社時間設定）', adminOnly: true },
-  { key: '/clubs/roster', href: '/clubs/roster', label: '社團點名冊', adminOnly: false },
-  { key: '/clubs/grading', href: '/clubs/grading', label: '社團成績輸入', adminOnly: false },
+  { key: '/clubs/roster', href: '/clubs/roster', label: '社團點名冊', adminOnly: false, requiresTeachingAssignment: true },
+  { key: '/clubs/grading', href: '/clubs/grading', label: '社團成績輸入', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/schedule-lookup', href: '/schedule-lookup', label: '查詢教師/班級課表（選教師或班級直接看整週課表）', adminOnly: false },
   // ---- 訓導 ----
   { key: '/attendance/report', href: '/attendance/report', label: '學生出席紀錄查詢（月報／學期）', adminOnly: false },
@@ -86,9 +91,9 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/admin/general/utilities', href: '/admin/general/utilities', label: '水電網路等費用', adminOnly: true },
 
   // ---- 教師（教學現場日常作業，教師登入即可看到） ----
-  { key: '/attendance/weekly', href: '/attendance/weekly', label: '學生出缺席登錄（一週）', adminOnly: false },
-  { key: '/attendance/mobile', href: '/attendance/mobile', label: '學生出缺席登錄（每日／手機版）', adminOnly: false },
-  { key: '/attendance/subject-view', href: '/attendance/subject-view', label: '任課班級出席查詢（僅顯示自己任教科目/節次）', adminOnly: false },
+  { key: '/attendance/weekly', href: '/attendance/weekly', label: '學生出缺席登錄（一週）', adminOnly: false, requiresTeachingAssignment: true },
+  { key: '/attendance/mobile', href: '/attendance/mobile', label: '學生出缺席登錄（每日／手機版）', adminOnly: false, requiresTeachingAssignment: true },
+  { key: '/attendance/subject-view', href: '/attendance/subject-view', label: '任課班級出席查詢（僅顯示自己任教科目/節次）', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/notifications', href: '/notifications', label: '通知', adminOnly: false },
 
   // ---- 家長／學生 ----
@@ -288,8 +293,12 @@ export function computeVisibleModuleKeys(params: {
   myDepartments: AdminDepartment[];
   categoryMap: Record<string, ModuleCategory[]>;
   overrides?: Record<string, boolean>;
+  // 這位教師目前是不是「真的有帶班/排課/社團」——沒有的話，requiresTeachingAssignment
+  // 的功能即使 adminOnly:false，也先不顯示（避免打開一片空白的頁面）。管理部門視角
+  // （isSystemAdmin，或呼叫端沒有意義去區分「教師視角」時）預設當作 true，不受此限制。
+  hasTeachingAssignment?: boolean;
 }): Set<string> {
-  const { isSystemAdmin, myDepartments, categoryMap, overrides = {} } = params;
+  const { isSystemAdmin, myDepartments, categoryMap, overrides = {}, hasTeachingAssignment = true } = params;
   const visible = new Set<string>();
 
   for (const m of ALL_MODULES) {
@@ -297,7 +306,7 @@ export function computeVisibleModuleKeys(params: {
     if (isSystemAdmin) {
       ok = true;
     } else if (!m.adminOnly) {
-      ok = true;
+      ok = !m.requiresTeachingAssignment || hasTeachingAssignment;
     } else {
       const cats = categoryMap[m.key] ?? DEFAULT_CATEGORIES[m.key] ?? ['academic'];
       // 只要身兼「其中任一個」分類對應的部門，就看得到（例如一個模組同時掛在教務／教師，

@@ -47,6 +47,31 @@ const EDIT_FIELDS: { key: keyof StudentDetail; label: string }[] = [
   { key: 'previous_school_grade', label: '原就讀年級' },
 ];
 
+// 監護人資料（父親/母親/監護人，一個學生可以有多筆，來源同 guardians 表，
+// 跟「新生入學登記」表單共用同一組欄位）。id 為 null 代表這筆是編輯畫面上
+// 新增、還沒存進資料庫的監護人；儲存時依 id 有無決定要 insert 還是 update。
+type GuardianForm = {
+  id: string | null;
+  relation: string;
+  name: string;
+  chinese_name: string;
+  occupation: string;
+  phone: string;
+  email: string;
+  address: string;
+};
+
+const emptyGuardianForm = (): GuardianForm => ({
+  id: null,
+  relation: '監護人',
+  name: '',
+  chinese_name: '',
+  occupation: '',
+  phone: '',
+  email: '',
+  address: '',
+});
+
 const ATTENDANCE_ISSUE_STATUSES = ['曠課', '遲到', '病假', '事假', '公假'] as const;
 
 // 查詢學生：全校或依班級查詢目前在學學生名冊，可用學號/姓名關鍵字搜尋，也可以直接修正學生資料。
@@ -70,6 +95,10 @@ export default function StudentSearchPage() {
   const [editForm, setEditForm] = useState<StudentDetail | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const [guardianForms, setGuardianForms] = useState<GuardianForm[]>([]);
+  const [removedGuardianIds, setRemovedGuardianIds] = useState<string[]>([]);
+  const [guardiansLoading, setGuardiansLoading] = useState(false);
 
   async function loadMyPermissions() {
     const appUser = await getCurrentAppUser();
@@ -158,6 +187,8 @@ export default function StudentSearchPage() {
     setEditError(null);
     setEditingStudentNo(studentNo);
     setEditForm(null);
+    setGuardianForms([]);
+    setRemovedGuardianIds([]);
     const { data, error } = await supabase
       .from('students')
       .select(
@@ -175,12 +206,53 @@ export default function StudentSearchPage() {
       const { data: editorRow } = await supabase.from('app_users').select('name').eq('id', data.updated_by).maybeSingle();
       if (editorRow) setEditorNames((prev) => ({ ...prev, [data.updated_by as string]: editorRow.name }));
     }
+
+    setGuardiansLoading(true);
+    const { data: guardianRows, error: guardianErr } = await supabase
+      .from('guardians')
+      .select('id, relation, name, chinese_name, occupation, phone, email, address')
+      .eq('student_no', studentNo);
+    if (guardianErr) {
+      setEditError((prev) => prev ?? '讀取監護人資料失敗：' + guardianErr.message);
+    } else {
+      setGuardianForms(
+        (guardianRows ?? []).map((g: any) => ({
+          id: g.id,
+          relation: g.relation ?? '監護人',
+          name: g.name ?? '',
+          chinese_name: g.chinese_name ?? '',
+          occupation: g.occupation ?? '',
+          phone: g.phone ?? '',
+          email: g.email ?? '',
+          address: g.address ?? '',
+        }))
+      );
+    }
+    setGuardiansLoading(false);
   }
 
   function closeEdit() {
     setEditingStudentNo(null);
     setEditForm(null);
     setEditError(null);
+    setGuardianForms([]);
+    setRemovedGuardianIds([]);
+  }
+
+  function updateGuardianForm(index: number, patch: Partial<GuardianForm>) {
+    setGuardianForms((prev) => prev.map((g, i) => (i === index ? { ...g, ...patch } : g)));
+  }
+
+  function addGuardianForm() {
+    setGuardianForms((prev) => [...prev, emptyGuardianForm()]);
+  }
+
+  function removeGuardianForm(index: number) {
+    setGuardianForms((prev) => {
+      const g = prev[index];
+      if (g.id) setRemovedGuardianIds((ids) => [...ids, g.id as string]);
+      return prev.filter((_, i) => i !== index);
+    });
   }
 
   async function handleSaveEdit(e: React.FormEvent) {
@@ -195,11 +267,50 @@ export default function StudentSearchPage() {
     });
 
     const { error } = await supabase.from('students').update(payload).eq('student_no', editForm.student_no);
-    setSaving(false);
     if (error) {
+      setSaving(false);
       setEditError('儲存失敗：' + error.message + (error.message.includes('policy') ? '（您可能沒有修改這位學生的權限）' : ''));
       return;
     }
+
+    // 監護人資料：刪除的先刪、既有的更新、沒有 id 的（畫面上新增的）才 insert；
+    // 空白（沒填姓名）的新增列直接略過，不建立空記錄。
+    if (removedGuardianIds.length > 0) {
+      const { error: delErr } = await supabase.from('guardians').delete().in('id', removedGuardianIds);
+      if (delErr) {
+        setSaving(false);
+        setEditError('監護人資料刪除失敗：' + delErr.message);
+        return;
+      }
+    }
+    for (const g of guardianForms) {
+      const guardianPayload = {
+        relation: g.relation,
+        name: g.name || null,
+        chinese_name: g.chinese_name || null,
+        occupation: g.occupation || null,
+        phone: g.phone || null,
+        email: g.email || null,
+        address: g.address || null,
+      };
+      if (g.id) {
+        const { error: updErr } = await supabase.from('guardians').update(guardianPayload).eq('id', g.id);
+        if (updErr) {
+          setSaving(false);
+          setEditError('監護人資料儲存失敗：' + updErr.message);
+          return;
+        }
+      } else if (g.name.trim()) {
+        const { error: insErr } = await supabase.from('guardians').insert({ student_no: editForm.student_no, ...guardianPayload });
+        if (insErr) {
+          setSaving(false);
+          setEditError('監護人資料新增失敗：' + insErr.message);
+          return;
+        }
+      }
+    }
+
+    setSaving(false);
     closeEdit();
     loadStudents();
   }
@@ -332,6 +443,98 @@ export default function StudentSearchPage() {
                     />
                   </div>
                 ))}
+
+                <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #eee' }}>
+                  <h3 style={{ fontSize: 13, marginBottom: 8 }}>家長／監護人資料</h3>
+                  <p style={{ fontSize: 11, color: '#999', marginBottom: 8 }}>
+                    家長查詢入口登入用的手機號碼就是這裡登記的電話（任一位監護人皆可）。
+                  </p>
+                  {guardiansLoading && <p style={{ fontSize: 12, color: '#999' }}>載入中…</p>}
+                  {!guardiansLoading && guardianForms.length === 0 && (
+                    <p style={{ fontSize: 12, color: '#A32D2D', marginBottom: 8 }}>尚未登記任何監護人資料。</p>
+                  )}
+                  {guardianForms.map((g, i) => (
+                    <div
+                      key={g.id ?? `new-${i}`}
+                      style={{ border: '1px solid #eee', borderRadius: 6, padding: 10, marginBottom: 10 }}
+                    >
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                        <label style={{ fontSize: 11, color: '#666' }}>
+                          關係
+                          <select
+                            value={g.relation}
+                            onChange={(e) => updateGuardianForm(i, { relation: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          >
+                            <option value="父親">父親</option>
+                            <option value="母親">母親</option>
+                            <option value="監護人">監護人</option>
+                          </select>
+                        </label>
+                        <label style={{ fontSize: 11, color: '#666' }}>
+                          姓名
+                          <input
+                            value={g.name}
+                            onChange={(e) => updateGuardianForm(i, { name: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          />
+                        </label>
+                        <label style={{ fontSize: 11, color: '#666' }}>
+                          中文姓名
+                          <input
+                            value={g.chinese_name}
+                            onChange={(e) => updateGuardianForm(i, { chinese_name: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          />
+                        </label>
+                        <label style={{ fontSize: 11, color: '#666' }}>
+                          職業
+                          <input
+                            value={g.occupation}
+                            onChange={(e) => updateGuardianForm(i, { occupation: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          />
+                        </label>
+                        <label style={{ fontSize: 11, color: '#666' }}>
+                          聯絡電話
+                          <input
+                            value={g.phone}
+                            onChange={(e) => updateGuardianForm(i, { phone: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          />
+                        </label>
+                        <label style={{ fontSize: 11, color: '#666' }}>
+                          信箱
+                          <input
+                            type="email"
+                            value={g.email}
+                            onChange={(e) => updateGuardianForm(i, { email: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          />
+                        </label>
+                        <label style={{ fontSize: 11, color: '#666', gridColumn: '1 / -1' }}>
+                          地址
+                          <input
+                            value={g.address}
+                            onChange={(e) => updateGuardianForm(i, { address: e.target.value })}
+                            style={{ width: '100%', padding: 6, marginTop: 2, boxSizing: 'border-box' }}
+                          />
+                        </label>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeGuardianForm(i)}
+                        style={{ fontSize: 11, color: '#A32D2D', background: 'none', border: 'none', padding: 0, marginTop: 8, cursor: 'pointer' }}
+                      >
+                        移除這位監護人
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={addGuardianForm} style={{ fontSize: 12, padding: '4px 10px' }}>
+                    ＋ 新增一位監護人
+                  </button>
+                </div>
+
                 <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
                   <button
                     type="submit"
