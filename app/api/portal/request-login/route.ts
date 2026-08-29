@@ -1,5 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+
+// ⚠️ 這裡故意「不」直接對 lib/supabaseAdmin.ts 匯出的那個共用 supabaseAdmin 呼叫
+// auth.verifyOtp()：那個 client 是整個伺服器行程共用的單一個 instance（module-level
+// singleton），呼叫 verifyOtp() 之後，這個 instance 內部記住的 session 會從「service
+// role」變成「剛剛核發的那個學生/家長帳號」，導致同一個 supabaseAdmin 之後所有
+// .from(...) 查詢送出的 Authorization 都變成用那個學生/家長的 JWT，而不是 service
+// role key——不但讓後面 portal_accounts 這種本來要用管理權限寫入的動作反而被 RLS
+// 擋下來（表現成「new row violates row-level security policy」），因為同一個
+// instance 是整個伺服器共用的，理論上還會有「不同使用者幾乎同時登入時互相污染彼此
+// session」的更嚴重問題。因此這裡另外開一個「只在這次請求內使用、不共用」的 client
+// 專門負責 generateLink／verifyOtp 這段核發登入憑證的流程，驗證完就地丟棄，不會
+// 影響到 supabaseAdmin 之後查資料庫用的 service role 權限。
+function createRequestScopedAuthClient() {
+  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
 
 // 【2026-08-28 改版】家長／學生查詢入口改用「登入代碼＋手機號碼」登入，不再需要
 // 信箱：手機號碼直接比對學籍資料裡本來就有的欄位——學生本人代碼比對
@@ -103,14 +121,15 @@ export async function POST(req: NextRequest) {
   }
 
   const shadowEmail = buildPortalShadowEmail(code);
-  const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+  const authClient = createRequestScopedAuthClient();
+  const { data: linkData, error: linkErr } = await authClient.auth.admin.generateLink({
     type: 'magiclink',
     email: shadowEmail,
   });
   if (linkErr || !linkData?.properties?.hashed_token) {
     return NextResponse.json({ error: '建立登入憑證失敗：' + (linkErr?.message ?? '未知錯誤') }, { status: 500 });
   }
-  const { data: verifyData, error: verifyErr } = await supabaseAdmin.auth.verifyOtp({
+  const { data: verifyData, error: verifyErr } = await authClient.auth.verifyOtp({
     type: 'magiclink',
     token_hash: linkData.properties.hashed_token,
   });
@@ -120,10 +139,12 @@ export async function POST(req: NextRequest) {
 
   // 第二層保險：理論上 @portal.internal 這個內部假網域不會跟任何教職員的真實學校
   // 信箱重複，這裡還是保留檢查，萬一有人手動把教職員帳號的信箱也設成這個網域，
-  // 一樣整個擋下來，不核發、不綁定。
+  // 一樣整個擋下來，不核發、不綁定。這裡跟下面的 upsert 都刻意繼續用最上面 import
+  // 進來的共用 supabaseAdmin（service role），不要用剛剛那個 authClient，
+  // 才不會被套用學生/家長本人的 RLS 權限。
   const { data: staffRow } = await supabaseAdmin.from('app_users').select('id').eq('id', verifyData.session.user.id).maybeSingle();
   if (staffRow) {
-    await supabaseAdmin.auth.admin.signOut(verifyData.session.access_token).catch(() => {});
+    await authClient.auth.admin.signOut(verifyData.session.access_token).catch(() => {});
     return NextResponse.json({ error: '登入時發生帳號衝突，請聯絡系統管理員協助處理。' }, { status: 409 });
   }
 
