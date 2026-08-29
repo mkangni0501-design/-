@@ -57,6 +57,29 @@ export const BACKUP_TABLES = [
   'governed_tables',
   'pending_changes',
   'bulletin_posts',
+  // 【本輪新增】對照 sql/28 到 sql/65 逐一核對後，發現這幾張表在這幾輪陸續加入
+  // 系統，但一直沒有補進備份/還原範圍——這代表這一輪之前，用「備份與還原」還原
+  // 資料庫的話，這些表的資料完全不會被還原回去；一併補上：
+  'conduct_scores', // ConductScoresTab.tsx 老師登錄的德育/操行成績（guardians 已在上面清單中，不重複列）
+  'teacher_service_certificates', // 開發人員區「聘書」：歷年教師資料
+  'teacher_appointment_letters', // 開發人員區「聘書」：自聘/當年教師聘書
+  'teacher_letter_settings', // 開發人員區「聘書」設定
+  'admin_module_order', // 管理後台功能卡片排序
+  'site_content', // 首頁公佈欄以外的其他站台內容設定
+  'site_settings', // 站台整體設定
+  'submission_window_audit_log', // 成績鎖定/解鎖稽核紀錄
+  'report_card_style', // 成績單樣式設定
+  'report_card_merge_template', // 成績單合併列印範本設定
+  'portal_login_settings', // 家長/學生登入入口設定
+  'password_policy_settings', // 密碼政策設定（本輪新增的出缺席開關另見 attendance_score_display_settings）
+  'teacher_login_settings', // 教師登入首頁設定
+  'attendance_score_display_settings', // 本輪新增：出缺席不含蓋期中/期末/平時開關
+  'clubs',
+  'club_members',
+  'club_attendance',
+  'club_scores',
+  'club_selection_windows',
+  'club_preferences',
 ] as const;
 
 // 大部分資料表拿 id（uuid）當「符合全部列」的比對欄位；少數是複合主鍵或文字主鍵，這裡特別列出。

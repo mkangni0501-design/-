@@ -100,6 +100,11 @@ export default function ClassSummaryPage() {
   // 的原始分數（那筆分數不會被排名/總分採用，見 sql/46wire_attendance_and_discipline_adjustments.sql）。
   const [attendanceAdjustments, setAttendanceAdjustments] = useState<Record<string, number>>({});
   const [rankLoadError, setRankLoadError] = useState<string | null>(null);
+  // 開發人員區「出缺席成績不含蓋在期中、期末、平時個別三部分分數」開關現況——
+  // 只用來顯示提示文字，實際排除邏輯已經在資料庫端 scoped_student_totals() 做好
+  // （見 sql/66attendance_excluded_from_partial_scores_toggle.sql），這裡不用
+  // 另外處理計算，只要讓老師知道現在期中/期末/平時三欄「為什麼」沒有受出缺席影響。
+  const [attendanceExcludedFromPartials, setAttendanceExcludedFromPartials] = useState(false);
   const ATTENDANCE_SUBJECT_NAMES = ['全勤', '出缺席'];
   const [canSeeRemarks, setCanSeeRemarks] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -114,6 +119,18 @@ export default function ClassSummaryPage() {
 
   const visibleExamTypes: Array<'期中考' | '期末考' | '平時分'> =
     viewMode === 'all' ? ['期中考', '期末考', '平時分'] : [viewMode];
+
+  // 讀取「出缺席成績不含蓋在期中、期末、平時個別三部分分數」開關現況（單純顯示提示文字用）
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase
+        .from('attendance_score_display_settings')
+        .select('exclude_attendance_from_partial_scores')
+        .eq('id', true)
+        .maybeSingle();
+      setAttendanceExcludedFromPartials(!!data?.exclude_attendance_from_partial_scores);
+    })();
+  }, []);
 
   // 初始化：判斷身分。管理員可選任何班級；導師固定看自己導的班級。
   useEffect(() => {
@@ -539,6 +556,13 @@ export default function ClassSummaryPage() {
       {rankLoadError && (
         <p style={{ fontSize: 12, color: '#B3261E', background: '#FDECEA', border: '1px solid #f5c2c7', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
           ⚠️ {rankLoadError}（總分/排名欄位這次會顯示空白，麻煩把這則錯誤訊息回報）
+        </p>
+      )}
+
+      {attendanceExcludedFromPartials && (
+        <p style={{ fontSize: 12, color: '#A36A00', background: '#FFF8E1', border: '1px solid #f0d98a', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
+          ℹ️ 開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」：下面期中／期末／平時三欄的分數與排名不受出缺席狀態影響；
+          三大表完成並鎖定以後，總成績及成績單仍會顯示、統計包含出缺席的真實成績。
         </p>
       )}
 
