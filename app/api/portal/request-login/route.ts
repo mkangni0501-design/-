@@ -55,26 +55,40 @@ export async function POST(req: NextRequest) {
 
   const code = loginCode.trim().toUpperCase();
   let relation: '學生本人' | '家長';
-  let studentNo: string;
+  let rawStudentNo: string;
   if (code.startsWith('HYS')) {
     relation = '學生本人';
-    studentNo = code.slice(3);
+    rawStudentNo = code.slice(3);
   } else if (code.startsWith('HY')) {
     relation = '家長';
-    studentNo = code.slice(2);
+    rawStudentNo = code.slice(2);
   } else {
     return NextResponse.json({ error: '登入代碼格式不正確，請確認學校提供的代碼（例如 HY0123 或 HYS0123）' }, { status: 400 });
   }
-  if (!studentNo) {
+  if (!rawStudentNo) {
     return NextResponse.json({ error: '登入代碼格式不正確，請確認學校提供的代碼（例如 HY0123 或 HYS0123）' }, { status: 400 });
   }
 
+  // 學號比對要用「不分大小寫」：登入代碼在上面被整段轉成大寫（方便使用者不用在意
+  // HY/HYS 開頭大小寫），但 students.student_no 是自由輸入的文字欄位，學籍資料建檔
+  // 當時打的英文字母大小寫不一定跟登入代碼裡的一致（例如學號存的是 S0140，但代碼
+  // 轉大寫後比對的是 S0140 沒錯，可是萬一原始學號是 s0140 這種小寫就會比對不到）。
+  // 純數字學號不受影響，但只要學號帶英文字母就可能發生「手機號碼明明填對、卻怎麼
+  // 都登入不了」的狀況，且系統只會回覆籠統的「代碼與手機不符」，很難排查。這裡先
+  // 用不分大小寫查詢找出資料庫裡實際的學號（含原始大小寫），後續查詢/寫入都改用
+  // 這個「資料庫實際值」，不要再用使用者輸入轉大寫後的版本。
+  const { data: studentByNo } = await supabaseAdmin
+    .from('students')
+    .select('student_no, phone')
+    .ilike('student_no', rawStudentNo)
+    .maybeSingle();
+  const studentNo = studentByNo?.student_no ?? rawStudentNo;
+
   let phoneMatched = false;
   if (relation === '學生本人') {
-    const { data: studentRow } = await supabaseAdmin.from('students').select('phone').eq('student_no', studentNo).maybeSingle();
-    phoneMatched = !!studentRow && phonesMatch(studentRow.phone, phone);
+    phoneMatched = !!studentByNo && phonesMatch(studentByNo.phone, phone);
   } else {
-    const { data: guardianRows } = await supabaseAdmin.from('guardians').select('phone').eq('student_no', studentNo);
+    const { data: guardianRows } = await supabaseAdmin.from('guardians').select('phone').ilike('student_no', rawStudentNo);
     phoneMatched = (guardianRows ?? []).some((g: any) => phonesMatch(g.phone, phone));
   }
 
