@@ -1,0 +1,14 @@
+-- 對應反映事項「學生休學、轉學、退學以後，出缺、成績等各項資料應自動隱藏不顯示，
+-- 僅有管理員查詢資料時能看到」的第一步：學籍狀態清單裡新增「轉學」這個選項
+-- （enum 原本只有 入學/休學/退學/畢業/肄業/復學，沒有轉學）。
+--
+-- 【重要】這個檔案「只做」新增 enum 值這一件事，故意不在同一個檔案裡接著使用
+-- 這個新值（例如放進某個函式的判斷條件裡）——Postgres 的規則是新的 enum 值要先
+-- 「整個交易先送出（commit）」過一次，才能在後續的敘述裡拿來用，兩者放在同一個
+-- 檔案（也就是同一次執行、同一個交易）裡會直接報錯：
+--   ERROR: 55P04: unsafe use of new value "轉學" of enum type enrollment_status_type
+--   HINT:  New enum values must be committed before they can be used.
+-- 這不是打錯字或邏輯錯誤，是 Postgres enum 型別的既定限制。實際「把轉學也算進
+-- 隱藏名單」的判斷邏輯，請見下一個檔案 sql/62（要等這個檔案先單獨執行、送出後
+-- 才能執行 62，兩個檔案必須分開跑，不能合併成一次執行）。
+alter type enrollment_status_type add value if not exists '轉學';
