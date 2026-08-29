@@ -98,10 +98,23 @@ export async function POST(req: NextRequest) {
     }
 
     // ---- 4. 在 app_users 建立對應的角色資料 ----
+    // must_change_password：如果開發人員區開啟了「第一次登入強制改密碼」，且這次是
+    // 用「管理員直接設定初始密碼」的方式建立帳號（password 有值——這種情況通常一批
+    // 帳號會共用同一組好記的初始密碼，才需要強制第一次登入就換掉），第一次登入時就會
+    // 被導去改密碼再放行（見 app/(app)/layout.tsx、app/change-password/page.tsx）。
+    // 用「寄邀請信」建立的帳號，對方本來就是自己在信件連結裡設定第一組密碼，不用再
+    // 強制多改一次。查不到設定（例如還沒執行過對應的 SQL migration）就當作關閉，
+    // 不影響原本「建完帳號直接可登入」的行為。
+    let mustChangePassword = false;
+    if (password) {
+      const { data: pwPolicy } = await supabaseAdmin.from('password_policy_settings').select('force_change_on_first_login').eq('id', true).maybeSingle();
+      mustChangePassword = !!pwPolicy?.force_change_on_first_login;
+    }
     const { error: insertErr } = await supabaseAdmin.from('app_users').insert({
       id: userId,
       name,
       role,
+      must_change_password: mustChangePassword,
     });
     if (insertErr) {
       // 重要：這裡如果失敗又不處理，剛剛第3步建立的登入帳號（auth.users）會變成「孤兒帳號」——

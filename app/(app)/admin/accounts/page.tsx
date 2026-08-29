@@ -557,6 +557,29 @@ export default function AdminAccountsPage() {
     loadAuditLog();
   }
 
+  async function handleUpdateEmail(targetUserId: string, targetName: string) {
+    const newEmail = prompt(`為「${targetName}」設定新信箱：`);
+    if (!newEmail) return;
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    if (!accessToken) {
+      alert('請重新登入');
+      return;
+    }
+    const res = await fetch('/api/admin/update-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ targetUserId, newEmail }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert('更換信箱失敗：' + (body.error ?? '未知錯誤'));
+      return;
+    }
+    alert(body.logWarning ?? '信箱已更換，請告知對方改用新信箱登入');
+    loadAuditLog();
+  }
+
   // 解析「帳號名單」格式：姓名,電子郵件,角色（第3列起為資料），逐筆呼叫邀請API
   async function handleUploadFile(file: File) {
     const { data: sessionData } = await supabase.auth.getSession();
@@ -902,6 +925,7 @@ export default function AdminAccountsPage() {
             <th style={{ textAlign: 'left', padding: 6 }}>角色</th>
             <th style={{ textAlign: 'left', padding: 6 }}>編輯角色</th>
             <th style={{ textAlign: 'left', padding: 6 }}>密碼</th>
+            <th style={{ textAlign: 'left', padding: 6 }}>信箱</th>
           </tr>
         </thead>
         <tbody>
@@ -952,6 +976,15 @@ export default function AdminAccountsPage() {
                   {manageable ? (
                     <button onClick={() => handleResetPassword(u.id, u.name)} style={{ fontSize: 12, padding: '2px 8px' }}>
                       重設密碼
+                    </button>
+                  ) : (
+                    <span style={{ color: '#ccc' }}>—</span>
+                  )}
+                </td>
+                <td style={{ padding: 6 }}>
+                  {manageable ? (
+                    <button onClick={() => handleUpdateEmail(u.id, u.name)} style={{ fontSize: 12, padding: '2px 8px' }}>
+                      更換信箱
                     </button>
                   ) : (
                     <span style={{ color: '#ccc' }}>—</span>

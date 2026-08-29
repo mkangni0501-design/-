@@ -20,6 +20,30 @@ type ClassRow = {
 // 一鍵下載/查詢會看到同一個班出現兩次，學生名單、課表、成績也會分散在兩筆不同資料上。
 // 用下面的清單找出同學年度＋同年級裡看起來像重複的班級，選好「保留哪一筆」後按合併，
 // 學生名單/課表/代課安排都會自動改指到保留的那一筆。
+//
+// 【2026-08-28 修正】反映事項「顯示人數跟系統其他地方看到的不一樣」：下面查詢
+// enrollments／class_schedule 這兩張表時，原本沒有分頁，是「一次查全校、所有學年度」
+// 的資料——Supabase／PostgREST 預設一次最多只回 1000 筆，學校開校這麼多年下來，
+// 全校累積的在學紀錄／排課紀錄很容易超過 1000 筆，一旦超過，多出來的那些筆數會被
+// 悄悄截斷、完全不會出現在這裡的統計裡，但其他頁面（例如班級總表）因為都是「只查
+// 一個特定班級」，資料量小，不會踩到這個 1000 筆上限，所以看起來數字對得起來、
+// 只有這頁不對。改成用 fetchAllRows() 分批（每批 1000 筆）撈完全部資料再統計，
+// 不管全校累積多少筆都不會漏算。
+async function fetchAllRows<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>): Promise<T[]> {
+  const pageSize = 1000;
+  const all: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await build(from, from + pageSize - 1);
+    if (error) break;
+    const rows = data ?? [];
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
 export default function ClassAccountsPage() {
   const [rows, setRows] = useState<ClassRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -41,13 +65,43 @@ export default function ClassAccountsPage() {
       setLoading(false);
       return;
     }
-    const { data: enrollRows } = await supabase.from('enrollments').select('class_id').eq('is_current', true);
-    const studentCountById = new Map<string, number>();
-    (enrollRows ?? []).forEach((e: any) => studentCountById.set(e.class_id, (studentCountById.get(e.class_id) ?? 0) + 1));
+    // 【2026-08-28 修正】人數統計要排除「已離校（休學/轉學/退學/畢業/肄業）」的
+    // 學生：這頁是管理員專用頁面，管理員在 RLS 上本來就看得到這些學生的 enrollments
+    // 紀錄（sql/37hide_status_changed_students.sql 的隱藏機制只擋一般教師，管理員
+    // 不受影響），如果直接數 is_current=true 的筆數，會把已離校學生也算進去，
+    // 跟一般教師在班級名冊實際看到的人數（已離校學生看不到）對不起來。這裡額外抓一次
+    // 學籍狀態變更紀錄，算出每個學生「目前最新狀態」，排除已離校的再統計人數，
+    // 這樣管理員在這頁看到的人數才會跟教師平常看到的一致。
+    const statusRows = await fetchAllRows<{ student_no: string; status: string; effective_date: string; created_at: string }>((from, to) =>
+      supabase.from('student_status_changes').select('student_no, status, effective_date, created_at').range(from, to)
+    );
+    const HIDDEN_STATUSES = new Set(['休學', '轉學', '退學', '畢業', '肄業']);
+    const latestStatusByStudent = new Map<string, { status: string; effective_date: string; created_at: string }>();
+    statusRows.forEach((r) => {
+      const prev = latestStatusByStudent.get(r.student_no);
+      if (!prev || r.effective_date > prev.effective_date || (r.effective_date === prev.effective_date && r.created_at > prev.created_at)) {
+        latestStatusByStudent.set(r.student_no, r);
+      }
+    });
+    const hiddenStudentNos = new Set(
+      Array.from(latestStatusByStudent.entries())
+        .filter(([, v]) => HIDDEN_STATUSES.has(v.status))
+        .map(([studentNo]) => studentNo)
+    );
 
-    const { data: scheduleRows } = await supabase.from('class_schedule').select('class_id').not('weekday', 'is', null).not('period_no', 'is', null);
+    const enrollRows = await fetchAllRows<{ class_id: string; student_no: string }>((from, to) =>
+      supabase.from('enrollments').select('class_id, student_no').eq('is_current', true).range(from, to)
+    );
+    const studentCountById = new Map<string, number>();
+    enrollRows
+      .filter((e) => !hiddenStudentNos.has(e.student_no))
+      .forEach((e) => studentCountById.set(e.class_id, (studentCountById.get(e.class_id) ?? 0) + 1));
+
+    const scheduleRows = await fetchAllRows<{ class_id: string }>((from, to) =>
+      supabase.from('class_schedule').select('class_id').not('weekday', 'is', null).not('period_no', 'is', null).range(from, to)
+    );
     const scheduleCountById = new Map<string, number>();
-    (scheduleRows ?? []).forEach((s: any) => scheduleCountById.set(s.class_id, (scheduleCountById.get(s.class_id) ?? 0) + 1));
+    scheduleRows.forEach((s) => scheduleCountById.set(s.class_id, (scheduleCountById.get(s.class_id) ?? 0) + 1));
 
     setRows(
       (classRows ?? []).map((c: any) => ({
@@ -146,6 +200,10 @@ export default function ClassAccountsPage() {
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
         往後上傳/匯入時，如果班級名稱打法稍有不同（多空格、簡稱、全形半形），系統會先試著比對成同一班，不會再無聲無息地建出新的重複班級；
         但打法差異太大（像「高三」跟「忠班」這種完全不同的名字）系統無法自動判斷，還是要靠這頁手動處理。
+      </p>
+      <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
+        如果您看到某個班只有一筆資料、人數卻不對：那不是重複班級的問題（重複才需要合併），是統計數字本身算錯了；
+        這頁先前確實有這個問題（全校資料量大時，人數會少算），已經修正，重新整理這頁應該就會顯示正確人數。
       </p>
       {likelyDuplicateIds.size > 0 && (
         <p style={{ fontSize: 12, color: '#A36A2D', marginBottom: 16 }}>

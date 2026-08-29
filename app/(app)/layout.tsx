@@ -24,6 +24,17 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         router.replace('/');
         return;
       }
+      // 反映事項「開發人員區增加【第一次登入強制更改密碼】功能」：教職員（app_users）
+      // 帳號如果還沒完成「第一次登入強制改密碼」，這裡整層擋下來、導去 /change-password，
+      // 不管想打開哪個頁面都一樣先擋在這裡（不是只在登入當下判斷一次），避免直接輸入
+      // 網址跳過這一步。家長/學生（portal_accounts）帳號在 app_users 裡本來就查不到
+      // 任何資料，這裡的檢查對他們自然不會有作用，不影響家長/學生登入。
+      const { data: profile } = await supabase.from('app_users').select('must_change_password').eq('id', data.session.user.id).maybeSingle();
+      if (!active) return;
+      if (profile?.must_change_password) {
+        router.replace('/change-password');
+        return;
+      }
       setStatus('allowed');
     })();
 
