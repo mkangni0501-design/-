@@ -48,6 +48,8 @@ export default function ParentPortalPage() {
   const [selected, setSelected] = useState<LinkedStudent | null>(null);
   const [records, setRecords] = useState<TermRecord[]>([]);
   const [attendanceCounts, setAttendanceCounts] = useState<Record<string, number>>({});
+  const [attendanceDates, setAttendanceDates] = useState<Record<string, string[]>>({});
+  const [expandedAttendanceStatus, setExpandedAttendanceStatus] = useState<string | null>(null);
   const [absencePeriods, setAbsencePeriods] = useState(0);
   const [alertThreshold, setAlertThreshold] = useState<number | null>(null);
   const [profile, setProfile] = useState<Record<string, string>>({});
@@ -214,15 +216,28 @@ export default function ParentPortalPage() {
       // 出缺勤彙總／基本資料／監護人資料／修改申請紀錄彼此互不相依，原本依序一個一個等，
       // 改成同時發送，一樣能減少總等待時間。
       const [{ data: attendanceRows }, { data: studentRow }, { data: guardianRows }] = await Promise.all([
-        supabase.from('attendance').select('status').eq('student_no', selected.student_no),
+        supabase.from('attendance').select('status, record_date').eq('student_no', selected.student_no),
         supabase.from('students').select('address, phone').eq('student_no', selected.student_no).single(),
         supabase.from('guardians').select('id, relation, name, phone').eq('student_no', selected.student_no),
         loadEditRequests(selected.student_no),
       ]);
 
       const counts: Record<string, number> = {};
-      (attendanceRows ?? []).forEach((r: any) => (counts[r.status] = (counts[r.status] ?? 0) + 1));
+      const dateSets: Record<string, Set<string>> = {};
+      (attendanceRows ?? []).forEach((r: any) => {
+        counts[r.status] = (counts[r.status] ?? 0) + 1;
+        if (r.record_date) {
+          if (!dateSets[r.status]) dateSets[r.status] = new Set();
+          dateSets[r.status].add(r.record_date);
+        }
+      });
+      const dates: Record<string, string[]> = {};
+      Object.entries(dateSets).forEach(([status, set]) => {
+        dates[status] = Array.from(set).sort();
+      });
       setAttendanceCounts(counts);
+      setAttendanceDates(dates);
+      setExpandedAttendanceStatus(null);
       setAbsencePeriods((counts['事假'] ?? 0) + (counts['病假'] ?? 0) + (counts['曠課'] ?? 0));
 
       setProfile((studentRow as any) ?? {});
@@ -230,15 +245,23 @@ export default function ParentPortalPage() {
     })();
   }, [selected]);
 
+  // 可修改欄位依身分不同：學生本人只能改自己的電話/地址；家長可以改本人（學生）跟
+  // 監護人的所有可修改欄位。之前不管登入的是學生還是家長，看到的清單完全一樣，
+  // 學生本人也能送出「監護人姓名/電話」的修改申請，這裡依 selected.relation 過濾。
   const editableOptions: EditableOption[] = selected
-    ? [
-        { key: 'student:address', label: '本人現居地址', targetTable: 'students', guardianId: null, fieldName: 'address', currentValue: profile.address ?? '' },
-        { key: 'student:phone', label: '本人聯絡電話', targetTable: 'students', guardianId: null, fieldName: 'phone', currentValue: profile.phone ?? '' },
-        ...guardians.flatMap((g) => [
-          { key: `guardian:${g.id}:name`, label: `${g.relation}姓名`, targetTable: 'guardians' as const, guardianId: g.id, fieldName: 'name', currentValue: g.name ?? '' },
-          { key: `guardian:${g.id}:phone`, label: `${g.relation}電話`, targetTable: 'guardians' as const, guardianId: g.id, fieldName: 'phone', currentValue: g.phone ?? '' },
-        ]),
-      ]
+    ? selected.relation === '學生本人'
+      ? [
+          { key: 'student:address', label: '本人現居地址', targetTable: 'students', guardianId: null, fieldName: 'address', currentValue: profile.address ?? '' },
+          { key: 'student:phone', label: '本人聯絡電話', targetTable: 'students', guardianId: null, fieldName: 'phone', currentValue: profile.phone ?? '' },
+        ]
+      : [
+          { key: 'student:address', label: '本人現居地址', targetTable: 'students', guardianId: null, fieldName: 'address', currentValue: profile.address ?? '' },
+          { key: 'student:phone', label: '本人聯絡電話', targetTable: 'students', guardianId: null, fieldName: 'phone', currentValue: profile.phone ?? '' },
+          ...guardians.flatMap((g) => [
+            { key: `guardian:${g.id}:name`, label: `${g.relation}姓名`, targetTable: 'guardians' as const, guardianId: g.id, fieldName: 'name', currentValue: g.name ?? '' },
+            { key: `guardian:${g.id}:phone`, label: `${g.relation}電話`, targetTable: 'guardians' as const, guardianId: g.id, fieldName: 'phone', currentValue: g.phone ?? '' },
+          ]),
+        ]
     : [];
 
   useEffect(() => {
@@ -275,6 +298,51 @@ export default function ParentPortalPage() {
   const currentTerm = records[records.length - 1];
   const halfThreshold = alertThreshold !== null ? Math.ceil(alertThreshold / 2) : null;
   const showAlert = halfThreshold !== null && absencePeriods >= halfThreshold;
+
+  // 通知分頁「有新內容」提醒：原本直接用 `showAlert || editRequests.length > 0` 這種
+  // 「現在有沒有資料」來判斷，資料是不是「新的」完全沒被考慮——只要曾經送出過一筆
+  // 修改資料申請，不管核准/駁回多久了，editRequests.length 永遠 > 0，這個提醒就永遠
+  // 亮著，切進「通知」分頁看過也不會消失（因為判斷式本身完全沒有用到「看過了沒」
+  // 這件事，每次重新算都是同一個結果）。這裡改成把「目前有哪些通知內容」濃縮成一組
+  // 特徵字串（notificationSignal），跟「上次看過通知分頁時記錄下來的特徵字串」比較，
+  // 兩者不同才代表「有看過之後才新增/變化的內容」；使用者切進通知分頁時，把目前的
+  // 特徵字串存起來（存在瀏覽器 localStorage，用學號當 key，換人登入或換瀏覽器不會
+  // 互相干擾），之後只要內容沒有再變化，提醒就不會再出現，符合「看過就消除，除非有
+  // 新內容才又出現」的預期。
+  const notificationSignal = JSON.stringify({
+    alert: showAlert,
+    requests: editRequests.map((r) => `${r.id}:${r.status}`),
+    posts: bulletinPosts.map((p) => p.id),
+  });
+  const seenStorageKey = selected ? `portal_notifications_seen:${selected.student_no}` : null;
+  const [seenSignal, setSeenSignal] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!seenStorageKey) {
+      setSeenSignal(null);
+      return;
+    }
+    try {
+      setSeenSignal(window.localStorage.getItem(seenStorageKey));
+    } catch {
+      setSeenSignal(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seenStorageKey]);
+
+  useEffect(() => {
+    if (activeTab !== '通知' || !seenStorageKey) return;
+    try {
+      window.localStorage.setItem(seenStorageKey, notificationSignal);
+    } catch {
+      // localStorage 不可用（例如無痕模式部分瀏覽器）時，提醒功能退化成「每次都提醒」，
+      // 不影響其他功能，這裡就不特別處理錯誤。
+    }
+    setSeenSignal(notificationSignal);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, seenStorageKey, notificationSignal]);
+
+  const hasUnseenNotification = (showAlert || editRequests.length > 0) && notificationSignal !== seenSignal;
 
   // 切到「教師/班級課表」分頁、或換了選到的小孩、或本學期班級變了，才查課表——
   // 不用每次切分頁都重查，同一個班級課表查過一次就夠。
@@ -385,7 +453,7 @@ export default function ParentPortalPage() {
                 {tab === '課表' ? '教師/班級課表' : tab}
               </button>
             ))}
-            {(showAlert || editRequests.length > 0) && activeTab !== '通知' && (
+            {hasUnseenNotification && activeTab !== '通知' && (
               <span style={{ alignSelf: 'center', fontSize: 11, color: '#A36A2D' }}>● 通知有新內容</span>
             )}
           </div>
@@ -535,11 +603,45 @@ export default function ParentPortalPage() {
 
               <section>
                 <h2 style={{ fontSize: 14, marginBottom: 8 }}>歷年出缺勤彙總</h2>
-                <p style={{ fontSize: 13 }}>
-                  {Object.entries(attendanceCounts).length > 0
-                    ? Object.entries(attendanceCounts).map(([k, v]) => `${k} ${v}次`).join('　')
-                    : '全勤或尚無紀錄'}
-                </p>
+                <p style={{ fontSize: 11, color: '#999', marginBottom: 8 }}>點選次數可以看到相對應登記的日期。</p>
+                {Object.entries(attendanceCounts).length > 0 ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {Object.entries(attendanceCounts).map(([status, count]) => (
+                      <div key={status}>
+                        <button
+                          type="button"
+                          onClick={() => setExpandedAttendanceStatus(expandedAttendanceStatus === status ? null : status)}
+                          style={{
+                            fontSize: 13,
+                            padding: '4px 10px',
+                            borderRadius: 6,
+                            border: '1px solid #ddd',
+                            background: expandedAttendanceStatus === status ? '#2C2C2A' : '#f5f5f4',
+                            color: expandedAttendanceStatus === status ? '#fff' : '#333',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {status} {count}次
+                        </button>
+                        {expandedAttendanceStatus === status && (
+                          <div style={{ marginTop: 4, padding: '6px 10px', border: '1px solid #eee', borderRadius: 6, background: '#fff' }}>
+                            {(attendanceDates[status] ?? []).length > 0 ? (
+                              <ul style={{ fontSize: 12, color: '#666', paddingLeft: 16, margin: 0 }}>
+                                {(attendanceDates[status] ?? []).map((d) => (
+                                  <li key={d}>{d}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p style={{ fontSize: 12, color: '#999', margin: 0 }}>沒有登記的日期。</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 13 }}>全勤或尚無紀錄</p>
+                )}
               </section>
             </>
           )}

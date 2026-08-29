@@ -162,6 +162,16 @@ export default function LoginPage() {
     // 統一都先進 /admin——這裡本來就會依角色判斷（isAdminRole && viewMode==='admin'
     // 才顯示六大分類的管理後台，否則顯示攤平的「教學作業」清單），所以不管是導師
     // 還是一般教師，登入後都會直接看到自己權限範圍內的教師功能目錄。
+    //
+    // 【2026-08-29 新增】教師登入後的目的地改成可以在開發人員區設定
+    // （sql/65teacher_login_home_setting.sql、/admin/dev-tools 的
+    // 「教師登入首頁設定」），不用之後想換首頁還要改程式碼重新部署。只影響「教師」
+    // 卡片；「管理者」卡片登入一律還是進 /admin（管理後台），行為不變。
+    if (card === 'teacher') {
+      const { data: settingRow } = await supabase.from('teacher_login_settings').select('home_path').eq('id', true).maybeSingle();
+      router.push(settingRow?.home_path || '/admin');
+      return;
+    }
     router.push('/admin');
   }
 

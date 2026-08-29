@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { getCurrentAppUser } from '@/lib/supabaseClient';
+import { getCurrentAppUser, getCurrentTeacherId, getHasTeachingAssignment } from '@/lib/supabaseClient';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap, moduleLabelKey } from '@/lib/siteContent';
 import { getMyDepartments } from '@/lib/departments';
@@ -257,11 +257,13 @@ export default function AdminHomePage() {
     const viewingAsTeacher = mode === 'teacher';
     if (appUser && (!isSystemAdmin || viewingAsTeacher)) {
       // 非系統管理員S（或雖然是S、但目前正用教師視角）：算出「這個身分實際看得到哪些功能」
-      const [myDepartments, overrides] = await Promise.all([
+      const [myDepartments, overrides, teacherId] = await Promise.all([
         viewingAsTeacher ? Promise.resolve([]) : getMyDepartments(appUser.id).then((rows) => rows.map((r) => r.department)),
         getModuleOverridesFor(appUser.id),
+        getCurrentTeacherId(),
       ]);
-      setVisibleKeys(computeVisibleModuleKeys({ isSystemAdmin: false, myDepartments, categoryMap: map, overrides }));
+      const hasTeachingAssignment = await getHasTeachingAssignment(teacherId);
+      setVisibleKeys(computeVisibleModuleKeys({ isSystemAdmin: false, myDepartments, categoryMap: map, overrides, hasTeachingAssignment }));
     } else {
       setVisibleKeys(null); // S（且目前是管理者視角）看得到全部，也才能調整分類
     }

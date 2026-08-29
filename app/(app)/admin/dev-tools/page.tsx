@@ -6,6 +6,7 @@ import BackupRestorePanel from '@/components/dev-tools/BackupRestorePanel';
 import BulkExcelPanel from '@/components/dev-tools/BulkExcelPanel';
 import TeacherLettersPanel from '@/components/dev-tools/TeacherLettersPanel';
 import PasswordPolicySettingsPanel from '@/components/dev-tools/PasswordPolicySettingsPanel';
+import TeacherLoginHomeSettingsPanel from '@/components/dev-tools/TeacherLoginHomeSettingsPanel';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { hasDepartment } from '@/lib/departments';
 
@@ -58,9 +59,14 @@ export default function DevToolsPage() {
         <TeacherLettersPanel userId={me?.id ?? null} />
       </section>
 
-      <section id="password-policy-settings">
+      <section id="password-policy-settings" style={{ marginBottom: 40, paddingBottom: 24, borderBottom: '1px solid #eee' }}>
         <h2 style={{ fontSize: 14, marginBottom: 4 }}>密碼政策設定</h2>
         <PasswordPolicySettingsPanel />
+      </section>
+
+      <section id="teacher-login-home-settings">
+        <h2 style={{ fontSize: 14, marginBottom: 4 }}>教師登入首頁設定</h2>
+        <TeacherLoginHomeSettingsPanel />
       </section>
     </main>
   );
