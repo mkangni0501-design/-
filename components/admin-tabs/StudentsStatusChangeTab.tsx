@@ -3,11 +3,12 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
-const STATUS_OPTIONS = ['入學', '休學', '退學', '畢業', '肄業', '復學'] as const;
+const STATUS_OPTIONS = ['入學', '休學', '轉學', '退學', '畢業', '肄業', '復學'] as const;
 
 const TEMPLATE_FILES: Record<string, string> = {
   入學: '/templates/入學申請書.docx',
   休學: '/templates/休學申請書.docx',
+  轉學: '/templates/轉學申請書.docx',
   退學: '/templates/退學申請書.docx',
   畢業: '/templates/畢業離校確認書.docx',
   肄業: '/templates/肄業證明申請書.docx',
@@ -75,7 +76,9 @@ export default function StatusChangePage() {
     <div style={{ maxWidth: 480, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 16, marginBottom: 4 }}>學籍狀態變更</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-        休學／退學／畢業／肄業／復學，直接記錄狀態變化即可，不需要審核流程。可附加佐證資料（例如休學證明、家長申請書掃描檔）。
+        休學／轉學／退學／畢業／肄業／復學，直接記錄狀態變化即可，不需要審核流程。可附加佐證資料（例如休學證明、家長申請書掃描檔）。
+        休學／轉學／退學／畢業／肄業這五種狀態記錄後，這位學生的出缺勤／成績等資料會自動從一般查詢畫面（成績登錄、出缺勤登錄、學生名冊等）隱藏，只有管理員查得到；
+        座號也會自動釋放（不會再佔用班級座號）。復學時請另外到「學籍設定及查詢」把學生重新加入班級，資料才會恢復正常顯示。
       </p>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>

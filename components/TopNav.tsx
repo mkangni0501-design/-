@@ -185,6 +185,11 @@ export default function TopNav() {
             通知{unreadCount > 0 ? `（${unreadCount}）` : ''}
           </Link>
         )}
+        {!isPortal && me && (
+          <Link href="/account" style={{ color: '#2C2C2A' }}>
+            帳號設定
+          </Link>
+        )}
         {canSwitchIdentity ? (
           <span style={{ position: 'relative' }}>
             <button
