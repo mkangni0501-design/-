@@ -561,8 +561,8 @@ export default function ClassSummaryPage() {
 
       {attendanceExcludedFromPartials && (
         <p style={{ fontSize: 12, color: '#A36A00', background: '#FFF8E1', border: '1px solid #f0d98a', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
-          ℹ️ 開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」：下面期中／期末／平時三欄的分數與排名不受出缺席狀態影響；
-          三大表完成並鎖定以後，總成績及成績單仍會顯示、統計包含出缺席的真實成績。
+          ℹ️ 開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」：下面期中／期末／平時三欄、以及這個班級的總分／排名，
+          都不含出缺席狀態影響（不管期中考／期末考／平時分三大表有沒有送出、鎖定都一樣）。正式成績單不受這個開關影響，仍會顯示、統計包含出缺席的真實成績。
         </p>
       )}
 
@@ -721,13 +721,26 @@ export default function ClassSummaryPage() {
                   {subjects.map((s) => {
                     const row = subjectData[en.id]?.[s];
                     const isAttendanceSubject = ATTENDANCE_SUBJECT_NAMES.includes(s);
+                    // 開發人員區開關開啟時，期中/期末/平時三欄的總分/平均/排名已經不含出缺席
+                    // （見 sql/66），這裡連「全勤／出缺席」這一欄本身顯示的分數也一併隱藏
+                    // （顯示「—」），避免老師看到這一欄有分數、卻懷疑總分/排名為什麼沒把它
+                    // 算進去，看起來像系統漏算。
+                    const hideAttendanceScore = isAttendanceSubject && attendanceExcludedFromPartials;
                     return visibleExamTypes.map((et, eti) => (
                       <td
                         key={s + et}
                         style={{ padding: 6, textAlign: 'center', borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER }}
-                        title={isAttendanceSubject ? '依真實出缺勤紀錄自動計算，不是老師手動輸入的分數（老師若有在此欄輸入分數，該分數不會被採用）' : undefined}
+                        title={
+                          hideAttendanceScore
+                            ? '開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」，這一欄暫時隱藏'
+                            : isAttendanceSubject
+                            ? '依真實出缺勤紀錄自動計算，不是老師手動輸入的分數（老師若有在此欄輸入分數，該分數不會被採用）'
+                            : undefined
+                        }
                       >
-                        {isAttendanceSubject
+                        {hideAttendanceScore
+                          ? '—'
+                          : isAttendanceSubject
                           ? attendanceAdjustments[en.id] ?? '—'
                           : row?.[EXAM_TYPE_FIELD[et]] ?? '—'}
                       </td>

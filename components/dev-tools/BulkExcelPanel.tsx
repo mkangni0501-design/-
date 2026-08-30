@@ -32,6 +32,10 @@ import {
   MAINTENANCE_TICKETS_SHEET_NAME,
   UTILITY_BILLS_SHEET_NAME,
   ACADEMIC_TERMS_SHEET_NAME,
+  CONDUCT_SCORES_SHEET_NAME,
+  REPORT_CARD_STYLE_SHEET_NAME,
+  CLUB_ROSTER_SHEET_NAME,
+  CLUB_SCORES_SHEET_NAME,
   fetchCurrentAttendanceAlertSettingsSheet,
   fetchCurrentConductPointDefaultsSheet,
   fetchCurrentGeneralInventoryItemsSheet,
@@ -39,6 +43,10 @@ import {
   fetchCurrentMaintenanceTicketsSheet,
   fetchCurrentUtilityBillsSheet,
   fetchCurrentAcademicTermsSheet,
+  fetchCurrentConductScoresSheet,
+  fetchCurrentReportCardStyleSheet,
+  fetchCurrentClubRosterSheet,
+  fetchCurrentClubScoresSheet,
 } from '@/lib/currentDataSheetsExtra';
 import {
   uploadAttendanceAlertSettingsSheet,
@@ -48,6 +56,10 @@ import {
   uploadMaintenanceTicketsSheet,
   uploadUtilityBillsSheet,
   uploadAcademicTermsSheet,
+  uploadConductScoresSheet,
+  uploadReportCardStyleSheet,
+  uploadClubRosterSheet,
+  uploadClubScoresSheet,
 } from '@/lib/bulkHandlersExtra';
 import {
   SELF_HIRED_LETTER_SHEET_NAME,
@@ -221,6 +233,11 @@ export default function BulkExcelPanel({ myRole }: { myRole: string | undefined 
         fetchCurrentServiceCertSheet(),
         fetchCurrentAppointmentLetterSheet('自聘教師聘書'),
         fetchCurrentAppointmentLetterSheet('當年教師聘書'),
+        // 【本輪新增】操行成績／成績單樣式設定／社團名冊／社團成績
+        fetchCurrentConductScoresSheet(),
+        fetchCurrentReportCardStyleSheet(),
+        fetchCurrentClubRosterSheet(academicYear, term),
+        fetchCurrentClubScoresSheet(academicYear, term),
       ]);
       deptSheets.forEach(({ name, aoa }) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name.slice(0, 31)));
 
@@ -367,6 +384,11 @@ export default function BulkExcelPanel({ myRole }: { myRole: string | undefined 
           currentName: ANNUAL_LETTER_SHEET_NAME + '(現況)',
           run: (rows) => uploadAppointmentLetterSheet(rows, '當年教師聘書', accessTokenUserId),
         },
+        // 【本輪新增】操行成績／成績單樣式設定／社團名冊／社團成績
+        { templateName: CONDUCT_SCORES_SHEET_NAME, run: (rows) => uploadConductScoresSheet(rows) },
+        { templateName: REPORT_CARD_STYLE_SHEET_NAME, run: (rows) => uploadReportCardStyleSheet(rows, accessTokenUserId) },
+        { templateName: CLUB_ROSTER_SHEET_NAME, run: (rows) => uploadClubRosterSheet(rows) },
+        { templateName: CLUB_SCORES_SHEET_NAME, run: (rows) => uploadClubScoresSheet(rows) },
       ];
 
       const collected: SheetResult[] = [];

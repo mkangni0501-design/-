@@ -32,6 +32,16 @@ export type SubjectScoreRow = {
   total: number | null;
 };
 
+// 【2026-08-28 新增】反映事項「不同科目的年級…用最大科目的格數去排」：不同班級/
+// 年級的實際科目數不一樣，改成不管哪個班，成績單一律照本校最大科目數固定排出
+// 這麼多列（科目不夠的班級，多出來的列留空白），不再逐班動態縮放字級/列高去
+// 剛好塞滿——比原本「依實際科目數縮放」單純、版面也不會因為班級科目多寡而跳動。
+// 「出缺席」固定另外排最後1列，不算在10科的科目格數裡面（跟前面確認過的
+// 「本校科目最多10科，加入出缺席共11科不會改變」一致）。
+export const ATTENDANCE_SUBJECT_NAMES = ['全勤', '出缺席'];
+export const MAX_REAL_SUBJECT_SLOTS = 10;
+export const TOTAL_SUBJECT_SLOTS = MAX_REAL_SUBJECT_SLOTS + 1;
+
 export type TermBlock = {
   ready: boolean;
   subjects: SubjectScoreRow[];
@@ -478,45 +488,38 @@ function ScoreTable({
   scoreColWidth: number;
 }) {
   const primary = terms.上學期 ?? terms.下學期;
-  const subjects = primary?.subjects ?? [];
+  const allSubjects = primary?.subjects ?? [];
   const base = config.sizes.baseFontSize;
-  // 【2026-08-24 補充】光靠 flex:1 讓「科目列＋學業平均＋操行成績」這個區塊
-  // 撐滿/縮進可用高度，科目「少」的方向沒問題（flex-grow 正常運作，用
-  // pdftoppm 渲染5科測試過，列高會自動變高撐滿、紀律精準對齊右邊簽章列）。
-  // 但科目「多」的方向：react-pdf 底層的 Yoga 排版引擎，就算個別列已經設定
-  // minHeight:0 + overflow:'hidden'，還是不會把列高縮到比文字本身單行自然
-  // 高度更矮（這是 Yoga 對文字內容量測的已知限制，不是這裡 flex 設定的問題）。
-  // 實際用15科渲染測試過：不縮小字體的話，超過約12~13科這個可用高度就會不夠塞，
-  // 整張表被擠到自動另開一頁。這裡改成科目數超過10科時，字體/padding 跟著
-  // 等比例縮小（下限 0.5），科目數
-  // 不多的班級（≤10科，目前多數班級的正常情況）完全不受影響、維持原本字級。
-  const denseScale = subjects.length <= 9 ? 1 : Math.max(0.5, 9 / subjects.length);
-  const denseFontSize = base * denseScale;
-  const densePadding = Math.max(1, Math.round(3 * denseScale));
+  // 【2026-08-28 依回饋改為固定列數，取代原本逐班動態縮放（denseScale）那套】
+  // 不再依「這個班實際有幾科」去縮放字級/列高剛好塞滿版面——固定照本校最大
+  // 科目數（10科，不含出缺席）排出10個科目列位置，科目數不足的班級後面幾列
+  // 留空白；出缺席永遠固定排在第11列（不管這個班實際有幾科真實科目）。11列
+  // 這個固定總數，先前用 pdftoppm 實際渲染測試過不縮小字體也能正常塞進一頁
+  // （測試到12~13列才會開始塞不下），所以這裡完全不用再縮放字級，永遠用
+  // 後台設定的原始字級/padding，所有班級版面（字級、列高、出缺席/簽章位置）
+  // 都完全一樣，不會因為班級科目多寡而跳動。
+  // 萬一真的有班級科目數超過10科（正常情況下不會），不裁掉真實資料，超出的
+  // 部分照樣往下多印，只是版面不保證剛好塞滿一頁——以「不遺漏資料」為優先。
+  const realSubjects = allSubjects.filter((s) => !ATTENDANCE_SUBJECT_NAMES.includes(s.subject));
+  const attendanceSubject = allSubjects.find((s) => ATTENDANCE_SUBJECT_NAMES.includes(s.subject)) ?? null;
+  const realSlotCount = Math.max(MAX_REAL_SUBJECT_SLOTS, realSubjects.length);
+  const subjectRows: (SubjectScoreRow | null)[] = [
+    ...realSubjects,
+    ...Array(Math.max(0, realSlotCount - realSubjects.length)).fill(null),
+    attendanceSubject,
+  ];
+  const denseFontSize = base;
+  const densePadding = 3;
   return (
-    // 【2026-08-24 修正】原本這裡是普通 <View>（不會撐滿 leftCol 拉伸後的高度，
-    // 只會長到「內容自然高度」），科目列數（subjects.length）依班級/年級不同，
-    // 少則5、6科（例如高三下學期選修結束後），多則15科以上（含才藝/出缺席等）。
-    // 這造成兩個問題：
-    // 1. 科目少的班級：整張表內容自然高度遠小於 rightCol 被拉伸後的高度，
-    //    「紀律」那一列會停在表格自然高度的地方，跟 rightCol 用 flex:1 撐到底部\
-    //    的「簽章列」對不上——這正是反映「導師/訓導/教務/校長簽章需要下移對齊
-    //    紀律」的根因：簽章列被撐到頁面最底，但紀律因為科目少、表格本身沒那麼高，
-    //    停在中間，兩者中間出現一大截沒對齊的空白。
-    // 2. 科目多的班級：用 pdftoppm 實際渲染測試（15科）發現，表格自然高度會超過
-    //    一整頁能容納的高度，react-pdf 偵測到內頁放不下，直接把整個科目列表格
-    //    另外開一頁接著印，變成「反面（內頁）印成兩頁」，右邊出席/懲獎面板卻仍然
-    //    留在第一頁——不只格線對不齊，版面直接整個錯開。
-    // 兩個問題根因相同：科目列表格的高度是「內容自然高度」，不會隨科目數量
-    // 自動縮放去剛好塞滿/塞進 leftCol 實際可用的高度。改成外層包一個 flex:1，
-    // 「科目列＋學業平均＋操行成績」這個數量會變動的區塊也一起用 flex 依比例
-    // 分配剩餘高度（操行成績本身是5列，給 flex:5，其他每列 flex:1）——不管
-    // 科目有幾科，這個區塊永遠精準撐滿 leftCol 可用高度的100%，「紀律」的底線
-    // 永遠等於 leftCol／rightCol 共用的那個容器底部，這樣 rightCol 用 flex:1
-    // 撐到底部的簽章列，不管科目多寡都會精準對齊紀律，同時科目多的時候每列
-    // 高度會自動等比例縮小以塞進同一頁，不會再另外多開一頁。表頭兩列（科目/
-    // 比重/上下學期/學年成績、期中/期末/平時/總分）跟期中期末平時比重列維持
-    // 固定高度不參與縮放，避免表頭在科目很少時被拉得不成比例地高。
+    // 【2026-08-24 修正，2026-08-28 改為固定11列】原本這裡是普通 <View>（不會撐滿
+    // leftCol 拉伸後的高度，只會長到「內容自然高度」）。現在科目列表格固定就是
+    // TOTAL_SUBJECT_SLOTS（11）列，外層包 flex:1，「科目列＋學業平均＋操行成績」
+    // 這個固定11+1+5=17列的區塊用 flex 依比例分配 leftCol 可用高度（操行成績
+    // 本身是5列，給 flex:5，其他每列 flex:1）——不管這個班實際有幾科真實科目，
+    // 這個區塊永遠精準撐滿 leftCol 可用高度的100%，「紀律」的底線永遠等於
+    // leftCol／rightCol 共用的那個容器底部，rightCol 用 flex:1 撐到底部的簽章列
+    // 也就永遠精準對齊紀律。表頭兩列（科目/比重/上下學期/學年成績、期中/期末/
+    // 平時/總分）跟期中期末平時比重列維持固定高度不參與縮放。
     <View style={{ flex: 1 }}>
       {/* 科目/比重/學期表頭 */}
       <View style={styles.row}>
@@ -586,43 +589,45 @@ function ScoreTable({
         );
       })()}
 
-      {/* 科目列 */}
-      {subjects.map((s) => {
-        const fall = terms.下學期?.subjects.find((x) => x.subject === s.subject);
+      {/* 科目列：固定 TOTAL_SUBJECT_SLOTS(11)列——前 MAX_REAL_SUBJECT_SLOTS(10)列是
+          真實科目（不夠10科的班級後面補空白列），最後1列固定是出缺席（沒有資料
+          時也是空白列，不會整列消失，版面不會因此跳動）。 */}
+      {subjectRows.map((s, idx) => {
+        const fall = s ? terms.下學期?.subjects.find((x) => x.subject === s.subject) : undefined;
         return (
-          <View style={[styles.row, { flex: 1, minHeight: 0, overflow: 'hidden' }]} key={s.subject}>
+          <View style={[styles.row, { flex: 1, minHeight: 0, overflow: 'hidden' }]} key={s?.subject ?? `blank-${idx}`}>
             <View style={[styles.cellLeftLabel, styles.subjectCol, { padding: densePadding }]}>
-              <Text style={{ fontSize: subjectLabelFontSize(s.subject, denseFontSize) }}>{s.subject}</Text>
+              <Text style={{ fontSize: subjectLabelFontSize(s?.subject ?? '', denseFontSize) }}>{s?.subject ?? ''}</Text>
             </View>
             <View style={[styles.cell, styles.weightCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{pct(s.weight)}</Text>
+              <Text>{s ? pct(s.weight) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(s.midterm)}</Text>
+              <Text>{s ? fmtRounded(s.midterm) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(s.final)}</Text>
+              <Text>{s ? fmtRounded(s.final) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(s.daily)}</Text>
+              <Text>{s ? fmtRounded(s.daily) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(s.total)}</Text>
+              <Text>{s ? fmtRounded(s.total) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(fall?.midterm)}</Text>
+              <Text>{s ? fmtRounded(fall?.midterm) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(fall?.final)}</Text>
+              <Text>{s ? fmtRounded(fall?.final) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(fall?.daily)}</Text>
+              <Text>{s ? fmtRounded(fall?.daily) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.scoreCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{fmtRounded(fall?.total)}</Text>
+              <Text>{s ? fmtRounded(fall?.total) : ''}</Text>
             </View>
             <View style={[styles.cell, styles.annualCol, { fontSize: denseFontSize, padding: densePadding }]}>
-              <Text>{annualTotal(s.subject, terms)}</Text>
+              <Text>{s ? annualTotal(s.subject, terms) : ''}</Text>
             </View>
           </View>
         );
@@ -744,48 +749,40 @@ function conductGradeLabel(score: number | null): string {
   return '丁';
 }
 
-// 【2026-08-25 新增，2026-08-26 依回饋改為以「歷史」「地理」兩科定位】右側面板
-// 「升留級／家長簽章及建議」那一列，位置要對齊左表「歷史」列上緣～「地理」列下緣
-// （這兩科在科目清單中要相鄰，共占兩列高度）；下面的「導師/訓導/教務/校長簽章」
-// 列則不管「升留級」列實際落在哪裡，一律用 flex:1 吃掉剩餘高度，讓簽章列底線繼續
-// 精準對齊左表最後一列（紀律）的底線，這部分邏輯不變。
-// 左表科目列＋學業平均＋操行成績區塊，是用 flex 比例（科目數N + 1 + 5 個單位）
-// 平分 leftCol 可用高度，科目愈多每一列愈矮；「歷史」「地理」的實際位置（第幾列）
-// 會隨學校科目清單而定，不是固定的科目數，所以改成直接照科目名稱在清單中的順序
-// 找出那兩列，抓它們的實際高度比例來定位，而不是像上一版一樣用「服務」這種固定
-// 抓在操行成績區塊裡面的錨點——這樣不管哪個年級/班的科目清單長什麼樣子，「升留級」
-// 列都會準確對齊「歷史」「地理」兩科，不受科目數量或順序影響。
-// 下面兩個常數是用 pdftoppm 把內頁實際渲染成圖片、逐像素量出來的固定值（在預設
-// 樣式 DEFAULT_REPORT_CARD_STYLE 下），意義見函式內註解；如果之後管理員在後台把
-// 字級（sizes.baseFontSize 等）調整很多，理論上會跟著實際渲染高度小幅偏移，屆時
-// 建議重新渲染一份 PDF 用同樣方式量測校正。
+// 【2026-08-27 依回饋改為「以科目序位對齊」，2026-08-28 改用固定科目格數】
+// 右側面板（出席記錄／懲獎記錄／全班人數／升留級／簽章）用「第幾科」這種序位
+// 直接對齊左表。因為左表現在已經改成固定 TOTAL_SUBJECT_SLOTS(11) 列（見
+// ScoreTable／MAX_REAL_SUBJECT_SLOTS 的說明），這裡的「n+6 個等高單位」不再需要
+// 依這個班實際科目數動態計算，n 直接固定＝TOTAL_SUBJECT_SLOTS：
+//   曠課／遲到／病假／事假／公假／全勤　→ 對齊第1~6科（idx0＝0~5，共6格）
+//   全班人數／全班名次　　　　　　　　　→ 對齊第7科起、占2格（idx0＝6~7）
+//   升留級／家長簽章及建議　　　　　　　→ 對齊第9科（idx0＝8，占1格）
+//   導師/訓導/教務/校長簽章　　　　　　→ 從「服務」列上緣開始（idx0＝n+4，服務排在
+//     操行成績區塊第4列：操行成績(整體)/禮貌/衣著/服務/紀律 = idx0 n+1~n+5）
+// 6+2+1＝9 格剛好無縫銜接（曠課~全勤6格、全班人數2格、升留級1格中間完全不用留空
+// 隙），所以升留級列前面不用再算 gapHeight；只有「簽章列」前面因為要跳過學業平均／
+// 操行成績(整體)／禮貌／衣著這幾格才需要補一段 gap，用 unitHeight 直接算出來。
+// 為了讓「曠課~全勤」這6格能從 idx0=0（跟左表科目第1列同一個起點）開始對齊，右側面板
+// 自己的表頭（標題列＋項目/上學期/下學期/合計表頭列）也強制用跟左表一樣的
+// LEFT_HEADER_FIXED_PT 固定高度（內部兩列各自 flex:1 均分），不再讓它們用內容自然高度，
+// 這樣兩邊「科目列/曠課列」的上緣才會是同一個高度基準點。
 const H_BODY_PT = 417.6;
 const LEFT_HEADER_FIXED_PT = 56.88;
-const RIGHT_FIXED_BEFORE_PROMOTION_PT = 220.32;
-// 量測/四捨五入的緩衝，理由見下面 promotionBlockLayout() 內的說明。
-const SAFETY_MARGIN_PT = 15;
 
-function promotionBlockLayout(subjects: SubjectScoreRow[]): { gapHeight: number; blockHeight: number } {
-  const n = subjects.length;
-  const units = n + 6; // 科目列(N) + 學業平均(1) + 操行成績區塊(5)
+function rightPanelLayout() {
+  const n = TOTAL_SUBJECT_SLOTS; // 固定11（10科+出缺席），不再依班級實際科目數變動
+  const units = n + 6; // 科目列(N) + 學業平均(1) + 操行成績區塊(5，含服務/紀律)
   const unitHeight = (H_BODY_PT - LEFT_HEADER_FIXED_PT) / units;
-  const idxHistory = subjects.findIndex((s) => s.subject === '歷史');
-  const idxGeography = subjects.findIndex((s) => s.subject === '地理');
-  // 找不到「歷史」「地理」這兩科、或兩科在清單中不相鄰（例如科目清單順序跟預期不同）
-  // 時沒辦法精準定位，退回一個安全預設：緊接在「全班人數/全班名次」列後面、固定
-  // 兩列高，至少版面不會壞掉，只是不保證對齊哪一科。
-  if (idxHistory === -1 || idxGeography !== idxHistory + 1) {
-    return { gapHeight: 0, blockHeight: Math.max(2 * unitHeight - SAFETY_MARGIN_PT, 20) };
-  }
-  // 「歷史」列上緣，用跟左表科目列同一套比例換算成距離 body 頂端的高度。
-  const historyTopFromBodyTop = LEFT_HEADER_FIXED_PT + idxHistory * unitHeight;
-  // 前面（出席記錄/懲獎記錄標題＋表頭＋6列資料＋全班人數/名次列）已經佔掉
-  // RIGHT_FIXED_BEFORE_PROMOTION_PT 這麼高，是固定內容撐出來的高度，沒辦法再壓縮；
-  // 「升留級」列前面如果還留有空間才需要補一個空白的間隔列，讓「升留級」列真的從
-  // 「歷史」列上緣開始，空間不夠（算出負值）時就不留間隔，直接從固定內容後面開始。
-  const gapHeight = Math.max(historyTopFromBodyTop - RIGHT_FIXED_BEFORE_PROMOTION_PT - SAFETY_MARGIN_PT / 2, 0);
-  const blockHeight = Math.max(2 * unitHeight - SAFETY_MARGIN_PT / 2, 20);
-  return { gapHeight, blockHeight };
+  const attendanceBlockHeight = 6 * unitHeight; // 曠課~全勤，對齊第1~6科
+  const classSizeBlockHeight = 2 * unitHeight; // 全班人數/全班名次，對齊第7~8科（占2格）
+  const promotionHeight = unitHeight; // 升留級，對齊第9科（占1格）
+  // 「服務」在左表 n+6 個單位裡的序位（0-indexed）＝科目(n) + 學業平均(1) +
+  // 操行成績(整體,1) + 禮貌(1) + 衣著(1) ＝ n+4，前面（曠課~全勤/全班人數/升留級）
+  // 已經無縫佔掉9格，差額就是簽章列前面要補的間隔。固定11格時 n+4-9 恆為正，
+  // 這裡仍保留 Math.max(...,0) 當保險。
+  const serviceIdx0 = n + 4;
+  const signatureGap = Math.max((serviceIdx0 - 9) * unitHeight, 0);
+  return { unitHeight, attendanceBlockHeight, classSizeBlockHeight, promotionHeight, signatureGap };
 }
 
 function AttendanceDisciplinePanel({
@@ -793,13 +790,11 @@ function AttendanceDisciplinePanel({
   styles,
   BORDER,
   labels,
-  subjects,
 }: {
   terms: ReportCardData['terms'];
   styles: ReturnType<typeof buildStyles>['sheet'];
   BORDER: string;
   labels: ReportCardStyleConfig['labels'];
-  subjects: SubjectScoreRow[];
 }) {
   const spring = terms.上學期;
   const fall = terms.下學期;
@@ -811,7 +806,7 @@ function AttendanceDisciplinePanel({
   // 顯示「是/否」文字而不是次數，下面原本另外寫的那一整塊全勤列就拿掉了。
   const attnKeys = ['曠課', '遲到', '病假', '事假', '公假', '全勤'] as const;
   const discKeys = ['嘉獎', '小功', '大功', '警告', '小過', '大過'] as const;
-  const promotionLayout = promotionBlockLayout(subjects);
+  const layout = rightPanelLayout();
 
   return (
     // 【2026-08-23 修正】原本這個 View 沒有 flex:1，本身只會長到「內容自然高度」，
@@ -823,96 +818,100 @@ function AttendanceDisciplinePanel({
     // 下面「簽章列」（也加了 flex:1）去吸收——簽章格本來就需要留白給人簽名，
     // 這樣同時解決「格線對齊」跟「簽名空間太小」兩件事。
     <View style={{ flex: 1 }}>
-      <View style={styles.row}>
-        <View style={[styles.sectionTitle, { width: '50%' }]}>
-          <Text>{labels.attendanceRecordTitle}</Text>
-        </View>
-        <View style={[styles.sectionTitle, { width: '50%', borderLeft: BORDER }]}>
-          <Text>{labels.disciplineRecordTitle}</Text>
-        </View>
-      </View>
-      <View style={styles.row}>
-        <View style={[styles.cellHeadFirst, styles.attnItemCol]}>
-          <Text>項目</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnValCol]}>
-          <Text>上學期</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnValCol]}>
-          <Text>下學期</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnValCol]}>
-          <Text>合計</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnItemCol, { borderLeft: BORDER }]}>
-          <Text>項目</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnValCol]}>
-          <Text>上學期</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnValCol]}>
-          <Text>下學期</Text>
-        </View>
-        <View style={[styles.cellHead, styles.attnValCol]}>
-          <Text>合計</Text>
-        </View>
-      </View>
-      {[0, 1, 2, 3, 4, 5].map((i) => {
-        const attnKey = attnKeys[i];
-        const discKey = discKeys[i];
-        const isPerfectRow = attnKey === '全勤';
-        const springV = isPerfectRow ? undefined : attnKey ? spring?.attendance[attnKey as '曠課' | '遲到' | '病假' | '事假' | '公假'] : undefined;
-        const fallV = isPerfectRow ? undefined : attnKey ? fall?.attendance[attnKey as '曠課' | '遲到' | '病假' | '事假' | '公假'] : undefined;
-        const total = (springV ?? 0) + (fallV ?? 0);
-        const dSpringV = spring?.discipline[discKey];
-        const dFallV = fall?.discipline[discKey];
-        const dTotal = (dSpringV ?? 0) + (dFallV ?? 0);
-        return (
-          <View style={styles.row} key={i}>
-            <View style={[styles.cellLeftLabel, styles.attnItemCol]}>
-              <Text>{attnKey ?? ''}</Text>
-            </View>
-            <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{isPerfectRow ? (spring ? (spring.isPerfectAttendance ? '是' : '否') : '') : attnKey ? springV ?? '' : ''}</Text>
-            </View>
-            <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{isPerfectRow ? (fall ? (fall.isPerfectAttendance ? '是' : '否') : '') : attnKey ? fallV ?? '' : ''}</Text>
-            </View>
-            <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{isPerfectRow ? [spring, fall].filter((t) => t?.isPerfectAttendance).length || '' : attnKey ? total : ''}</Text>
-            </View>
-            <View style={[styles.cellLeftLabel, styles.attnItemCol, { borderLeft: BORDER }]}>
-              <Text>{discKey}</Text>
-            </View>
-            <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{dSpringV ?? ''}</Text>
-            </View>
-            <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{dFallV ?? ''}</Text>
-            </View>
-            <View style={[styles.cell, styles.attnValCol]}>
-              <Text>{dTotal}</Text>
-            </View>
+      {/* 【2026-08-27】表頭（標題列＋項目/上學期/下學期/合計列）強制跟左表表頭
+          用同一個 LEFT_HEADER_FIXED_PT 高度，內部兩列各自 flex:1 均分——這樣
+          底下「曠課」那一列的上緣，才會跟左表「科目1」列的上緣切齊在同一個高度。 */}
+      <View style={{ height: LEFT_HEADER_FIXED_PT }}>
+        <View style={[styles.row, { flex: 1 }]}>
+          <View style={[styles.sectionTitle, { width: '50%' }]}>
+            <Text>{labels.attendanceRecordTitle}</Text>
           </View>
-        );
-      })}
+          <View style={[styles.sectionTitle, { width: '50%', borderLeft: BORDER }]}>
+            <Text>{labels.disciplineRecordTitle}</Text>
+          </View>
+        </View>
+        <View style={[styles.row, { flex: 1 }]}>
+          <View style={[styles.cellHeadFirst, styles.attnItemCol]}>
+            <Text>項目</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnValCol]}>
+            <Text>上學期</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnValCol]}>
+            <Text>下學期</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnValCol]}>
+            <Text>合計</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnItemCol, { borderLeft: BORDER }]}>
+            <Text>項目</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnValCol]}>
+            <Text>上學期</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnValCol]}>
+            <Text>下學期</Text>
+          </View>
+          <View style={[styles.cellHead, styles.attnValCol]}>
+            <Text>合計</Text>
+          </View>
+        </View>
+      </View>
 
-      {/* 全班人數／全班名次
-          【2026-08-23 修正格線對齊】原本這裡另外用 25%/25%/25%/25% 分四格，
-          跟上面「項目/上學期/下學期/合計」實際的欄寬（attnItemCol／attnValCol）
-          是兩組不同的數字，格線對不上。改成沿用同一組欄寬常數：標籤格
-          （全班人數／全班名次）跟「項目」欄同寬，數值格（內含上下學期兩行）
-          跟「上學期＋下學期＋合計」三欄合併後同寬，這樣這一列的直線就會跟
-          上面表頭、以及每一列資料的直線切齊。 */}
-      <View style={[styles.row, { minHeight: 22 }]}>
+      {/* 曠課／遲到／病假／事假／公假／全勤：對齊左表第1~6科（idx0＝0~5），
+          整塊固定高度＝6個unitHeight，內部6列各自flex:1均分。 */}
+      <View style={{ height: layout.attendanceBlockHeight }}>
+        {[0, 1, 2, 3, 4, 5].map((i) => {
+          const attnKey = attnKeys[i];
+          const discKey = discKeys[i];
+          const isPerfectRow = attnKey === '全勤';
+          const springV = isPerfectRow ? undefined : attnKey ? spring?.attendance[attnKey as '曠課' | '遲到' | '病假' | '事假' | '公假'] : undefined;
+          const fallV = isPerfectRow ? undefined : attnKey ? fall?.attendance[attnKey as '曠課' | '遲到' | '病假' | '事假' | '公假'] : undefined;
+          const total = (springV ?? 0) + (fallV ?? 0);
+          const dSpringV = spring?.discipline[discKey];
+          const dFallV = fall?.discipline[discKey];
+          const dTotal = (dSpringV ?? 0) + (dFallV ?? 0);
+          return (
+            <View style={[styles.row, { flex: 1, minHeight: 0, overflow: 'hidden' }]} key={i}>
+              <View style={[styles.cellLeftLabel, styles.attnItemCol]}>
+                <Text>{attnKey ?? ''}</Text>
+              </View>
+              <View style={[styles.cell, styles.attnValCol]}>
+                <Text>{isPerfectRow ? (spring ? (spring.isPerfectAttendance ? '是' : '否') : '') : attnKey ? springV ?? '' : ''}</Text>
+              </View>
+              <View style={[styles.cell, styles.attnValCol]}>
+                <Text>{isPerfectRow ? (fall ? (fall.isPerfectAttendance ? '是' : '否') : '') : attnKey ? fallV ?? '' : ''}</Text>
+              </View>
+              <View style={[styles.cell, styles.attnValCol]}>
+                <Text>{isPerfectRow ? [spring, fall].filter((t) => t?.isPerfectAttendance).length || '' : attnKey ? total : ''}</Text>
+              </View>
+              <View style={[styles.cellLeftLabel, styles.attnItemCol, { borderLeft: BORDER }]}>
+                <Text>{discKey}</Text>
+              </View>
+              <View style={[styles.cell, styles.attnValCol]}>
+                <Text>{dSpringV ?? ''}</Text>
+              </View>
+              <View style={[styles.cell, styles.attnValCol]}>
+                <Text>{dFallV ?? ''}</Text>
+              </View>
+              <View style={[styles.cell, styles.attnValCol]}>
+                <Text>{dTotal}</Text>
+              </View>
+            </View>
+          );
+        })}
+      </View>
+
+      {/* 全班人數／全班名次：對齊左表第7~8科（idx0＝6~7），占2格高度。 */}
+      <View style={{ height: layout.classSizeBlockHeight, flexDirection: 'row' }}>
         <View style={[styles.sectionTitle, styles.attnLabelWideCol]}>
           <Text>{labels.classSize}</Text>
         </View>
         <View style={[styles.attnValGroupCol, { borderLeft: BORDER }]}>
-          <View style={{ borderBottom: BORDER, padding: 2 }}>
+          <View style={{ borderBottom: BORDER, padding: 2, flex: 1, justifyContent: 'center' }}>
             <Text style={{ fontSize: 7 }}>上學期 {spring?.classSize ?? ''}</Text>
           </View>
-          <View style={{ padding: 2 }}>
+          <View style={{ padding: 2, flex: 1, justifyContent: 'center' }}>
             <Text style={{ fontSize: 7 }}>下學期 {fall?.classSize ?? ''}</Text>
           </View>
         </View>
@@ -920,43 +919,26 @@ function AttendanceDisciplinePanel({
           <Text>{labels.classRank}</Text>
         </View>
         <View style={[styles.attnValGroupCol, { borderLeft: BORDER }]}>
-          <View style={{ borderBottom: BORDER, padding: 2 }}>
+          <View style={{ borderBottom: BORDER, padding: 2, flex: 1, justifyContent: 'center' }}>
             <Text style={{ fontSize: 7 }}>上學期 {spring?.classRank ?? ''}</Text>
           </View>
-          <View style={{ padding: 2 }}>
+          <View style={{ padding: 2, flex: 1, justifyContent: 'center' }}>
             <Text style={{ fontSize: 7 }}>下學期 {fall?.classRank ?? ''}</Text>
           </View>
         </View>
       </View>
 
-      {/* 升留級／家長簽章及建議：升留級目前無資料來源，「值」先留空白；但標籤本身
-          （2026-08-24 依回饋修正）不再跟著「是否印下學期／學年成績」隱藏——原本
-          `spring && fall` 這個條件只印下學期／學年成績單時才顯示「升留級」三個字，
-          上學期單獨列印時（例如這次的範例）整格連標籤都是空的，看起來像漏印。
-          改成標籤永遠顯示，需要真的有升留級資料來源以後，再補上對應的「值」即可。
-          【2026-08-26 修正】位置改成對齊左表「歷史」列上緣～「地理」列下緣（共兩列），
-          不再是緊接在「全班人數/全班名次」列後面——中間如果還有距離，用下面這個空白
-          間隔列（gapHeight）撐開，讓「升留級」列真正落在「歷史」上緣的位置，見上面
-          promotionBlockLayout() 的說明。 */}
-      {promotionLayout.gapHeight > 0 && <View style={{ height: promotionLayout.gapHeight }} />}
-      <View style={[styles.row, { height: promotionLayout.blockHeight }]}>
-        {/* 【2026-08-26 新增】「升留級」格中間多畫一條橫線，分成上下兩格——上格放
-            「升留級」標籤（對應上學期），下格先留空白，之後有下學期升留級資料來源
-            時可以直接填「升」「留」進這一格，不用再調整版面。 */}
+      {/* 升留級／家長簽章及建議：對齊左表第9科（idx0＝8），占1格高度——緊接在
+          「全班人數/全班名次」後面，6(曠課~全勤)+2(全班人數)+1(升留級)＝9格剛好
+          無縫接到「服務」列前面，不用再另外補間隔列。升留級目前無資料來源，
+          「值」先留空白，標籤永遠顯示。 */}
+      <View style={{ height: layout.promotionHeight, flexDirection: 'row' }}>
         <View style={{ flex: 1, flexDirection: 'column' }}>
-          {/* 【2026-08-26 除錯後修正】這個 Text 在這裡（雙層巢狀 flexDirection:column、
-              row 本身又是用 JS 算出來的動態高度）如果完全不給 style（連 fontSize 都
-              不指定），中文字整段會完全不畫出來（不是變小/變擠，是消失，純 ASCII
-              文字不受影響）；一開始以為是 fontWeight:700 的問題，實際用 pdftoppm
-              一步步排除背景色／字重／字級後，確認關鍵是「要有明確指定 fontSize」，
-              沒有的話在這個巢狀結構下中文字就不會渲染。這裡明確給 fontSize，
-              文字才會正常顯示；本頁其他地方的中文 Text 大多是靠 sectionTitle 之類
-              的父層樣式間接帶出 fontSize，沒有踩到這個問題。 */}
           <View style={{ flex: 1, borderBottom: BORDER, alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ fontSize: 9 }}>{labels.promotionStatus}</Text>
+            <Text style={{ fontSize: 8 }}>{labels.promotionStatus}</Text>
           </View>
           <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ fontSize: 7 }}></Text>
+            <Text style={{ fontSize: 6 }}></Text>
           </View>
         </View>
         <View style={[styles.sectionTitle, { flex: 3, borderLeft: BORDER }]}>
@@ -964,9 +946,9 @@ function AttendanceDisciplinePanel({
         </View>
       </View>
 
-
-      {/* 簽章列：flex:1 讓這一列吃掉 rightCol 被拉伸出來的剩餘高度，讓底線跟左邊
-          「操行成績」區塊（科目成績表最後一列）的底線切齊，同時簽名欄位也比較寬敞。 */}
+      {/* 簽章列：從左表「服務」列上緣開始（前面補 signatureGap），flex:1 吃掉
+          rightCol 被拉伸出來的剩餘高度，底線精準對齊左表最後一列（紀律）的底線。 */}
+      {layout.signatureGap > 0 && <View style={{ height: layout.signatureGap }} />}
       <View style={[styles.row, { minHeight: 30, borderBottom: 'none', flex: 1 }]}>
         {[labels.homeroomSign, labels.disciplineSign, labels.academicSign, labels.principalSign].map((label, i) => (
           <View key={label} style={[styles.signBox, i === 0 ? { borderLeft: 0 } : {}]}>
@@ -1225,7 +1207,7 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
                 <ScoreTable terms={data.terms} styles={styles} BORDER={BORDER} labels={labels} config={config} scoreColWidth={scoreColWidth} />
               </View>
               <View style={styles.rightCol}>
-                <AttendanceDisciplinePanel terms={data.terms} styles={styles} BORDER={BORDER} labels={labels} subjects={(data.terms.上學期 ?? data.terms.下學期)?.subjects ?? []} />
+                <AttendanceDisciplinePanel terms={data.terms} styles={styles} BORDER={BORDER} labels={labels} />
               </View>
             </View>
 
