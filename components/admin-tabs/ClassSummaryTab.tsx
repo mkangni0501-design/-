@@ -102,8 +102,9 @@ export default function ClassSummaryPage() {
   const [rankLoadError, setRankLoadError] = useState<string | null>(null);
   // 開發人員區「出缺席成績不含蓋在期中、期末、平時個別三部分分數」開關現況——
   // 只用來顯示提示文字，實際排除邏輯已經在資料庫端 scoped_student_totals() 做好
-  // （見 sql/66attendance_excluded_from_partial_scores_toggle.sql），這裡不用
-  // 另外處理計算，只要讓老師知道現在期中/期末/平時三欄「為什麼」沒有受出缺席影響。
+  // （見 sql/68scoped_totals_restore_total_always_includes_attendance.sql）：只
+  // 排除期中/期末/平時三部分，這個班級的總分/排名不受影響，這裡的提示文字要
+  // 講清楚這個分別，避免老師以為總分也被排除了。
   const [attendanceExcludedFromPartials, setAttendanceExcludedFromPartials] = useState(false);
   const ATTENDANCE_SUBJECT_NAMES = ['全勤', '出缺席'];
   const [canSeeRemarks, setCanSeeRemarks] = useState(false);
@@ -561,8 +562,8 @@ export default function ClassSummaryPage() {
 
       {attendanceExcludedFromPartials && (
         <p style={{ fontSize: 12, color: '#A36A00', background: '#FFF8E1', border: '1px solid #f0d98a', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
-          ℹ️ 開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」：下面期中／期末／平時三欄、以及這個班級的總分／排名，
-          都不含出缺席狀態影響（不管期中考／期末考／平時分三大表有沒有送出、鎖定都一樣）。正式成績單不受這個開關影響，仍會顯示、統計包含出缺席的真實成績。
+          ℹ️ 開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」：下面期中／期末／平時三欄的分數與排名不含出缺席
+          （不管期中考／期末考／平時分三大表有沒有送出、鎖定都一樣）。這個班級的「總分」／排名不受這個開關影響，仍會繼續把出缺席算進去。
         </p>
       )}
 
@@ -721,9 +722,10 @@ export default function ClassSummaryPage() {
                   {subjects.map((s) => {
                     const row = subjectData[en.id]?.[s];
                     const isAttendanceSubject = ATTENDANCE_SUBJECT_NAMES.includes(s);
-                    // 開發人員區開關開啟時，期中/期末/平時三欄的總分/平均/排名已經不含出缺席
-                    // （見 sql/66），這裡連「全勤／出缺席」這一欄本身顯示的分數也一併隱藏
-                    // （顯示「—」），避免老師看到這一欄有分數、卻懷疑總分/排名為什麼沒把它
+                    // 開發人員區開關開啟時，期中/期末/平時三欄已經不含出缺席
+                    // （見 sql/68，但這個班級的「總分」仍然繼續把出缺席算進去），這裡連
+                    // 「全勤／出缺席」這一欄本身顯示的分數也一併隱藏（顯示「—」），
+                    // 避免老師看到這一欄有分數、卻懷疑期中/期末/平時為什麼沒把它
                     // 算進去，看起來像系統漏算。
                     const hideAttendanceScore = isAttendanceSubject && attendanceExcludedFromPartials;
                     return visibleExamTypes.map((et, eti) => (

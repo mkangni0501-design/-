@@ -321,8 +321,8 @@ function buildStyles(config: ReportCardStyleConfig) {
       attnLabelWideCol: { width: `${21.17 + 26.28}%` },
       attnValGroupCol: { width: `${26.28 * 2}%` },
 
-      signBox: { flex: 1, borderLeft: BORDER, minHeight: 50, padding: 5 },
-      signLabel: { fontSize: base, fontWeight: 700, textAlign: 'center', marginBottom: 3 },
+      signBox: { flex: 1, borderLeft: BORDER, borderTop: BORDER, borderBottom: BORDER, minHeight: 50, padding: 5, justifyContent: 'center' },
+      signLabel: { fontSize: base, fontWeight: 700, textAlign: 'center' },
 
       // 【2026-08-23 修正】原本 minHeight:70，評語文字一長就會把框「撐高」，進而把
       // 整張內頁撐過一頁（見上面 fitRemarkFontSize 的說明）。改成固定 height（不是
@@ -491,13 +491,14 @@ function ScoreTable({
   const allSubjects = primary?.subjects ?? [];
   const base = config.sizes.baseFontSize;
   // 【2026-08-28 依回饋改為固定列數，取代原本逐班動態縮放（denseScale）那套】
-  // 不再依「這個班實際有幾科」去縮放字級/列高剛好塞滿版面——固定照本校最大
+  // 不再依「這個班實際有幾科」去決定要不要縮放/縮放多少——固定照本校最大
   // 科目數（10科，不含出缺席）排出10個科目列位置，科目數不足的班級後面幾列
-  // 留空白；出缺席永遠固定排在第11列（不管這個班實際有幾科真實科目）。11列
-  // 這個固定總數，先前用 pdftoppm 實際渲染測試過不縮小字體也能正常塞進一頁
-  // （測試到12~13列才會開始塞不下），所以這裡完全不用再縮放字級，永遠用
-  // 後台設定的原始字級/padding，所有班級版面（字級、列高、出缺席/簽章位置）
-  // 都完全一樣，不會因為班級科目多寡而跳動。
+  // 留空白；出缺席永遠固定排在第11列（不管這個班實際有幾科真實科目）。
+  // 【2026-08-29 修正】字級縮放本身還是需要的（見下面 FIXED_DENSE_SCALE），
+  // 只是从「依每班科目數各自變動」改成「所有班級固定用同一個倍率」——因為
+  // 現在科目格數固定是11格，不會再逐班變動，縮放倍率自然也就變成一個固定
+  // 常數，不需要每次重新計算，這才是「單純、不會因班級而跳動」這個目標
+  // 真正該做的事；完全不縮放反而會讓固定11列擠不進一頁（見下方說明）。
   // 萬一真的有班級科目數超過10科（正常情況下不會），不裁掉真實資料，超出的
   // 部分照樣往下多印，只是版面不保證剛好塞滿一頁——以「不遺漏資料」為優先。
   const realSubjects = allSubjects.filter((s) => !ATTENDANCE_SUBJECT_NAMES.includes(s.subject));
@@ -508,8 +509,19 @@ function ScoreTable({
     ...Array(Math.max(0, realSlotCount - realSubjects.length)).fill(null),
     attendanceSubject,
   ];
-  const denseFontSize = base;
-  const densePadding = 3;
+  // 【2026-08-28 改為固定列數，2026-08-29 修正：固定列數不代表可以不縮字級】
+  // 上一輪誤判「11列不縮字級也能塞進一頁」，實際上一整頁（含反面）因此多印出
+  // 第三頁、右側面板一些欄位（升留級/簽章/曠課...等）也跟著被擠到看不到——
+  // 根因是 react-pdf 底層 Yoga 排版引擎不會把列高縮到比文字本身單行自然高度
+  // 更矮，11列用「原始字級」的自然高度總和還是會超過可用高度。
+  // 現在科目格數固定＝TOTAL_SUBJECT_SLOTS（11），不再逐班變動，所以這裡改成
+  // 一個「固定的」縮小倍率常數（不是像舊版那樣依每班科目數即時計算），數值沿用
+  // 舊版公式在 11 格時算出來的結果（9/11），每個班級都套用同一個倍率——這樣
+  // 版面（字級、列高）在所有班級之間還是完全一致，只是這個「一致的字級」比
+  // 後台設定的原始字級略小一點，用來確保固定11列一定塞得進一頁。
+  const FIXED_DENSE_SCALE = TOTAL_SUBJECT_SLOTS <= 9 ? 1 : Math.max(0.5, 9 / TOTAL_SUBJECT_SLOTS);
+  const denseFontSize = base * FIXED_DENSE_SCALE;
+  const densePadding = Math.max(1, Math.round(3 * FIXED_DENSE_SCALE));
   return (
     // 【2026-08-24 修正，2026-08-28 改為固定11列】原本這裡是普通 <View>（不會撐滿
     // leftCol 拉伸後的高度，只會長到「內容自然高度」）。現在科目列表格固定就是
