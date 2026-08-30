@@ -215,8 +215,11 @@ export default function ParentPortalPage() {
 
       // 出缺勤彙總／基本資料／監護人資料／修改申請紀錄彼此互不相依，原本依序一個一個等，
       // 改成同時發送，一樣能減少總等待時間。
+      // 【本輪修正】反映事項「出席次數跟時間不用顯示，只要顯示曠課、遲到、事假、病假、
+      // 公假」——查詢加上 .neq('status','出席')，「出席」（正常到校，不是缺席/遲到）
+      // 這個狀態不算彙總、也不用整批抓過來，只留曠課/遲到/病假/事假/公假這5種。
       const [{ data: attendanceRows }, { data: studentRow }, { data: guardianRows }] = await Promise.all([
-        supabase.from('attendance').select('status, record_date').eq('student_no', selected.student_no),
+        supabase.from('attendance').select('status, record_date').eq('student_no', selected.student_no).neq('status', '出席'),
         supabase.from('students').select('address, phone').eq('student_no', selected.student_no).single(),
         supabase.from('guardians').select('id, relation, name, phone').eq('student_no', selected.student_no),
         loadEditRequests(selected.student_no),
@@ -522,81 +525,94 @@ export default function ParentPortalPage() {
                       <th style={{ textAlign: 'left', padding: 6 }}>學年度</th>
                       <th style={{ textAlign: 'left', padding: 6 }}>學期</th>
                       <th style={{ textAlign: 'left', padding: 6 }}>班級</th>
-                      <th style={{ textAlign: 'right', padding: 6 }}>總分</th>
+                      <th style={{ textAlign: 'right', padding: 6 }}>期中</th>
+                      <th style={{ textAlign: 'right', padding: 6 }}>期末</th>
+                      <th style={{ textAlign: 'right', padding: 6 }}>平時</th>
+                      <th style={{ textAlign: 'right', padding: 6 }}>總表</th>
                       <th style={{ textAlign: 'right', padding: 6 }}>班排名</th>
                       <th style={{ textAlign: 'right', padding: 6 }}>年級排名</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {records.map((r) => (
-                      <Fragment key={r.enrollment_id}>
-                        <tr style={{ borderTop: '1px solid #eee' }}>
-                          <td style={{ padding: 6 }}>{r.academic_year}</td>
-                          <td style={{ padding: 6 }}>{r.term}</td>
-                          <td style={{ padding: 6 }}>{r.grade_level}{r.class_name}</td>
-                          <td style={{ padding: 6, textAlign: 'right' }}>
-                            {r.total_score !== null ? (
-                              <button
-                                type="button"
-                                onClick={() => handleToggleTermScores(r.enrollment_id)}
-                                style={{
-                                  border: 'none',
-                                  background: 'none',
-                                  padding: 0,
-                                  font: 'inherit',
-                                  color: '#2C2C2A',
-                                  fontWeight: 700,
-                                  textDecoration: 'underline',
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                {r.total_score} {expandedId === r.enrollment_id ? '▲' : '▼'}
-                              </button>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
-                          <td style={{ padding: 6, textAlign: 'right' }}>{r.class_rank ?? '—'}</td>
-                          <td style={{ padding: 6, textAlign: 'right' }}>{r.grade_rank ?? '—'}</td>
-                        </tr>
-                        {expandedId === r.enrollment_id && (
-                          <tr key={`${r.enrollment_id}-detail`}>
-                            <td colSpan={6} style={{ padding: '4px 6px 12px 24px', background: '#FAFAF8' }}>
-                              {subjectScoresLoading === r.enrollment_id ? (
-                                <p style={{ fontSize: 12, color: '#999' }}>載入中…</p>
-                              ) : (subjectScores[r.enrollment_id]?.length ?? 0) > 0 ? (
-                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                                  <thead>
-                                    <tr>
-                                      <th style={{ textAlign: 'left', padding: 4 }}>科目</th>
-                                      <th style={{ textAlign: 'right', padding: 4 }}>期中</th>
-                                      <th style={{ textAlign: 'right', padding: 4 }}>期末</th>
-                                      <th style={{ textAlign: 'right', padding: 4 }}>平時</th>
-                                      <th style={{ textAlign: 'right', padding: 4 }}>科目成績</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {subjectScores[r.enrollment_id].map((s) => (
-                                      <tr key={s.subject} style={{ borderTop: '1px solid #eee' }}>
-                                        <td style={{ padding: 4 }}>{s.subject}</td>
-                                        <td style={{ padding: 4, textAlign: 'right' }}>{s.midterm ?? '—'}</td>
-                                        <td style={{ padding: 4, textAlign: 'right' }}>{s.final ?? '—'}</td>
-                                        <td style={{ padding: 4, textAlign: 'right' }}>{s.daily ?? '—'}</td>
-                                        <td style={{ padding: 4, textAlign: 'right' }}>
-                                          {s.subject_weighted_score !== null ? s.subject_weighted_score.toFixed(2) : '—'}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              ) : (
-                                <p style={{ fontSize: 12, color: '#999' }}>這個學期還沒有各科成績資料。</p>
-                              )}
-                            </td>
+                    {records.map((r) => {
+                      // 【本輪新增】反映事項「歷年成績要出現期中、期末、平時、總表的各項分數，
+                      // 點擊分數的時候要可以看到各科成績」——期中/期末/平時/總表這4個分數都做成
+                      // 可點擊按鈕，點任一個都展開同一份「這個學期各科成績」明細（handleToggleTermScores
+                      // 抓的是整個學期的 subject_weighted_scores，本來就含期中/期末/平時三欄，見下面
+                      // 展開後的明細表），不用為每個項目分別做4套不同的展開邏輯。
+                      const scoreButton = (label: string, value: number | null) =>
+                        value !== null ? (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleTermScores(r.enrollment_id)}
+                            style={{
+                              border: 'none',
+                              background: 'none',
+                              padding: 0,
+                              font: 'inherit',
+                              color: '#2C2C2A',
+                              fontWeight: label === '總表' ? 700 : 400,
+                              textDecoration: 'underline',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {value} {label === '總表' ? (expandedId === r.enrollment_id ? '▲' : '▼') : ''}
+                          </button>
+                        ) : (
+                          '—'
+                        );
+                      return (
+                        <Fragment key={r.enrollment_id}>
+                          <tr style={{ borderTop: '1px solid #eee' }}>
+                            <td style={{ padding: 6 }}>{r.academic_year}</td>
+                            <td style={{ padding: 6 }}>{r.term}</td>
+                            <td style={{ padding: 6 }}>{r.grade_level}{r.class_name}</td>
+                            <td style={{ padding: 6, textAlign: 'right' }}>{scoreButton('期中', r.midterm_total)}</td>
+                            <td style={{ padding: 6, textAlign: 'right' }}>{scoreButton('期末', r.final_total)}</td>
+                            <td style={{ padding: 6, textAlign: 'right' }}>{scoreButton('平時', r.daily_total)}</td>
+                            <td style={{ padding: 6, textAlign: 'right' }}>{scoreButton('總表', r.total_score)}</td>
+                            <td style={{ padding: 6, textAlign: 'right' }}>{r.class_rank ?? '—'}</td>
+                            <td style={{ padding: 6, textAlign: 'right' }}>{r.grade_rank ?? '—'}</td>
                           </tr>
-                        )}
-                      </Fragment>
-                    ))}
+                          {expandedId === r.enrollment_id && (
+                            <tr key={`${r.enrollment_id}-detail`}>
+                              <td colSpan={9} style={{ padding: '4px 6px 12px 24px', background: '#FAFAF8' }}>
+                                {subjectScoresLoading === r.enrollment_id ? (
+                                  <p style={{ fontSize: 12, color: '#999' }}>載入中…</p>
+                                ) : (subjectScores[r.enrollment_id]?.length ?? 0) > 0 ? (
+                                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                    <thead>
+                                      <tr>
+                                        <th style={{ textAlign: 'left', padding: 4 }}>科目</th>
+                                        <th style={{ textAlign: 'right', padding: 4 }}>期中</th>
+                                        <th style={{ textAlign: 'right', padding: 4 }}>期末</th>
+                                        <th style={{ textAlign: 'right', padding: 4 }}>平時</th>
+                                        <th style={{ textAlign: 'right', padding: 4 }}>科目成績</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {subjectScores[r.enrollment_id].map((s) => (
+                                        <tr key={s.subject} style={{ borderTop: '1px solid #eee' }}>
+                                          <td style={{ padding: 4 }}>{s.subject}</td>
+                                          <td style={{ padding: 4, textAlign: 'right' }}>{s.midterm ?? '—'}</td>
+                                          <td style={{ padding: 4, textAlign: 'right' }}>{s.final ?? '—'}</td>
+                                          <td style={{ padding: 4, textAlign: 'right' }}>{s.daily ?? '—'}</td>
+                                          <td style={{ padding: 4, textAlign: 'right' }}>
+                                            {s.subject_weighted_score !== null ? s.subject_weighted_score.toFixed(2) : '—'}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                ) : (
+                                  <p style={{ fontSize: 12, color: '#999' }}>這個學期還沒有各科成績資料。</p>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </section>
