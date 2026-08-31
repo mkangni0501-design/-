@@ -94,6 +94,15 @@ export default function WeeklyAttendancePage() {
   // 出缺席示警：導師輸入後，若學生「事假+病假+曠課」累計節數達到管理員設定的門檻，
   // 會跳出提示讓導師自行選擇是否寄送通知信（同時留下紀錄給管理者查看）。
   const [teacherId, setTeacherId] = useState<string | null>(null);
+  // 反映事項「導師修正班級學生出缺席功能，請修正只能把非任教科目中【曠課】學生改為
+  // 【事假】、【病假】、【公假】」：導師對「自己有任課」的節次（跟 class_schedule
+  // 比對 teacher_id 是不是自己）維持原本完整的登錄/修改權限；對「自己沒有任課」的
+  // 節次，只能把目前狀態是「曠課」的學生改成事假/病假/公假這三種請假狀態，其他
+  // 狀態一律不能碰（不能改成出席/遲到，也不能把非曠課的狀態改掉）——管理員
+  // （isAdmin）不受這個限制，維持原本可以修改任一節次任一狀態的權限。
+  // key 格式："{weekday 1~6}-{period_no}"，只要「值」是 true 就代表這個weekday+節次
+  // 是自己的任課節次（跟日期無關，class_schedule 本身就是照weekday排的固定課表）。
+  const [ownTaughtPeriods, setOwnTaughtPeriods] = useState<Record<string, boolean>>({});
   const [alertThreshold, setAlertThreshold] = useState<number | null>(null);
   // 【2026-08-26 新增】出缺席補登逾期天數，改成從 attendance_alert_settings 讀取
   // （見下面 useEffect），不再用寫死的常數。讀不到資料時退回 DEFAULT_BACKDATE_GRACE_DAYS。
@@ -303,6 +312,23 @@ export default function WeeklyAttendancePage() {
           p_data_type: '出缺勤',
         });
         setLocked(!!isLocked);
+
+        // 導師「非任教科目」限制用：抓這個班這學期的課表（class_schedule），
+        // 比對每個 weekday+節次的 teacher_id 是不是自己，只有導師（非管理員）需要，
+        // 但這裡不特別排除管理員，反正管理員身分本來就不會去讀這個 state。
+        if (teacherId) {
+          const { data: scheduleRows } = await supabase
+            .from('class_schedule')
+            .select('weekday, period_no, teacher_id')
+            .eq('class_id', classId)
+            .eq('academic_year', currentTermInfo.academic_year)
+            .eq('term', currentTermInfo.term);
+          const own: Record<string, boolean> = {};
+          (scheduleRows ?? []).forEach((r: any) => {
+            own[`${r.weekday}-${r.period_no}`] = r.teacher_id === teacherId;
+          });
+          setOwnTaughtPeriods(own);
+        }
       } else {
         setLocked(false);
       }
@@ -324,6 +350,27 @@ export default function WeeklyAttendancePage() {
     if (!isHomeroom) return false;
     if (locked) return false; // 已鎖定：需送出「申請開放」，由管理員審核後才能再登錄
     return daysAgo(dateStr) <= backdateGraceDays;
+  }
+
+  // weekday：跟 getEffectivePeriodCount() 那裡的算法一致（Date.getDay() 星期日是0，
+  // 這裡的 weekday 欄位是 1=一...6=六，星期日沒有課，不會被查詢用到）。
+  function weekdayOf(dateStr: string) {
+    const d = new Date(dateStr + 'T00:00:00');
+    return d.getDay() || 7;
+  }
+
+  // 這個weekday+節次是不是導師自己的任課節次；管理員不受這個限制影響（呼叫端會先
+  // 判斷 isAdmin，這裡單純回答「課表上是不是我」這件事本身）。
+  function isOwnTaughtPeriod(dateStr: string, period: number) {
+    return !!ownTaughtPeriods[`${weekdayOf(dateStr)}-${period}`];
+  }
+
+  const LEAVE_STATUSES = ['事假', '病假', '公假'] as const;
+  // 非任教科目時，這個狀態改動允不允許：只能從「曠課」改成事假/病假/公假三種之一
+  // （沿用同一個狀態也視為允許，等於「不改」）。
+  function isAllowedNonTeachingChange(currentStatus: string, nextStatus: string) {
+    if (nextStatus === currentStatus) return true;
+    return currentStatus === '曠課' && (LEAVE_STATUSES as readonly string[]).includes(nextStatus);
   }
 
   async function checkAndPromptNotify(student_no: string) {
@@ -356,6 +403,16 @@ export default function WeeklyAttendancePage() {
   }
 
   async function handleSetStatus(student_no: string, dateStr: string, period: number, status: string) {
+    // 【本輪新增】非任教科目時，只能把「曠課」改成事假/病假/公假——這裡是最後一道
+    // 防線（下拉選單本身也已經限制選項，但這裡再擋一次，避免有其他呼叫路徑繞過
+    // UI 限制），管理員不受影響。
+    if (!isAdmin && !isOwnTaughtPeriod(dateStr, period)) {
+      const currentStatus = attMap[`${student_no}|${dateStr}|${period}`] ?? '出席';
+      if (!isAllowedNonTeachingChange(currentStatus, status)) {
+        alert('這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假。');
+        return;
+      }
+    }
     const { error } = await supabase.from('attendance').upsert(
       { student_no, record_date: dateStr, period_no: period, status },
       { onConflict: 'student_no,record_date,period_no' }
@@ -453,6 +510,7 @@ export default function WeeklyAttendancePage() {
     setBatchBusy(true);
     const payload: { student_no: string; record_date: string; period_no: number; status: string }[] = [];
     const skippedDates = new Set<string>();
+    let skippedNonTeachingCount = 0;
     Array.from(selectedDates).forEach((dateStr) => {
       if (!isEditable(dateStr)) {
         skippedDates.add(dateStr);
@@ -462,13 +520,28 @@ export default function WeeklyAttendancePage() {
       const count = dIdx >= 0 ? Math.max(periodCounts[dIdx], 1) : 1;
       Array.from(selectedStudents).forEach((studentNo) => {
         for (let period = 1; period <= count; period++) {
+          // 【本輪新增】批次套用一次涵蓋一整天所有節次，容易連導師自己沒任課的節次
+          // 也一起被覆蓋掉——非管理員時，每一節都個別檢查：不是自己任課的節次，
+          // 只有「目前是曠課、且要改成事假/病假/公假」才會真的套用，其他情況直接
+          // 跳過那一節（不覆蓋），不是整批擋下來。
+          if (!isAdmin && !isOwnTaughtPeriod(dateStr, period)) {
+            const currentStatus = attMap[`${studentNo}|${dateStr}|${period}`] ?? '出席';
+            if (!isAllowedNonTeachingChange(currentStatus, batchStatus)) {
+              skippedNonTeachingCount++;
+              continue;
+            }
+          }
           payload.push({ student_no: studentNo, record_date: dateStr, period_no: period, status: batchStatus });
         }
       });
     });
     if (payload.length === 0) {
       setBatchBusy(false);
-      alert('勾選的日期都無法直接登錄（已鎖定或超過補登範圍），請改用「申請開放」或單筆修正申請。');
+      alert(
+        skippedNonTeachingCount > 0
+          ? '勾選範圍內都不是您任教的科目、或狀態不是「曠課」，非任教科目只能把曠課改成事假/病假/公假。'
+          : '勾選的日期都無法直接登錄（已鎖定或超過補登範圍），請改用「申請開放」或單筆修正申請。'
+      );
       return;
     }
     const { error } = await supabase.from('attendance').upsert(payload, { onConflict: 'student_no,record_date,period_no' });
@@ -484,8 +557,11 @@ export default function WeeklyAttendancePage() {
       });
       return next;
     });
-    if (skippedDates.size > 0) {
-      alert(`已套用，但有 ${skippedDates.size} 個日期因已鎖定/超過補登範圍而略過。`);
+    const notes: string[] = [];
+    if (skippedDates.size > 0) notes.push(`${skippedDates.size} 個日期因已鎖定/超過補登範圍而略過`);
+    if (skippedNonTeachingCount > 0) notes.push(`${skippedNonTeachingCount} 節因非任教科目且不符合「曠課→請假」規則而略過`);
+    if (notes.length > 0) {
+      alert(`已套用，但有${notes.join('；')}。`);
     }
     Array.from(selectedStudents).forEach((studentNo) => checkAndPromptNotify(studentNo));
   }
@@ -663,10 +739,16 @@ export default function WeeklyAttendancePage() {
           {isMobile ? (
             <details style={{ marginBottom: 6 }}>
               <summary style={{ fontSize: 12, color: '#666', cursor: 'pointer' }}>批次登錄說明</summary>
-              <p style={{ fontSize: 12, color: '#666', marginTop: 4 }}>勾選學生、勾選日期，再選擇出席狀況一起套用（會套用到該天所有節次）。</p>
+              <p style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                勾選學生、勾選日期，再選擇出席狀況一起套用（會套用到該天所有節次）。
+                {!isAdmin && '非任教科目的節次，只有目前是「曠課」且改成事假/病假/公假時才會套用，其他節次會自動略過。'}
+              </p>
             </details>
           ) : (
-            <p style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>批次登錄：勾選學生、勾選日期，再選擇出席狀況一起套用（會套用到該天所有節次）。</p>
+            <p style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+              批次登錄：勾選學生、勾選日期，再選擇出席狀況一起套用（會套用到該天所有節次）。
+              {!isAdmin && '非任教科目的節次，只有目前是「曠課」且改成事假/病假/公假時才會套用，其他節次會自動略過。'}
+            </p>
           )}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
             {weekDates.map((d, i) => {
@@ -763,12 +845,29 @@ export default function WeeklyAttendancePage() {
                     const key = `${s.student_no}|${dateStr}|${period}`;
                     const status = attMap[key] ?? '出席';
                     const editable = isEditable(dateStr);
+                    // 【本輪新增】非管理員時，判斷這一節是不是自己任教的節次——不是的話，
+                    // 只能把「曠課」改成事假/病假/公假，其他狀態一律唯讀（不給下拉選單）。
+                    const ownTaught = isAdmin || isOwnTaughtPeriod(dateStr, period);
+                    const nonTeachingLockedStatus = !ownTaught && status !== '曠課';
+                    if (editable && nonTeachingLockedStatus) {
+                      return (
+                        <td
+                          key={key}
+                          title="非任教科目：只有「曠課」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師"
+                          style={{ padding: 4, textAlign: 'center', color: '#999', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}
+                        >
+                          {status}
+                        </td>
+                      );
+                    }
                     if (editable) {
+                      const options = ownTaught ? STATUS_OPTIONS : (['曠課', ...LEAVE_STATUSES] as const);
                       return (
                         <td key={key} style={{ padding: 2, textAlign: 'center', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}>
                           <select
                             value={status}
                             onChange={(e) => handleSetStatus(s.student_no, dateStr, period, e.target.value)}
+                            title={ownTaught ? undefined : '非任教科目：只能把「曠課」改成事假／病假／公假'}
                             style={{
                               fontSize: 11,
                               padding: '2px 2px',
@@ -778,7 +877,7 @@ export default function WeeklyAttendancePage() {
                               background: '#fff',
                             }}
                           >
-                            {STATUS_OPTIONS.map((opt) => (
+                            {options.map((opt) => (
                               <option key={opt} value={opt}>
                                 {opt}
                               </option>
