@@ -584,6 +584,11 @@ export type ClassScoreExcelParams = {
     }
   >;
   gradeRank: Record<string, { grade_rank?: number | null; midterm_grade_rank?: number | null; final_grade_rank?: number | null; daily_grade_rank?: number | null }>;
+  // 反映事項：開發人員區「出缺席成績不含蓋在期中、期末、平時個別三部分分數」開關
+  // 開啟時，期中/期末/平時三組「總分／排名」表頭要補上「(未含出缺席加扣分)」，
+  // 跟【班級成績總表】畫面上的表頭文字一致（見 sql/68：這三部分不含出缺席，
+  // 「全學期」總表那組不受影響、不加這段文字，一律含出缺席）。
+  attendanceExcludedFromPartials?: boolean;
 };
 
 const EXAM_TYPE_SHORT: Record<'期中考' | '期末考' | '平時分', string> = { 期中考: '期中', 期末考: '期末', 平時分: '平時' };
@@ -602,7 +607,7 @@ export async function downloadClassScoreExcel(p: ClassScoreExcelParams) {
     });
   });
   p.examTypes.forEach((et) => {
-    header1.push(EXAM_TYPE_SHORT[et], '', '', '');
+    header1.push(p.attendanceExcludedFromPartials ? `${EXAM_TYPE_SHORT[et]}(未含出缺席加扣分)` : EXAM_TYPE_SHORT[et], '', '', '');
     header2.push('總分', '平均(*比重)', '班排名', '年級排名');
   });
   if (p.viewMode === 'all') {
@@ -679,7 +684,7 @@ export async function downloadMultiClassScoreExcel(classes: (ClassScoreExcelPara
       });
     });
     p.examTypes.forEach((et) => {
-      header1.push(EXAM_TYPE_SHORT[et], '', '', '');
+      header1.push(p.attendanceExcludedFromPartials ? `${EXAM_TYPE_SHORT[et]}(未含出缺席加扣分)` : EXAM_TYPE_SHORT[et], '', '', '');
       header2.push('總分', '平均(*比重)', '班排名', '年級排名');
     });
     if (p.viewMode === 'all') {

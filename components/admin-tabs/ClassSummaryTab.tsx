@@ -394,6 +394,7 @@ export default function ClassSummaryPage() {
       attendanceAdjustments,
       classRank,
       gradeRank,
+      attendanceExcludedFromPartials,
     });
   }
 
@@ -675,6 +676,14 @@ export default function ClassSummaryPage() {
                 {visibleExamTypes.map((et) => (
                   <th key={'grp-' + et} colSpan={4} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER }}>
                     {EXAM_TYPE_LABEL[et]}總分／排名
+                    {/* 反映事項：勾選排除出缺席時，期中/期末/平時三個總分／排名的標題要補上
+                        「(未含出缺席加扣分)」，讓老師一眼看出這三欄現在不含出缺席，跟
+                        右邊「總表」（一律含出缺席）分開標示，不用另外靠提示文字才看得出來。 */}
+                    {attendanceExcludedFromPartials && (
+                      <span style={{ display: 'block', fontSize: 10, fontWeight: 'normal', color: '#A36A00' }}>
+                        (未含出缺席加扣分)
+                      </span>
+                    )}
                   </th>
                 ))}
                 {viewMode === 'all' && (
@@ -722,29 +731,21 @@ export default function ClassSummaryPage() {
                   {subjects.map((s) => {
                     const row = subjectData[en.id]?.[s];
                     const isAttendanceSubject = ATTENDANCE_SUBJECT_NAMES.includes(s);
-                    // 開發人員區開關開啟時，期中/期末/平時三欄已經不含出缺席
-                    // （見 sql/68，但這個班級的「總分」仍然繼續把出缺席算進去），這裡連
-                    // 「全勤／出缺席」這一欄本身顯示的分數也一併隱藏（顯示「—」），
-                    // 避免老師看到這一欄有分數、卻懷疑期中/期末/平時為什麼沒把它
-                    // 算進去，看起來像系統漏算。
-                    const hideAttendanceScore = isAttendanceSubject && attendanceExcludedFromPartials;
+                    // 【本輪更正】反映事項：「全部頁面中的全勤表格，無論是否勾選排除出缺席，
+                    // 都必須全勤顯示分數」——上一輪把這一欄隱藏是誤解，改回一律顯示真實分數；
+                    // 開關是否排除出缺席只影響期中/期末/平時「總分／排名」標題那邊補的
+                    // 「(未含出缺席加扣分)」提示文字，不影響這一欄本身的顯示。
                     return visibleExamTypes.map((et, eti) => (
                       <td
                         key={s + et}
                         style={{ padding: 6, textAlign: 'center', borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER }}
                         title={
-                          hideAttendanceScore
-                            ? '開發人員區已開啟「出缺席成績不含蓋在期中、期末、平時個別三部分分數」，這一欄暫時隱藏'
-                            : isAttendanceSubject
+                          isAttendanceSubject
                             ? '依真實出缺勤紀錄自動計算，不是老師手動輸入的分數（老師若有在此欄輸入分數，該分數不會被採用）'
                             : undefined
                         }
                       >
-                        {hideAttendanceScore
-                          ? '—'
-                          : isAttendanceSubject
-                          ? attendanceAdjustments[en.id] ?? '—'
-                          : row?.[EXAM_TYPE_FIELD[et]] ?? '—'}
+                        {isAttendanceSubject ? attendanceAdjustments[en.id] ?? '—' : row?.[EXAM_TYPE_FIELD[et]] ?? '—'}
                       </td>
                     ));
                   })}
