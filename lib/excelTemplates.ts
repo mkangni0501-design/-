@@ -447,6 +447,40 @@ export async function downloadScoreAttendanceTemplateForClass(params: {
   download(XLSX, wb, `成績出缺輸入表_${params.gradeLevel}${params.className}.xlsx`);
 }
 
+// 【本輪新增】反映事項「系統管理員能一次上傳全校整學期出缺狀態（目前一次只能用
+// 一個班）」——先提供對應的「一次下載全校」：一個活頁簿，每個班各自一張分頁
+// （工作表名稱用「年級班級」，Excel分頁名稱上限31字元，超過會截短），每張分頁
+// 都是跟單班下載一樣的「成績、出缺輸入表」格式＋真實名冊，管理員逐班填完出缺
+// 狀態後，同一個檔案整批上傳回去即可（見 weekly 頁 handleUploadFile 的多分頁
+// 處理，用 readAllClassSheets() 逐分頁解析）。
+export async function downloadScoreAttendanceTemplateForClasses(
+  classesData: {
+    academicYear: number;
+    term: string;
+    gradeLevel: string;
+    className: string;
+    subjects: string[];
+    students: ClassRosterStudent[];
+  }[]
+) {
+  const XLSX = await loadXLSX();
+  const wb = XLSX.utils.book_new();
+  const usedNames = new Set<string>();
+  for (const params of classesData) {
+    let sheetName = `${params.gradeLevel}${params.className}`.slice(0, 31);
+    // Excel 分頁名稱在同一個活頁簿裡必須唯一，理論上「年級+班級」不會重複，
+    // 但萬一真的撞名（例如截短後剛好一樣），補個流水號避免整批下載失敗。
+    let suffix = 1;
+    while (usedNames.has(sheetName)) {
+      sheetName = `${params.gradeLevel}${params.className}`.slice(0, 28) + '_' + suffix++;
+    }
+    usedNames.add(sheetName);
+    XLSX.utils.book_append_sheet(wb, await buildScoreAttendanceSheetForClass(params), sheetName);
+  }
+  XLSX.utils.book_append_sheet(wb, await buildScoreAttendanceLegendSheet(), '代碼說明');
+  download(XLSX, wb, `成績出缺輸入表_全校.xlsx`);
+}
+
 /* ------------------------------------------------------------------ */
 /* 7. 全部上傳(下載)：整批設定用的合併範本                               */
 /*    （不含成績/出缺，因為那是每班每學期持續登錄的資料，非一次性建置；    */

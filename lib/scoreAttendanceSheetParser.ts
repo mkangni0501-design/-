@@ -65,6 +65,24 @@ export async function readWorkbook(file: File) {
   return rowsRaw;
 }
 
+// 【本輪新增】反映事項「系統管理員能一次上傳全校整學期出缺狀態（目前一次只能用一
+// 個班）」——管理員下載「全校成績出缺席現況」（見 BulkExcelPanel）或把好幾個班的
+// 「成績、出缺輸入表」分頁併成一個檔案時，一個活頁簿裡會有很多張分頁、一張分頁
+// 一個班，用同一套「成績、出缺輸入表」格式。這裡讀出「所有」符合這個格式的分頁
+// （排除「代碼說明」這種說明用分頁），交給呼叫端逐一用 parseSheetHeader／
+// parseStudentRows／findAttendanceDateColumns 處理，不用改動既有的表格格式本身。
+const NON_CLASS_SHEET_NAMES = new Set(['代碼說明']);
+
+export async function readAllClassSheets(file: File): Promise<{ sheetName: string; rowsRaw: any[][] }[]> {
+  const XLSX = await loadXLSX();
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  return wb.SheetNames.filter((name) => !NON_CLASS_SHEET_NAMES.has(name)).map((name) => ({
+    sheetName: name,
+    rowsRaw: XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null }) as any[][],
+  }));
+}
+
 // 找出「期中考/期末考/平時分」三個分數區塊各自的起始欄位，以及每個區塊裡的科目名稱（讀第7列，index6）
 export function findScoreBlocks(rowsRaw: any[][]) {
   const headerRow = rowsRaw[4] ?? []; // 第5列（index4），文字上寫「期中考/期末考/平時分」
