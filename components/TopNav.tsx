@@ -25,6 +25,11 @@ export default function TopNav() {
   const [viewMode, setViewMode] = useState<'admin' | 'teacher'>('admin');
   const { scale, setScale } = useFontScale();
   const [muted, setMuted] = useState(false);
+  // 【本輪新增】反映事項「當【家長／監護人資料】中信箱跟教師/管理者信箱相同時，
+  // 切換身分處請多一個【家長視角】選單」——任何登入的教職員都適用，不限管理帳號
+  // （跟下面 canSwitchIdentity 限定 ADMIN_ROLES 是分開的兩件事）。
+  const [canViewAsParent, setCanViewAsParent] = useState(false);
+  const [claimingParentView, setClaimingParentView] = useState(false);
 
   useEffect(() => {
     setMuted(isSoundMuted());
@@ -41,6 +46,20 @@ export default function TopNav() {
     (async () => {
       const appUser = await getCurrentAppUser();
       if (appUser) setMe({ name: appUser.name, role: appUser.role });
+      // 【本輪修正】反映事項「家長視角我好像沒看到」——根因是 sql/69 那兩支函式直接
+      // 查 auth.users，這個專案其他地方都沒有這樣做過，很可能被 Supabase 擋掉。
+      // 改成前端自己用 supabase.auth.getUser() 拿登入信箱（標準 SDK 呼叫，不用額外
+      // 資料庫權限），再當參數傳給 RPC，函式本身完全不用碰 auth.users，見 sql/71。
+      const {
+        data: { user: authUser },
+      } = await supabase.auth.getUser();
+      if (authUser?.email) {
+        const { data: hasMatch, error: matchErr } = await supabase.rpc('current_staff_has_guardian_email_match', {
+          p_email: authUser.email,
+        });
+        if (matchErr) console.error('current_staff_has_guardian_email_match failed:', matchErr);
+        setCanViewAsParent(!!hasMatch);
+      }
       // 【2026-08-11 修正】原本沒有依 teacher_id 篩選，完全依賴 RLS 政策幫忙擋——但系統
       // 管理員／訓導部門的 RLS 政策本來就刻意放寬可以看到全校教師的通知（審核用），會讓
       // 這些帳號的未讀角標變成「全校未讀總數」而不是「自己的未讀數」。改成明確查自己的
@@ -105,6 +124,33 @@ export default function TopNav() {
   }
 
   const canSwitchIdentity = !isPortal && me && ADMIN_ROLES.includes(me.role);
+  // 【本輪新增】只要符合「信箱跟監護人資料相同」就能看到這個切換選單，跟上面
+  // canSwitchIdentity（限管理帳號）分開判斷——一般教師只要信箱有對到，一樣看得到。
+  const showSwitcher = !isPortal && me && (canSwitchIdentity || canViewAsParent);
+
+  // 切到【家長視角】：認領跟自己信箱相同、還沒綁定的家長查詢帳號（portal_accounts.
+  // auth_user_id 補成自己），再導去 /portal——因為是同一個 Supabase 登入session，
+  // /portal 本來的查詢邏輯（portal_accounts.auth_user_id = 目前登入者）不用改，
+  // 導過去就會自動看到對應的學生資料，不用再走一次家長入口的驗證信流程。
+  async function handleViewAsParent() {
+    setClaimingParentView(true);
+    const {
+      data: { user: authUser },
+    } = await supabase.auth.getUser();
+    if (!authUser?.email) {
+      setClaimingParentView(false);
+      alert('讀不到目前登入信箱，請重新整理頁面再試一次。');
+      return;
+    }
+    const { error } = await supabase.rpc('claim_portal_accounts_for_current_staff', { p_email: authUser.email });
+    setClaimingParentView(false);
+    setSwitching(false);
+    if (error) {
+      alert('切換家長視角失敗：' + error.message);
+      return;
+    }
+    router.push('/portal');
+  }
 
   return (
     <nav
@@ -190,7 +236,7 @@ export default function TopNav() {
             帳號設定
           </Link>
         )}
-        {canSwitchIdentity ? (
+        {showSwitcher ? (
           <span style={{ position: 'relative' }}>
             <button
               onClick={() => setSwitching((v) => !v)}
@@ -213,18 +259,43 @@ export default function TopNav() {
                   zIndex: 10,
                 }}
               >
-                <button
-                  onClick={() => handleSwitchIdentity('admin')}
-                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: 'none', border: 'none', cursor: 'pointer', font: 'inherit' }}
-                >
-                  管理者視角
-                </button>
-                <button
-                  onClick={() => handleSwitchIdentity('teacher')}
-                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: 'none', border: 'none', cursor: 'pointer', font: 'inherit' }}
-                >
-                  教師視角
-                </button>
+                {canSwitchIdentity && (
+                  <>
+                    <button
+                      onClick={() => handleSwitchIdentity('admin')}
+                      style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: 'none', border: 'none', cursor: 'pointer', font: 'inherit' }}
+                    >
+                      管理者視角
+                    </button>
+                    <button
+                      onClick={() => handleSwitchIdentity('teacher')}
+                      style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: 'none', border: 'none', cursor: 'pointer', font: 'inherit' }}
+                    >
+                      教師視角
+                    </button>
+                  </>
+                )}
+                {canViewAsParent && (
+                  <button
+                    onClick={handleViewAsParent}
+                    disabled={claimingParentView}
+                    title="登入信箱跟【家長／監護人資料】其中一筆相同，可以直接切過去查看"
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      textAlign: 'left',
+                      padding: '8px 12px',
+                      background: 'none',
+                      border: 'none',
+                      borderTop: canSwitchIdentity ? '1px solid #f0f0f0' : 'none',
+                      cursor: claimingParentView ? 'default' : 'pointer',
+                      font: 'inherit',
+                      color: claimingParentView ? '#999' : '#2C2C2A',
+                    }}
+                  >
+                    {claimingParentView ? '切換中…' : '家長視角'}
+                  </button>
+                )}
               </div>
             )}
           </span>
