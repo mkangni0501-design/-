@@ -9,6 +9,7 @@ import { getEffectivePeriodCount, WEEKDAY_LABELS } from '@/lib/periodConfig';
 import { resolveCurrentTerm } from '@/lib/academicTerm';
 import {
   readWorkbook,
+  readAllClassSheets,
   parseSheetHeader,
   parseStudentRows,
   findAttendanceDateColumns,
@@ -16,7 +17,11 @@ import {
 } from '@/lib/scoreAttendanceSheetParser';
 import ExcelUploadButton from '@/components/ExcelUploadButton';
 import TemplateDownloadButton from '@/components/TemplateDownloadButton';
-import { downloadScoreAttendanceTemplate } from '@/lib/excelTemplates';
+import {
+  downloadScoreAttendanceTemplate,
+  downloadScoreAttendanceTemplateForClass,
+  downloadScoreAttendanceTemplateForClasses,
+} from '@/lib/excelTemplates';
 import ErrorBanner from '@/components/ErrorBanner';
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
@@ -566,7 +571,152 @@ export default function WeeklyAttendancePage() {
     Array.from(selectedStudents).forEach((studentNo) => checkAndPromptNotify(studentNo));
   }
 
+  // 【本輪新增】反映事項「如有班級學生資料，請直接用班級名冊下載以順利填寫相關出缺
+  // 資料，無才用範本」——這個班已經有名冊（students.length>0）的話，直接帶出真實
+  // 座號/學號/姓名（downloadScoreAttendanceTemplateForClass，這支函式本來就有，
+  // 只是這裡之前一直沒用到），不用再讓老師自己key學號；完全沒有名冊時才退回原本
+  // 的空白範本（downloadScoreAttendanceTemplate），版面才不會一片空白看起來像壞掉。
+  async function handleDownloadTemplate() {
+    if (students.length === 0 || !classId) {
+      downloadScoreAttendanceTemplate();
+      return;
+    }
+    const [{ data: cls }, currentTerm] = await Promise.all([
+      supabase.from('classes').select('academic_year, grade_level, class_name').eq('id', classId).maybeSingle(),
+      resolveCurrentTerm(),
+    ]);
+    if (!cls) {
+      downloadScoreAttendanceTemplate();
+      return;
+    }
+    downloadScoreAttendanceTemplateForClass({
+      academicYear: cls.academic_year,
+      term: currentTerm?.term ?? '上學期',
+      gradeLevel: cls.grade_level,
+      className: cls.class_name,
+      subjects: [],
+      students,
+    });
+  }
+
+  // 【本輪新增】反映事項「系統管理員能一次上傳全校整學期出缺狀態（目前一次只能用
+  // 一個班）」——這裡是對應的「一次下載全校」，管理員專用：抓目前生效學年度/學期
+  // 全校所有班級的真實名冊，組成一個活頁簿、一班一個分頁，管理員填完直接整批
+  // 上傳回去（見下面 handleUploadFile 的多分頁處理）。
+  async function handleDownloadAllClassesTemplate() {
+    const currentTerm = await resolveCurrentTerm();
+    if (!currentTerm) {
+      alert('讀不到目前生效的學年度／學期，請先在「學年學期設定」確認。');
+      return;
+    }
+    const { data: allClasses, error: clsErr } = await supabase
+      .from('classes')
+      .select('id, grade_level, class_name')
+      .eq('academic_year', currentTerm.academic_year)
+      .order('grade_level')
+      .order('class_name');
+    if (clsErr || !allClasses || allClasses.length === 0) {
+      alert('讀取全校班級清單失敗：' + (clsErr?.message ?? '目前學年度沒有任何班級'));
+      return;
+    }
+    const classesData = await Promise.all(
+      allClasses.map(async (c: any) => {
+        const { data: enrollRows } = await supabase
+          .from('enrollments')
+          .select('seat_no, student_no')
+          .eq('class_id', c.id)
+          .eq('is_current', true)
+          .order('seat_no');
+        const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
+        const { data: studentRows } =
+          studentNos.length === 0
+            ? { data: [] as any[] }
+            : await supabase.from('students').select('student_no, name').in('student_no', studentNos);
+        const nameByStudentNo = new Map((studentRows ?? []).map((s: any) => [s.student_no, s.name]));
+        return {
+          academicYear: currentTerm.academic_year,
+          term: currentTerm.term,
+          gradeLevel: c.grade_level,
+          className: c.class_name,
+          subjects: [],
+          students: (enrollRows ?? []).map((r: any) => ({
+            seatNo: r.seat_no,
+            studentNo: r.student_no,
+            name: nameByStudentNo.get(r.student_no) ?? '（找不到姓名）',
+          })),
+        };
+      })
+    );
+    downloadScoreAttendanceTemplateForClasses(classesData);
+  }
+
   async function handleUploadFile(file: File) {
+    // 【本輪新增】管理員：一次處理整個活頁簿裡的「所有」分頁（一班一分頁），
+    // 對應反映事項「系統管理員能一次上傳全校整學期出缺狀態（目前一次只能用一個
+    // 班）」；非管理員（導師／任課教師）維持原本「只讀第一張成績/出缺輸入表分頁」
+    // 的單班行為不變，避免一般教師誤用整批工具動到其他班級。
+    if (isAdmin) {
+      const sheets = await readAllClassSheets(file);
+      if (sheets.length === 0) {
+        return { successCount: 0, errors: ['這個活頁簿裡沒有可用的分頁'] };
+      }
+      let totalSuccess = 0;
+      const allErrors: string[] = [];
+      for (const { sheetName, rowsRaw } of sheets) {
+        const header = parseSheetHeader(rowsRaw);
+        if (!header.academicYear || !header.gradeLevel || !header.className) {
+          allErrors.push(`分頁「${sheetName}」讀不到年度/年級/班級，已略過這個分頁`);
+          continue;
+        }
+        const { data: classRow } = await supabase
+          .from('classes')
+          .select('id')
+          .eq('academic_year', header.academicYear)
+          .eq('department', departmentForGrade(header.gradeLevel))
+          .eq('grade_level', header.gradeLevel)
+          .eq('class_name', header.className)
+          .maybeSingle();
+        if (!classRow) {
+          allErrors.push(`分頁「${sheetName}」找不到對應班級：${header.academicYear} ${header.gradeLevel}${header.className}，已略過這個分頁`);
+          continue;
+        }
+        const studentsFromFile = parseStudentRows(rowsRaw);
+        const dateColumns = await findAttendanceDateColumns(rowsRaw, header.academicYear);
+        if (dateColumns.length === 0) {
+          allErrors.push(`分頁「${sheetName}」讀不到任何日期欄位，已略過這個分頁`);
+          continue;
+        }
+        if (studentsFromFile.length === 0) {
+          allErrors.push(`分頁「${sheetName}」讀不到任何學生資料，已略過這個分頁`);
+          continue;
+        }
+        for (const s of studentsFromFile) {
+          const row = rowsRaw[s.rowIndex];
+          for (const dc of dateColumns) {
+            for (let period = 1; period <= 5; period++) {
+              const colIdx = dc.colIndex + (period - 1);
+              const code = row[colIdx];
+              // 【本輪新增】系統管理員的檔案可以直接覆蓋原有出缺席資料：空白儲存格
+              // 不是「跳過、維持原狀」，是明確視為「出席」寫進去——這樣管理員上傳
+              // 的整份檔案才會變成該班這段期間出缺勤唯一的真實來源，不會有舊資料
+              // 殘留在檔案沒填到的格子裡。（一般導師/任課教師走下面 else 分支的
+              // 單班上傳，維持「空白跳過、只更新有填的格子」這個比較安全的預設。）
+              const status = code == null || code === '' ? '出席' : ATTENDANCE_CODE_TO_STATUS[Number(code)];
+              if (!status) continue;
+              const dateStr = toDateStr(dc.date);
+              const { error } = await supabase
+                .from('attendance')
+                .upsert({ student_no: s.studentNo, record_date: dateStr, period_no: period, status }, { onConflict: 'student_no,record_date,period_no' });
+              if (error) allErrors.push(`${sheetName} ${s.name} ${dateStr} 第${period}節：${error.message}`);
+              else totalSuccess++;
+            }
+          }
+        }
+      }
+      setReloadTick((t) => t + 1);
+      return { successCount: totalSuccess, errors: allErrors };
+    }
+
     const rowsRaw = await readWorkbook(file);
     const header = parseSheetHeader(rowsRaw);
     if (!header.academicYear || !header.gradeLevel || !header.className) {
@@ -789,11 +939,14 @@ export default function WeeklyAttendancePage() {
       )}
 
       <h2 style={{ fontSize: 13, color: '#666', marginBottom: 4 }}>批次上傳（格式同「成績、出缺輸入表」工作表）</h2>
-      <TemplateDownloadButton label="下載出缺席輸入範本" onClick={downloadScoreAttendanceTemplate} />
+      <TemplateDownloadButton label="下載出缺席輸入範本" onClick={handleDownloadTemplate} />
+      {isAdmin && (
+        <TemplateDownloadButton label="下載全校出缺席輸入表（一班一分頁）" onClick={handleDownloadAllClassesTemplate} />
+      )}
       <ExcelUploadButton onFile={handleUploadFile} />
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
         {isAdmin
-          ? '管理員可直接登錄／修改任一班級任一天的出缺勤紀錄，不受鎖定與週次限制。'
+          ? '管理員可直接登錄／修改任一班級任一天的出缺勤紀錄，不受鎖定與週次限制；上傳整批檔案時，會處理檔案裡「所有」分頁（一分頁一班），且空白儲存格會直接覆蓋成「出席」，整份檔案即為該班這段期間出缺勤唯一的真實來源。'
           : `導師可直接補登最近 ${backdateGraceDays} 天內的紀錄；超過 ${backdateGraceDays} 天的既有紀錄需點選後送出修正申請，交由管理員審核。`}
       </p>
 
