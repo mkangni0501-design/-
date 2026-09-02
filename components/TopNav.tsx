@@ -120,15 +120,30 @@ export default function TopNav() {
   // 動態判斷、找不到才提示。
   const showSwitcher = !isPortal && !!me;
 
+  // 【本輪修正】反映事項「已經透過輸入手機號進入家長視角的教職員，是否能自動
+  // 綁定學生資料，不用每次都得重新輸入號碼」——先確認自己這個教職員身分是不是
+  // 已經綁過任何一筆家長查詢帳號（current_staff_has_bound_portal_accounts，
+  // 見 sql/75），有的話直接導去 /portal，完全不用再驗證信箱/手機；沒有綁過
+  // 才會走下面「先試信箱、信箱沒對到再問手機」這個流程。
   // 切到【家長視角】：先用登入信箱安靜比對＋認領（跟以前一樣，見 sql/73 的
   // claim_portal_accounts_for_current_staff）；信箱對不到監護人資料時（現在系統
   // 主要用手機號碼登入，guardians.email 不一定有維護），改跳出來問手機號碼，
   // 用跟家長/學生登入頁同一套比對規則（claim_portal_accounts_for_current_staff_
-  // by_phone，見 sql/73）。認領/補建成功後直接導去 /portal，因為是同一個
+  // by_phone，見 sql/73／sql/75）。認領/補建成功後直接導去 /portal，因為是同一個
   // Supabase 登入 session，/portal 本來的查詢邏輯（portal_accounts.auth_user_id
   // = 目前登入者）不用改，導過去就會自動看到對應的學生資料。
   async function handleViewAsParent() {
     setClaimingParentView(true);
+
+    const { data: alreadyBound, error: boundErr } = await supabase.rpc('current_staff_has_bound_portal_accounts');
+    if (boundErr) console.error('current_staff_has_bound_portal_accounts failed:', boundErr);
+    if (alreadyBound) {
+      setClaimingParentView(false);
+      setSwitching(false);
+      router.push('/portal');
+      return;
+    }
+
     const {
       data: { user: authUser },
     } = await supabase.auth.getUser();
@@ -142,7 +157,7 @@ export default function TopNav() {
 
     if (claimed === 0) {
       const phone = window.prompt(
-        '登入信箱在【家長／監護人資料】裡沒有找到相符紀錄。\n請輸入登記在學籍系統裡的手機號碼再試一次（家長/學生登入頁比對的同一個欄位）：'
+        '登入信箱在【家長／監護人資料】裡沒有找到相符紀錄。\n請輸入登記在學籍系統裡的手機號碼再試一次（家長/學生登入頁比對的同一個欄位，往後不用再重新輸入）：'
       );
       if (phone && phone.trim()) {
         const { data, error } = await supabase.rpc('claim_portal_accounts_for_current_staff_by_phone', { p_phone: phone.trim() });
