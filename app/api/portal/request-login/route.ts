@@ -120,7 +120,47 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const shadowEmail = buildPortalShadowEmail(code);
+  // 【本輪修正】反映事項「家裡有好幾個小孩在本校就讀的家長，是否能同時查看所有
+  // 小孩的資料」——原本這裡固定用「這次登入代碼本身」組出來的影子信箱
+  // （hy0123@portal.internal）去核發登入憑證，每個學號各自對應一個獨立的
+  // Supabase 帳號身分。家長如果有好幾個小孩，用小孩A的代碼登入一次、小孩B的
+  // 代碼再登入一次，會拿到兩個「不同」的身分（auth_user_id 不一樣），portal_
+  // accounts 這兩筆各自綁在不同身分下——即使 app/(app)/portal/page.tsx 那邊
+  // 本來就有處理「同一個身分綁定好幾個學生」的邏輯（一次查出 auth_user_id
+  // 底下所有 portal_accounts、下拉選單切換），因為身分從一開始就沒有共用，
+  // 這段邏輯永遠只會看到一個學生。
+  // 修正做法（只套用在「家長」登入，「學生本人」維持各自獨立身分不變，因為
+  // 學生本人就是不同的真人，不該共用）：先查「同一支手機號碼」還對應著哪些
+  // 其他學生（透過 guardians.phone 比對，判斷這支手機底下同時是好幾個小孩的
+  // 監護人），如果那些學生裡，已經有任何一個的家長查詢帳號綁過登入身分了，
+  // 這次改成沿用「那個」身分的影子信箱去核發登入憑證（Supabase 對同一個信箱
+  // 核發 magic link 一定會核發回同一個帳號身分），讓這次登入延續同一個身分，
+  // 而不是每個小孩各自建立一個獨立身分——這樣同一個家長無論用哪個小孩的代碼
+  // 登入，最終都會收斂成同一個身分，/portal 那邊原本就有的多學生切換功能
+  // 自然就能正常運作。第一次登入（還沒有任何小孩綁過身分）時，維持用這次的
+  // 登入代碼本身當身分起點，之後其他小孩的登入才會沿用這個起點。
+  let identityShadowEmail = buildPortalShadowEmail(code);
+  if (relation === '家長') {
+    const { data: siblingGuardianRows } = await supabaseAdmin.from('guardians').select('student_no, phone');
+    const siblingStudentNos = (siblingGuardianRows ?? [])
+      .filter((g: any) => phonesMatch(g.phone, phone))
+      .map((g: any) => g.student_no);
+    if (siblingStudentNos.length > 0) {
+      const siblingLoginCodes = siblingStudentNos.map((no: string) => 'HY' + no);
+      const { data: existingBound } = await supabaseAdmin
+        .from('portal_accounts')
+        .select('login_code, auth_user_id, created_at')
+        .in('login_code', siblingLoginCodes)
+        .not('auth_user_id', 'is', null)
+        .order('created_at', { ascending: true })
+        .limit(1);
+      if (existingBound && existingBound.length > 0) {
+        identityShadowEmail = buildPortalShadowEmail(existingBound[0].login_code);
+      }
+    }
+  }
+
+  const shadowEmail = identityShadowEmail;
   const authClient = createRequestScopedAuthClient();
   const { data: linkData, error: linkErr } = await authClient.auth.admin.generateLink({
     type: 'magiclink',
