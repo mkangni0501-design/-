@@ -138,6 +138,13 @@ export default function TopNav() {
     const { data: alreadyBound, error: boundErr } = await supabase.rpc('current_staff_has_bound_portal_accounts');
     if (boundErr) console.error('current_staff_has_bound_portal_accounts failed:', boundErr);
     if (alreadyBound) {
+      // 【本輪修正】反映事項「原本教職員可以看到自己的多個小孩，現在不可以了」
+      // ——已經綁過的時候不用再跳出來問信箱/手機，但背地裡還是要用「已經綁定的
+      // 小孩，監護人資料裡登記的手機/信箱」這個既有資料，安靜地補認領其他還沒
+      // 綁過的小孩（見 sql/76），不能整個認領流程都跳過，不然新增的小孩、或
+      // 之前沒認領到的小孩會永遠補不上。
+      const { error: siblingErr } = await supabase.rpc('claim_sibling_portal_accounts_for_current_staff');
+      if (siblingErr) console.error('claim_sibling_portal_accounts_for_current_staff failed:', siblingErr);
       setClaimingParentView(false);
       setSwitching(false);
       router.push('/portal');
