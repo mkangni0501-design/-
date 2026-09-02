@@ -25,10 +25,14 @@ export default function TopNav() {
   const [viewMode, setViewMode] = useState<'admin' | 'teacher'>('admin');
   const { scale, setScale } = useFontScale();
   const [muted, setMuted] = useState(false);
-  // 【本輪新增】反映事項「當【家長／監護人資料】中信箱跟教師/管理者信箱相同時，
-  // 切換身分處請多一個【家長視角】選單」——任何登入的教職員都適用，不限管理帳號
-  // （跟下面 canSwitchIdentity 限定 ADMIN_ROLES 是分開的兩件事）。
-  const [canViewAsParent, setCanViewAsParent] = useState(false);
+  // 【本輪修正】反映事項「家長/學生登入那邊現在只能用手機，是不是因為這樣所以
+  // 抓不到」——查證後確實如此：家長/學生查詢入口 2026-08-28 那輪已經整個改成
+  // 手機號碼比對，guardians.email 現在很可能大多是空的／沒在維護。原本靠「開場
+  // 靜默比對信箱」來決定要不要顯示這個選項，信箱比對不到就整個選項都不會出現，
+  // 使用者連「試試看手機」的機會都沒有。改成【家長視角】對任何教職員一律顯示，
+  // 點下去才動態嘗試：先用登入信箱比對（安靜，不用問），比對不到再跳出來問手機
+  // 號碼（跟家長/學生登入頁比對同一個欄位：guardians.phone／students.phone），
+  // 信箱、手機任一個對得上學籍系統裡的資料就算數，見 sql/73。
   const [claimingParentView, setClaimingParentView] = useState(false);
 
   useEffect(() => {
@@ -46,20 +50,6 @@ export default function TopNav() {
     (async () => {
       const appUser = await getCurrentAppUser();
       if (appUser) setMe({ name: appUser.name, role: appUser.role });
-      // 【本輪修正】反映事項「家長視角我好像沒看到」——根因是 sql/69 那兩支函式直接
-      // 查 auth.users，這個專案其他地方都沒有這樣做過，很可能被 Supabase 擋掉。
-      // 改成前端自己用 supabase.auth.getUser() 拿登入信箱（標準 SDK 呼叫，不用額外
-      // 資料庫權限），再當參數傳給 RPC，函式本身完全不用碰 auth.users，見 sql/71。
-      const {
-        data: { user: authUser },
-      } = await supabase.auth.getUser();
-      if (authUser?.email) {
-        const { data: hasMatch, error: matchErr } = await supabase.rpc('current_staff_has_guardian_email_match', {
-          p_email: authUser.email,
-        });
-        if (matchErr) console.error('current_staff_has_guardian_email_match failed:', matchErr);
-        setCanViewAsParent(!!hasMatch);
-      }
       // 【2026-08-11 修正】原本沒有依 teacher_id 篩選，完全依賴 RLS 政策幫忙擋——但系統
       // 管理員／訓導部門的 RLS 政策本來就刻意放寬可以看到全校教師的通知（審核用），會讓
       // 這些帳號的未讀角標變成「全校未讀總數」而不是「自己的未讀數」。改成明確查自己的
@@ -124,29 +114,48 @@ export default function TopNav() {
   }
 
   const canSwitchIdentity = !isPortal && me && ADMIN_ROLES.includes(me.role);
-  // 【本輪新增】只要符合「信箱跟監護人資料相同」就能看到這個切換選單，跟上面
-  // canSwitchIdentity（限管理帳號）分開判斷——一般教師只要信箱有對到，一樣看得到。
-  const showSwitcher = !isPortal && me && (canSwitchIdentity || canViewAsParent);
+  // 【本輪修正】不再靠開場靜默比對信箱決定要不要顯示——比對不到信箱時，使用者
+  // 連「試試看手機」的機會都沒有，見上面的說明。改成任何登入的教職員都能看到
+  // 這個切換選項，實際有沒有資料、比對得到與否，交給點下去之後 handleViewAsParent()
+  // 動態判斷、找不到才提示。
+  const showSwitcher = !isPortal && !!me;
 
-  // 切到【家長視角】：認領跟自己信箱相同、還沒綁定的家長查詢帳號（portal_accounts.
-  // auth_user_id 補成自己），再導去 /portal——因為是同一個 Supabase 登入session，
-  // /portal 本來的查詢邏輯（portal_accounts.auth_user_id = 目前登入者）不用改，
-  // 導過去就會自動看到對應的學生資料，不用再走一次家長入口的驗證信流程。
+  // 切到【家長視角】：先用登入信箱安靜比對＋認領（跟以前一樣，見 sql/73 的
+  // claim_portal_accounts_for_current_staff）；信箱對不到監護人資料時（現在系統
+  // 主要用手機號碼登入，guardians.email 不一定有維護），改跳出來問手機號碼，
+  // 用跟家長/學生登入頁同一套比對規則（claim_portal_accounts_for_current_staff_
+  // by_phone，見 sql/73）。認領/補建成功後直接導去 /portal，因為是同一個
+  // Supabase 登入 session，/portal 本來的查詢邏輯（portal_accounts.auth_user_id
+  // = 目前登入者）不用改，導過去就會自動看到對應的學生資料。
   async function handleViewAsParent() {
     setClaimingParentView(true);
     const {
       data: { user: authUser },
     } = await supabase.auth.getUser();
-    if (!authUser?.email) {
-      setClaimingParentView(false);
-      alert('讀不到目前登入信箱，請重新整理頁面再試一次。');
-      return;
+
+    let claimed = 0;
+    if (authUser?.email) {
+      const { data, error } = await supabase.rpc('claim_portal_accounts_for_current_staff', { p_email: authUser.email });
+      if (error) console.error('claim_portal_accounts_for_current_staff failed:', error);
+      claimed = data ?? 0;
     }
-    const { error } = await supabase.rpc('claim_portal_accounts_for_current_staff', { p_email: authUser.email });
+
+    if (claimed === 0) {
+      const phone = window.prompt(
+        '登入信箱在【家長／監護人資料】裡沒有找到相符紀錄。\n請輸入登記在學籍系統裡的手機號碼再試一次（家長/學生登入頁比對的同一個欄位）：'
+      );
+      if (phone && phone.trim()) {
+        const { data, error } = await supabase.rpc('claim_portal_accounts_for_current_staff_by_phone', { p_phone: phone.trim() });
+        if (error) console.error('claim_portal_accounts_for_current_staff_by_phone failed:', error);
+        claimed = data ?? 0;
+      }
+    }
+
     setClaimingParentView(false);
     setSwitching(false);
-    if (error) {
-      alert('切換家長視角失敗：' + error.message);
+
+    if (claimed === 0) {
+      alert('沒有找到相符的監護人資料（信箱、手機都對不上），請確認學籍系統裡的監護人資料是否正確登記，或聯絡學校確認。');
       return;
     }
     router.push('/portal');
@@ -275,27 +284,25 @@ export default function TopNav() {
                     </button>
                   </>
                 )}
-                {canViewAsParent && (
-                  <button
-                    onClick={handleViewAsParent}
-                    disabled={claimingParentView}
-                    title="登入信箱跟【家長／監護人資料】其中一筆相同，可以直接切過去查看"
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      textAlign: 'left',
-                      padding: '8px 12px',
-                      background: 'none',
-                      border: 'none',
-                      borderTop: canSwitchIdentity ? '1px solid #f0f0f0' : 'none',
-                      cursor: claimingParentView ? 'default' : 'pointer',
-                      font: 'inherit',
-                      color: claimingParentView ? '#999' : '#2C2C2A',
-                    }}
-                  >
-                    {claimingParentView ? '切換中…' : '家長視角'}
-                  </button>
-                )}
+                <button
+                  onClick={handleViewAsParent}
+                  disabled={claimingParentView}
+                  title="登入信箱或手機號碼，只要有一項跟【家長／監護人資料】相符，就能直接切過去查看"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '8px 12px',
+                    background: 'none',
+                    border: 'none',
+                    borderTop: canSwitchIdentity ? '1px solid #f0f0f0' : 'none',
+                    cursor: claimingParentView ? 'default' : 'pointer',
+                    font: 'inherit',
+                    color: claimingParentView ? '#999' : '#2C2C2A',
+                  }}
+                >
+                  {claimingParentView ? '切換中…' : '家長視角'}
+                </button>
               </div>
             )}
           </span>
