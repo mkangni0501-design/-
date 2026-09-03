@@ -112,6 +112,10 @@ export default function WeeklyAttendancePage() {
   // 【2026-08-26 新增】出缺席補登逾期天數，改成從 attendance_alert_settings 讀取
   // （見下面 useEffect），不再用寫死的常數。讀不到資料時退回 DEFAULT_BACKDATE_GRACE_DAYS。
   const [backdateGraceDays, setBackdateGraceDays] = useState<number>(DEFAULT_BACKDATE_GRACE_DAYS);
+  // 【本輪新增】開發人員區「同意由導師協助任課教師點名」開關（見
+  // sql/77homeroom_attendance_assist_toggle.sql）：關閉時（預設）維持原本規則，
+  // 開啟後非任教節次除了「曠課→事假/病假/公假」，也多開放「出席→事假/病假/公假」。
+  const [homeroomAssistEnabled, setHomeroomAssistEnabled] = useState(false);
   const [notifyQueue, setNotifyQueue] = useState<{ student_no: string; name: string; count: number }[]>([]);
   const [notifyBusy, setNotifyBusy] = useState(false);
   const notifyPrompt = notifyQueue[0] ?? null;
@@ -156,6 +160,14 @@ export default function WeeklyAttendancePage() {
         setAlertThreshold(data.threshold_periods);
         if (typeof data.backfill_overdue_days === 'number') setBackdateGraceDays(data.backfill_overdue_days);
       }
+    })();
+    (async () => {
+      const { data } = await supabase
+        .from('homeroom_attendance_assist_settings')
+        .select('allow_present_to_leave')
+        .eq('id', true)
+        .maybeSingle();
+      setHomeroomAssistEnabled(!!data?.allow_present_to_leave);
     })();
   }, []);
 
@@ -371,11 +383,15 @@ export default function WeeklyAttendancePage() {
   }
 
   const LEAVE_STATUSES = ['事假', '病假', '公假'] as const;
-  // 非任教科目時，這個狀態改動允不允許：只能從「曠課」改成事假/病假/公假三種之一
-  // （沿用同一個狀態也視為允許，等於「不改」）。
+  // 非任教科目時，這個狀態改動允不允許：一律可以從「曠課」改成事假/病假/公假三種
+  // 之一；「出席」改成事假/病假/公假，則要看開發人員區「同意由導師協助任課教師
+  // 點名」這個開關（homeroomAssistEnabled）有沒有開啟——這是本輪新增的部分，關閉
+  // 時完全比照原本規則（沿用同一個狀態也視為允許，等於「不改」）。
   function isAllowedNonTeachingChange(currentStatus: string, nextStatus: string) {
     if (nextStatus === currentStatus) return true;
-    return currentStatus === '曠課' && (LEAVE_STATUSES as readonly string[]).includes(nextStatus);
+    if (currentStatus === '曠課' && (LEAVE_STATUSES as readonly string[]).includes(nextStatus)) return true;
+    if (homeroomAssistEnabled && currentStatus === '出席' && (LEAVE_STATUSES as readonly string[]).includes(nextStatus)) return true;
+    return false;
   }
 
   async function checkAndPromptNotify(student_no: string) {
@@ -414,7 +430,11 @@ export default function WeeklyAttendancePage() {
     if (!isAdmin && !isOwnTaughtPeriod(dateStr, period)) {
       const currentStatus = attMap[`${student_no}|${dateStr}|${period}`] ?? '出席';
       if (!isAllowedNonTeachingChange(currentStatus, status)) {
-        alert('這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假。');
+        alert(
+          homeroomAssistEnabled
+            ? '這一節不是您任教的科目，只能把「曠課」或「出席」改成事假／病假／公假。'
+            : '這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假。'
+        );
         return;
       }
     }
@@ -544,7 +564,9 @@ export default function WeeklyAttendancePage() {
       setBatchBusy(false);
       alert(
         skippedNonTeachingCount > 0
-          ? '勾選範圍內都不是您任教的科目、或狀態不是「曠課」，非任教科目只能把曠課改成事假/病假/公假。'
+          ? homeroomAssistEnabled
+            ? '勾選範圍內都不是您任教的科目、或狀態不是「曠課」／「出席」，非任教科目只能把曠課／出席改成事假/病假/公假。'
+            : '勾選範圍內都不是您任教的科目、或狀態不是「曠課」，非任教科目只能把曠課改成事假/病假/公假。'
           : '勾選的日期都無法直接登錄（已鎖定或超過補登範圍），請改用「申請開放」或單筆修正申請。'
       );
       return;
@@ -1001,12 +1023,19 @@ export default function WeeklyAttendancePage() {
                     // 【本輪新增】非管理員時，判斷這一節是不是自己任教的節次——不是的話，
                     // 只能把「曠課」改成事假/病假/公假，其他狀態一律唯讀（不給下拉選單）。
                     const ownTaught = isAdmin || isOwnTaughtPeriod(dateStr, period);
-                    const nonTeachingLockedStatus = !ownTaught && status !== '曠課';
+                    // 【本輪新增】homeroomAssistEnabled 開啟時，非任教節次的「出席」也視為
+                    // 可編輯（只能再改成事假/病假/公假，見下面 options／isAllowedNonTeachingChange）。
+                    const nonTeachingEditableStatus = status === '曠課' || (homeroomAssistEnabled && status === '出席');
+                    const nonTeachingLockedStatus = !ownTaught && !nonTeachingEditableStatus;
                     if (editable && nonTeachingLockedStatus) {
                       return (
                         <td
                           key={key}
-                          title="非任教科目：只有「曠課」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師"
+                          title={
+                            homeroomAssistEnabled
+                              ? '非任教科目：只有「曠課」或「出席」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師'
+                              : '非任教科目：只有「曠課」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師'
+                          }
                           style={{ padding: 4, textAlign: 'center', color: '#999', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}
                         >
                           {status}
@@ -1014,13 +1043,23 @@ export default function WeeklyAttendancePage() {
                       );
                     }
                     if (editable) {
-                      const options = ownTaught ? STATUS_OPTIONS : (['曠課', ...LEAVE_STATUSES] as const);
+                      const options = ownTaught
+                        ? STATUS_OPTIONS
+                        : status === '出席'
+                          ? (['出席', ...LEAVE_STATUSES] as const)
+                          : (['曠課', ...LEAVE_STATUSES] as const);
                       return (
                         <td key={key} style={{ padding: 2, textAlign: 'center', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}>
                           <select
                             value={status}
                             onChange={(e) => handleSetStatus(s.student_no, dateStr, period, e.target.value)}
-                            title={ownTaught ? undefined : '非任教科目：只能把「曠課」改成事假／病假／公假'}
+                            title={
+                              ownTaught
+                                ? undefined
+                                : homeroomAssistEnabled
+                                  ? '非任教科目：只能把「曠課」或「出席」改成事假／病假／公假'
+                                  : '非任教科目：只能把「曠課」改成事假／病假／公假'
+                            }
                             style={{
                               fontSize: 11,
                               padding: '2px 2px',

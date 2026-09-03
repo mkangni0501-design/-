@@ -40,6 +40,29 @@ type EditableOption = { key: string; label: string; targetTable: 'students' | 'g
 
 const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六'];
 
+// 【本輪新增】反映事項「家長登入後，除【監護人資料】外，應該也要能看到小孩學籍
+// 資料中填寫的所有個人資料。如有誤可先修正並於按下確認後提出變更申請」——
+// students 表實際存在的個人資料欄位（見 sql/4registration.sql），排除 student_no
+// （學號，識別用，不可修改）與 updated_at／updated_by（系統內部欄位，不對家長
+// 顯示）。後端 profile_edit_requests 的 with check（sql/64restrict_student_self_edit_scope.sql）
+// 本來就只限制「學生本人」只能改 address／phone，「家長」可以對 students 表任何欄位
+// 送出修改申請，這裡只是把前端顯示/可選欄位，從原本只有 address／phone 兩個，
+// 擴充成跟學籍資料表單一致的完整欄位清單。
+const STUDENT_PROFILE_FIELDS: { field: string; label: string }[] = [
+  { field: 'name', label: '姓名' },
+  { field: 'gender', label: '性別' },
+  { field: 'thai_name', label: '泰文姓名' },
+  { field: 'dob', label: '出生日期' },
+  { field: 'id_number', label: '身分證／護照號碼' },
+  { field: 'nationality', label: '國籍' },
+  { field: 'religion', label: '宗教' },
+  { field: 'blood_type', label: '血型' },
+  { field: 'address', label: '現居地址' },
+  { field: 'phone', label: '聯絡電話' },
+  { field: 'previous_school', label: '原就讀學校' },
+  { field: 'previous_school_grade', label: '原就讀年級' },
+];
+
 export default function ParentPortalPage() {
   const [activeTab, setActiveTab] = useState<'成績' | '課表' | '通知'>('成績');
   const [linkedStudents, setLinkedStudents] = useState<LinkedStudent[]>([]);
@@ -220,7 +243,11 @@ export default function ParentPortalPage() {
       // 這個狀態不算彙總、也不用整批抓過來，只留曠課/遲到/病假/事假/公假這5種。
       const [{ data: attendanceRows }, { data: studentRow }, { data: guardianRows }] = await Promise.all([
         supabase.from('attendance').select('status, record_date').eq('student_no', selected.student_no).neq('status', '出席'),
-        supabase.from('students').select('address, phone').eq('student_no', selected.student_no).single(),
+        supabase
+          .from('students')
+          .select(STUDENT_PROFILE_FIELDS.map((f) => f.field).join(', '))
+          .eq('student_no', selected.student_no)
+          .single(),
         supabase.from('guardians').select('id, relation, name, phone').eq('student_no', selected.student_no),
         loadEditRequests(selected.student_no),
       ]);
@@ -248,9 +275,9 @@ export default function ParentPortalPage() {
     })();
   }, [selected]);
 
-  // 可修改欄位依身分不同：學生本人只能改自己的電話/地址；家長可以改本人（學生）跟
-  // 監護人的所有可修改欄位。之前不管登入的是學生還是家長，看到的清單完全一樣，
-  // 學生本人也能送出「監護人姓名/電話」的修改申請，這裡依 selected.relation 過濾。
+  // 可修改欄位依身分不同：學生本人只能改自己的電話/地址（跟資料庫 sql/64 的
+  // with check 限制一致，前端這裡放寬也送不出去，故意保持只有這兩項）；家長可以
+  // 改本人學籍資料所有欄位（見上面 STUDENT_PROFILE_FIELDS）跟監護人的姓名/電話。
   const editableOptions: EditableOption[] = selected
     ? selected.relation === '學生本人'
       ? [
@@ -258,8 +285,14 @@ export default function ParentPortalPage() {
           { key: 'student:phone', label: '本人聯絡電話', targetTable: 'students', guardianId: null, fieldName: 'phone', currentValue: profile.phone ?? '' },
         ]
       : [
-          { key: 'student:address', label: '本人現居地址', targetTable: 'students', guardianId: null, fieldName: 'address', currentValue: profile.address ?? '' },
-          { key: 'student:phone', label: '本人聯絡電話', targetTable: 'students', guardianId: null, fieldName: 'phone', currentValue: profile.phone ?? '' },
+          ...STUDENT_PROFILE_FIELDS.map((f) => ({
+            key: `student:${f.field}`,
+            label: `本人${f.label}`,
+            targetTable: 'students' as const,
+            guardianId: null,
+            fieldName: f.field,
+            currentValue: profile[f.field] ?? '',
+          })),
           ...guardians.flatMap((g) => [
             { key: `guardian:${g.id}:name`, label: `${g.relation}姓名`, targetTable: 'guardians' as const, guardianId: g.id, fieldName: 'name', currentValue: g.name ?? '' },
             { key: `guardian:${g.id}:phone`, label: `${g.relation}電話`, targetTable: 'guardians' as const, guardianId: g.id, fieldName: 'phone', currentValue: g.phone ?? '' },
@@ -779,6 +812,25 @@ export default function ParentPortalPage() {
               </section>
             </>
           )}
+
+          {/* 【本輪新增】反映事項「家長登入後，除【監護人資料】外，應該也要能看到小孩
+              學籍資料中填寫的所有個人資料」——顯示 STUDENT_PROFILE_FIELDS 涵蓋的所有
+              學籍個人資料欄位（不只地址/電話），學生本人跟家長登入都看得到；如有誤，
+              可到下面「修改基本資料」選對應欄位送出變更申請（學生本人受限於資料庫政策，
+              仍然只能送出地址/電話的申請，其餘欄位如需更正請洽導師）。 */}
+          <section style={{ marginTop: 32, paddingTop: 24, borderTop: '1px solid #e5e5e0' }}>
+            <h2 style={{ fontSize: 14, marginBottom: 8 }}>學籍資料（個人資料）</h2>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <tbody>
+                {STUDENT_PROFILE_FIELDS.map((f) => (
+                  <tr key={f.field} style={{ borderTop: '1px solid #eee' }}>
+                    <td style={{ padding: 6, width: '35%', color: '#666' }}>{f.label}</td>
+                    <td style={{ padding: 6 }}>{profile[f.field] || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
 
           <section style={{ marginTop: 32, paddingTop: 24, borderTop: '1px solid #e5e5e0' }}>
             <h2 style={{ fontSize: 14, marginBottom: 8 }}>監護人資料</h2>

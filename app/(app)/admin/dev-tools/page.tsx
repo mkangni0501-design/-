@@ -8,6 +8,7 @@ import TeacherLettersPanel from '@/components/dev-tools/TeacherLettersPanel';
 import PasswordPolicySettingsPanel from '@/components/dev-tools/PasswordPolicySettingsPanel';
 import TeacherLoginHomeSettingsPanel from '@/components/dev-tools/TeacherLoginHomeSettingsPanel';
 import AttendanceScoreExclusionPanel from '@/components/dev-tools/AttendanceScoreExclusionPanel';
+import HomeroomAttendanceAssistPanel from '@/components/dev-tools/HomeroomAttendanceAssistPanel';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { hasDepartment } from '@/lib/departments';
 
@@ -70,9 +71,14 @@ export default function DevToolsPage() {
         <TeacherLoginHomeSettingsPanel />
       </section>
 
-      <section id="attendance-score-exclusion">
+      <section id="attendance-score-exclusion" style={{ marginBottom: 40, paddingBottom: 24, borderBottom: '1px solid #eee' }}>
         <h2 style={{ fontSize: 14, marginBottom: 4 }}>班級成績總表：出缺席分數排除設定</h2>
         <AttendanceScoreExclusionPanel />
+      </section>
+
+      <section id="homeroom-attendance-assist">
+        <h2 style={{ fontSize: 14, marginBottom: 4 }}>出缺席登錄：導師協助任課教師點名設定</h2>
+        <HomeroomAttendanceAssistPanel />
       </section>
     </main>
   );
