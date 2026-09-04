@@ -306,7 +306,13 @@ function buildStyles(config: ReportCardStyleConfig) {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        transform: 'rotate(90deg)',
+        // 【2026-09-03 修正・二】反映事項「【公元二〇二六年九月三日】逐字向左旋轉
+        // 90度,變成直書」：user 兩次都明確指定「向左」，從 rotate(90deg)（順時針）
+        // 改成 rotate(-90deg)（逆時針／向左）。逐字＝每個字各自的字元都會跟著整個
+        // 容器一起轉90度（每個字都是獨立的 <Text>，見下面 dateStripChar 的用法），
+        // 變成直書＝仍然用 flexDirection:'row'+justifyContent:'space-between' 讓
+        // 轉90度以後文字沿著色帶由上到下分散對齊。
+        transform: 'rotate(-90deg)',
       },
       dateStripChar: { fontSize: base * 1.75, fontWeight: 700 },
 
@@ -343,7 +349,12 @@ function buildStyles(config: ReportCardStyleConfig) {
       // borderTop，見 AttendanceDisciplinePanel／ReportCardDocument 主體），兩塊
       // 中間就不會再有一條橫線把它們切成兩列，垂直分隔線還是照樣整條貫穿到底，
       // 視覺上合併成一列。
-      signBox: { flex: 1, borderLeft: BORDER, borderTop: BORDER, minHeight: 50, padding: 5, justifyContent: 'flex-start' },
+      // 【2026-09-03 修正・二】反映事項「導師/訓導/教務/校長簽章也向下擴大成兩列」：
+      // 上一輪拿掉了 signBox 的 borderBottom，讓簽章標籤格跟下面的簽名延伸格合併成
+      // 一個沒有分隔線的長方格；這次改回來，把 borderBottom 加回來，簽章格重新變回
+      // 「上面是標籤列、下面是簽名留白列」兩個有分隔線的列，延伸格那邊同步補回
+      // borderTop（見下面 sign-ext 那個 View），兩條線加起來剛好是同一條分隔線。
+      signBox: { flex: 1, borderLeft: BORDER, borderTop: BORDER, borderBottom: BORDER, minHeight: 50, padding: 5, justifyContent: 'flex-start' },
       signLabel: { fontSize: base, fontWeight: 700, textAlign: 'center' },
 
       // 【2026-08-23 修正】原本 minHeight:70，評語文字一長就會把框「撐高」，進而把
@@ -834,11 +845,15 @@ function rightPanelLayout() {
   const units = n + 6; // 科目列(N) + 學業平均(1) + 操行成績區塊(5，含服務/紀律)
   const attendanceFlex = 6; // 曠課~全勤，對齊第1~6科
   const classSizeFlex = 2; // 全班人數/全班名次，對齊第7~8科（占2格）
-  const promotionFlex = 1; // 升留級，對齊第9科（占1格）
-  const consumedBeforeSignature = attendanceFlex + classSizeFlex + promotionFlex; // 9
+  // 【2026-09-03 修正】反映事項「升留級/家長簽章及建議擴大成兩列(對齊第9.10科)」：
+  // 從占1格（只對齊第9科）改成占2格，對齊第9~10科（化學/體育，實際科目視班級
+  // 設定而定，這裡固定用「科目列裡的第9、10格」）。
+  const promotionFlex = 2;
+  const consumedBeforeSignature = attendanceFlex + classSizeFlex + promotionFlex; // 10
   // 「服務」在左表 n+6 個單位裡的序位（0-indexed）＝科目(n) + 學業平均(1) +
-  // 操行成績(整體,1) + 禮貌(1) + 衣著(1) ＝ n+4；固定11格時這個序位一定大於9，
-  // Math.max(...,0) 當保險，避免萬一以後 TOTAL_SUBJECT_SLOTS 改小時算出負值。
+  // 操行成績(整體,1) + 禮貌(1) + 衣著(1) ＝ n+4；固定11格時這個序位一定大於
+  // consumedBeforeSignature，Math.max(...,0) 當保險，避免萬一以後
+  // TOTAL_SUBJECT_SLOTS 改小時算出負值。
   const serviceIdx0 = n + 4;
   const gapFlex = Math.max(serviceIdx0 - consumedBeforeSignature, 0);
   const signatureFlex = Math.max(units - consumedBeforeSignature - gapFlex, 1);
@@ -1008,26 +1023,24 @@ function AttendanceDisciplinePanel({
           </View>
         </View>
 
-        {/* 升留級／家長簽章及建議：對齊左表第9科（idx0＝8），flex:1（占1格）——緊接在
-            「全班人數/全班名次」後面，6(曠課~全勤)+2(全班人數)+1(升留級)＝9格剛好
-            無縫接到「服務」列前面，不用再另外補間隔列。升留級目前無資料來源，
+        {/* 升留級／家長簽章及建議：對齊左表第9~10科（idx0＝8~9），flex:2（占2格）——
+            緊接在「全班人數/全班名次」後面，6(曠課~全勤)+2(全班人數)+2(升留級)＝10格
+            剛好無縫接到「服務」列前面，不用再另外補間隔列。升留級目前無資料來源，
             「值」先留空白，標籤永遠顯示。
-            【2026-09-02 修正】反映事項「升留級／家長簽章及建議高度請對齊第九個科目」：
-            實測發現這一列（跟巢狀的「升留級」欄兩個子格）原本沒有 minHeight:0，
-            造成「家長簽章及建議」那個沒有巢狀結構、直接用 sectionTitle 的格子撐滿了
-            量測階段算出來的高度，「升留級」欄自己內部兩個 flex:1 子格卻沒有一起撐開
-            （同一個已知的 react-pdf/Yoga minHeight:auto 問題），兩欄實際上沒有真的
-            一樣高，也一起把整列「撐」到遠超過1格（第9科）該有的高度，一路蓋到操行
-            成績區塊。跟 ScoreTable 科目列、上面「全班人數」列同樣的修法：這一列跟
-            巢狀子格全部補上 minHeight:0，才會真的精準卡在 flex:1（第9科）那一格高度。
-            【2026-09-03 修正】反映事項「升留級目前下面也是兩列，請合併成一列」：
-            上面修正時「升留級」欄內部留了「標籤（有底線）／空白」兩個子格，看起來
-            像兩列，這裡拿掉內部那條 borderBottom 分隔線、也拿掉巢狀的兩格結構，
-            改成單一個格子、標籤直接置中，跟旁邊「家長簽章及建議」一樣是不分割的
-            單一列。 */}
-        <View style={{ flex: layout.promotionFlex, flexDirection: 'row', minHeight: 0 }}>
-          <View style={{ flex: 1, minHeight: 0, alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ fontSize: 8 }}>{labels.promotionStatus}</Text>
+            【2026-09-03 修正】反映事項「升留級/家長簽章及建議擴大成兩列(對齊第9.10
+            科),且上下方橫線補上,中間垂直線也補上。字體請跟【全班人數】相同」：
+            從占1格（只對齊第9科）改成占2格（對齊第9~10科，用法跟上面 layout.
+            promotionFlex 的修法一致）；外層這一列補上 borderTop／borderBottom
+            （原本跟上面「全班人數」列、下面服務列之間都沒有實體邊框線，只是顏色
+            交界看起來像線，這裡直接補真正的邊框）；「升留級」跟「家長簽章及建議」
+            中間的垂直分隔線（borderLeft）維持，格子變高後這條線自然貫穿新的兩格
+            高度；字體從原本自訂的 fontSize:8 改成跟「全班人數」同一個
+            styles.sectionTitle（含灰底、粗體、置中），並排的「升留級」欄外觀
+            (灰底＋sectionTitle 字體) 也跟著改成跟「家長簽章及建議」一致，兩欄
+            風格統一、也符合「字體請跟全班人數相同」的要求。 */}
+        <View style={{ flex: layout.promotionFlex, flexDirection: 'row', minHeight: 0, borderTop: BORDER, borderBottom: BORDER }}>
+          <View style={[styles.sectionTitle, { flex: 1, minHeight: 0 }]}>
+            <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.promotionStatus}</Text>
           </View>
           <View style={[styles.sectionTitle, { flex: 3, minHeight: 0, borderLeft: BORDER }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.parentSignature}</Text>
@@ -1313,17 +1326,18 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
                 同寬）並排成一整列，兩者共用 REMARK_BOX_HEIGHT 高度、底部對齊，讓
                 「導師/訓導/教務/校長簽章」中間的垂直分隔線可以整條往下貫穿到底
                 （簽章格所在那一列的說明見上面 AttendanceDisciplinePanel）。
-                【2026-09-03 修正】反映事項「導師/訓導/教務/校長簽章下面現在都分別
-                有兩列，請合併成一列」：這一列本身還是獨立的一塊（因為要跟只有
-                leftCol 寬度的 remarkBox 並排、寬度對齊 rightCol），但跟上面簽章
-                標籤格之間的橫線已經拿掉（見 styles.signBox 的說明），視覺上兩塊
-                合併成同一個沒有橫線分隔的直立長方格。 */}
+                【2026-09-03 修正・二】反映事項「導師/訓導/教務/校長簽章也向下擴大
+                成兩列」：上一輪把這裡跟上面簽章標籤格之間的橫線拿掉、合併成一個
+                長方格；這次改回來，這一列補上 borderTop（跟 signBox 補回的
+                borderBottom 是同一條線，兩層邊框疊在一起沒關係，PDF 畫出來還是
+                一條線），簽章區重新變回「標籤列＋簽名留白列」上下兩列、中間有
+                分隔線的樣子，垂直分隔線一樣整條貫穿兩列到底。 */}
             <View style={{ flexDirection: 'row', height: REMARK_BOX_HEIGHT }}>
               <View style={[styles.remarkBox, { borderTop: BORDER }]}>
                 <Text style={styles.remarkLabel}>{labels.remark}</Text>
                 <Text style={[styles.remarkText, { fontSize: remarkFontSize, lineHeight: 1.4 }]}>{remarkDisplay}</Text>
               </View>
-              <View style={{ flex: RIGHT_COL_FLEX, flexDirection: 'row', borderBottom: BORDER }}>
+              <View style={{ flex: RIGHT_COL_FLEX, flexDirection: 'row', borderTop: BORDER, borderBottom: BORDER }}>
                 {[0, 1, 2, 3].map((i) => (
                   <View key={`sign-ext-${i}`} style={{ flex: 1, borderLeft: i === 0 ? 'none' : BORDER }} />
                 ))}
