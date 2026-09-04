@@ -78,8 +78,13 @@ export default function ParentPortalPage() {
   const [profile, setProfile] = useState<Record<string, string>>({});
   const [guardians, setGuardians] = useState<Guardian[]>([]);
   const [editRequests, setEditRequests] = useState<EditRequest[]>([]);
-  const [editKey, setEditKey] = useState('');
-  const [editValue, setEditValue] = useState('');
+  // 【本輪修改】反映事項「家長視角的學籍資料（個人資料）可以直接點選要修改的文字後
+  // 直接修改，最後再點選【送出申請】統一修正，不需要一項一項用下拉式選單調整」：
+  // 原本 editKey／editValue 是「下拉選單選一個欄位＋一個輸入框」一次只能改一項；
+  // 改成 fieldEdits 直接記錄「每個可編輯欄位（用 EditableOption.key 當 key）使用者
+  // 目前輸入的值」，欄位本身就地變成輸入框可以直接點了改，全部改完一次送出。
+  const [fieldEdits, setFieldEdits] = useState<Record<string, string>>({});
+  const [submittingEdits, setSubmittingEdits] = useState(false);
   // 歷年成績點選總分展開各科成績：用 enrollment_id 當 key 存已經抓過的科目成績，
   // 展開過一次之後再收合/展開不用重查；expandedId 記目前是哪一列被展開。
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -301,33 +306,42 @@ export default function ParentPortalPage() {
     : [];
 
   useEffect(() => {
-    if (editableOptions.length > 0 && !editableOptions.some((o) => o.key === editKey)) {
-      setEditKey(editableOptions[0].key);
-    }
+    // 換了選到的小孩（或監護人名單重新載入）時，欄位輸入內容重置成目前資料庫的值，
+    // 避免帶著上一個小孩、或送出成功前打到一半的殘留內容。
+    setFieldEdits({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [guardians, selected]);
+  }, [selected, guardians]);
 
-  async function handleSubmitEdit(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSubmitAllEdits() {
     if (!selected) return;
-    const option = editableOptions.find((o) => o.key === editKey);
-    if (!option) return;
-    const account = linkedStudents.find((s) => s.student_no === selected.student_no);
-    const { error } = await supabase.from('profile_edit_requests').insert({
-      student_no: selected.student_no,
-      field_name: option.fieldName,
-      target_table: option.targetTable,
-      guardian_id: option.guardianId,
-      old_value: option.currentValue,
-      new_value: editValue,
-      requested_by: account?.id,
+    const changed = editableOptions.filter((o) => {
+      const next = fieldEdits[o.key];
+      return next !== undefined && next !== o.currentValue;
     });
+    if (changed.length === 0) {
+      alert('沒有欄位被修改');
+      return;
+    }
+    const account = linkedStudents.find((s) => s.student_no === selected.student_no);
+    setSubmittingEdits(true);
+    const { error } = await supabase.from('profile_edit_requests').insert(
+      changed.map((o) => ({
+        student_no: selected.student_no,
+        field_name: o.fieldName,
+        target_table: o.targetTable,
+        guardian_id: o.guardianId,
+        old_value: o.currentValue,
+        new_value: fieldEdits[o.key],
+        requested_by: account?.id,
+      }))
+    );
+    setSubmittingEdits(false);
     if (error) {
       alert('送出失敗：' + error.message);
       return;
     }
-    alert('已送出，導師已收到通知，待核准後才會正式更新');
-    setEditValue('');
+    alert(`已送出 ${changed.length} 項修改，導師已收到通知，待核准後才會正式更新`);
+    setFieldEdits({});
     await loadEditRequests(selected.student_no);
   }
 
@@ -813,21 +827,50 @@ export default function ParentPortalPage() {
             </>
           )}
 
-          {/* 【本輪新增】反映事項「家長登入後，除【監護人資料】外，應該也要能看到小孩
-              學籍資料中填寫的所有個人資料」——顯示 STUDENT_PROFILE_FIELDS 涵蓋的所有
-              學籍個人資料欄位（不只地址/電話），學生本人跟家長登入都看得到；如有誤，
-              可到下面「修改基本資料」選對應欄位送出變更申請（學生本人受限於資料庫政策，
-              仍然只能送出地址/電話的申請，其餘欄位如需更正請洽導師）。 */}
+          {/* 反映事項「家長登入後，除【監護人資料】外，應該也要能看到小孩學籍資料中
+              填寫的所有個人資料」——顯示 STUDENT_PROFILE_FIELDS 涵蓋的所有學籍個人
+              資料欄位（不只地址/電話），學生本人跟家長登入都看得到。
+              【本輪修改】反映事項「可以直接點選要修改的文字後直接修改，最後再點選
+              【送出申請】統一修正，不需要一項一項用下拉式選單調整」：值的部分改成
+              就地輸入框（有對應 editableOptions 才能編輯——學生本人受限於資料庫政策
+              仍然只能改地址/電話，其餘欄位顯示唯讀文字，如需更正請洽導師），點進去
+              就能直接修改，改過的欄位會標黃提示，全部改完到最下面按一次「送出申請」
+              一起送出。 */}
           <section style={{ marginTop: 32, paddingTop: 24, borderTop: '1px solid #e5e5e0' }}>
             <h2 style={{ fontSize: 14, marginBottom: 8 }}>學籍資料（個人資料）</h2>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <tbody>
-                {STUDENT_PROFILE_FIELDS.map((f) => (
-                  <tr key={f.field} style={{ borderTop: '1px solid #eee' }}>
-                    <td style={{ padding: 6, width: '35%', color: '#666' }}>{f.label}</td>
-                    <td style={{ padding: 6 }}>{profile[f.field] || '—'}</td>
-                  </tr>
-                ))}
+                {STUDENT_PROFILE_FIELDS.map((f) => {
+                  const option = editableOptions.find((o) => o.targetTable === 'students' && o.fieldName === f.field);
+                  return (
+                    <tr key={f.field} style={{ borderTop: '1px solid #eee' }}>
+                      <td style={{ padding: 6, width: '35%', color: '#666' }}>{f.label}</td>
+                      <td style={{ padding: 6 }}>
+                        {option ? (
+                          <input
+                            value={fieldEdits[option.key] ?? option.currentValue}
+                            onChange={(e) => setFieldEdits((prev) => ({ ...prev, [option.key]: e.target.value }))}
+                            placeholder="（留空）"
+                            style={{
+                              width: '100%',
+                              padding: '4px 6px',
+                              border: '1px solid transparent',
+                              borderBottom: '1px solid #ccc',
+                              background:
+                                fieldEdits[option.key] !== undefined && fieldEdits[option.key] !== option.currentValue
+                                  ? '#fff7d6'
+                                  : 'transparent',
+                              fontSize: 13,
+                              fontFamily: 'inherit',
+                            }}
+                          />
+                        ) : (
+                          profile[f.field] || '—'
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </section>
@@ -844,13 +887,59 @@ export default function ParentPortalPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {guardians.map((g) => (
-                    <tr key={g.id} style={{ borderTop: '1px solid #eee' }}>
-                      <td style={{ padding: 6 }}>{g.relation}</td>
-                      <td style={{ padding: 6 }}>{g.name ?? '—'}</td>
-                      <td style={{ padding: 6 }}>{g.phone ?? '—'}</td>
-                    </tr>
-                  ))}
+                  {guardians.map((g) => {
+                    const nameOption = editableOptions.find((o) => o.targetTable === 'guardians' && o.guardianId === g.id && o.fieldName === 'name');
+                    const phoneOption = editableOptions.find((o) => o.targetTable === 'guardians' && o.guardianId === g.id && o.fieldName === 'phone');
+                    return (
+                      <tr key={g.id} style={{ borderTop: '1px solid #eee' }}>
+                        <td style={{ padding: 6 }}>{g.relation}</td>
+                        <td style={{ padding: 6 }}>
+                          {nameOption ? (
+                            <input
+                              value={fieldEdits[nameOption.key] ?? nameOption.currentValue}
+                              onChange={(e) => setFieldEdits((prev) => ({ ...prev, [nameOption.key]: e.target.value }))}
+                              style={{
+                                width: '100%',
+                                padding: '4px 6px',
+                                border: '1px solid transparent',
+                                borderBottom: '1px solid #ccc',
+                                background:
+                                  fieldEdits[nameOption.key] !== undefined && fieldEdits[nameOption.key] !== nameOption.currentValue
+                                    ? '#fff7d6'
+                                    : 'transparent',
+                                fontSize: 13,
+                                fontFamily: 'inherit',
+                              }}
+                            />
+                          ) : (
+                            g.name ?? '—'
+                          )}
+                        </td>
+                        <td style={{ padding: 6 }}>
+                          {phoneOption ? (
+                            <input
+                              value={fieldEdits[phoneOption.key] ?? phoneOption.currentValue}
+                              onChange={(e) => setFieldEdits((prev) => ({ ...prev, [phoneOption.key]: e.target.value }))}
+                              style={{
+                                width: '100%',
+                                padding: '4px 6px',
+                                border: '1px solid transparent',
+                                borderBottom: '1px solid #ccc',
+                                background:
+                                  fieldEdits[phoneOption.key] !== undefined && fieldEdits[phoneOption.key] !== phoneOption.currentValue
+                                    ? '#fff7d6'
+                                    : 'transparent',
+                                fontSize: 13,
+                                fontFamily: 'inherit',
+                              }}
+                            />
+                          ) : (
+                            g.phone ?? '—'
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             ) : (
@@ -858,31 +947,21 @@ export default function ParentPortalPage() {
             )}
           </section>
 
-          <section style={{ marginTop: 24 }}>
-            <h2 style={{ fontSize: 14, marginBottom: 8 }}>修改基本資料</h2>
-            <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
-              送出後導師會立即收到通知，需經導師核准才會正式更新，核准前畫面上顯示的仍是原本的資料，申請進度可以到上面的「通知」分頁查看。
-            </p>
-            <form onSubmit={handleSubmitEdit} style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-              <select value={editKey} onChange={(e) => setEditKey(e.target.value)} style={{ padding: 8 }}>
-                {editableOptions.map((o) => (
-                  <option key={o.key} value={o.key}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              <input
-                placeholder={`新的${editableOptions.find((o) => o.key === editKey)?.label ?? ''}`}
-                value={editValue}
-                onChange={(e) => setEditValue(e.target.value)}
-                style={{ padding: 8, flex: 1, minWidth: 160 }}
-                required
-              />
-              <button type="submit" style={{ padding: '8px 16px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6 }}>
-                送出申請
+          {editableOptions.length > 0 && (
+            <section style={{ marginTop: 24 }}>
+              <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
+                直接點選上面標黃色的欄位可以修改，改完後按下方「送出申請」一起送出；送出後導師會立即收到通知，需經導師核准才會正式更新，核准前畫面上顯示的仍是原本的資料，申請進度可以到上面的「通知」分頁查看。
+              </p>
+              <button
+                type="button"
+                onClick={handleSubmitAllEdits}
+                disabled={submittingEdits}
+                style={{ padding: '8px 20px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6 }}
+              >
+                {submittingEdits ? '送出中…' : '送出申請'}
               </button>
-            </form>
-          </section>
+            </section>
+          )}
         </>
       )}
     </main>
