@@ -292,27 +292,24 @@ function buildStyles(config: ReportCardStyleConfig) {
       rightCol: { flex: RIGHT_COL_FLEX },
 
       pageInner: { flexDirection: 'row', flex: 1 },
-      // 【2026-09-03 修正】反映事項「最右側的日期字體請左轉90度並放大分散對齊」：
-      // 原本用單一個 Text（寬340、字級只有 base*1.04）整串轉90度，結果那一串文字
-      // 只集中在整個直式色帶的中段一小塊，字也偏小。現在：
-      // 1. dateStrip 加寬（26→36），讓放大後的字轉90度不會被裁掉。
-      // 2. dateStripRotated 改成「先在轉90度以前排成一列（寬度＝色帶實際可用高度
-      //    DATE_STRIP_ROTATED_LENGTH）、每個字用 justifyContent:'space-between'
-      //    平均撐開」，轉90度以後才會是「文字放大、而且整條色帶從上到下平均分散
-      //    對齊」，不是只集中一小段。
-      dateStrip: { width: 36, borderLeft: BORDER, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-      dateStripRotated: {
-        width: DATE_STRIP_ROTATED_LENGTH,
-        flexDirection: 'row',
+      // 【2026-09-04 修正】反映事項「日期文字要從上到下書寫,用直書的方式(現在為
+      // 橫書)」：前兩輪都是「先橫著排一列文字，再靠 CSS transform:rotate(90deg)/
+      // rotate(-90deg) 整組轉90度」做出直書效果，但 react-pdf 對 transform 的支援
+      // 在不同版本/情境下不夠穩定，且轉的方向（順時針/逆時針）容易跟預期相反、
+      // 反覆調整還是抓不準，等於一直在猜一個不可靠的機制。這裡整個改用最直接、
+      // 不依賴 transform 的做法：每個字各自是獨立的 <Text>，直接用
+      // flexDirection:'column' 由上到下堆疊（每個字本身就是正常方向，不用轉），
+      // justifyContent:'space-between' 讓整串字沿色帶從上到下平均分散對齊，
+      // dateStrip 高度已經是 pageInner 的 flex:1（跟 outer 同高，見下面
+      // ReportCardDocument 主體），不需要再另外估算/寫死可用高度。這樣不管
+      // react-pdf 版本、transform 支援與否，永遠都是「逐字、由上到下、直書」，
+      // 不會再有橫書或方向猜錯的問題。
+      dateStrip: { width: 36, borderLeft: BORDER, alignItems: 'center', paddingVertical: 24 },
+      dateStripVertical: {
+        flex: 1,
+        flexDirection: 'column',
         justifyContent: 'space-between',
         alignItems: 'center',
-        // 【2026-09-03 修正・二】反映事項「【公元二〇二六年九月三日】逐字向左旋轉
-        // 90度,變成直書」：user 兩次都明確指定「向左」，從 rotate(90deg)（順時針）
-        // 改成 rotate(-90deg)（逆時針／向左）。逐字＝每個字各自的字元都會跟著整個
-        // 容器一起轉90度（每個字都是獨立的 <Text>，見下面 dateStripChar 的用法），
-        // 變成直書＝仍然用 flexDirection:'row'+justifyContent:'space-between' 讓
-        // 轉90度以後文字沿著色帶由上到下分散對齊。
-        transform: 'rotate(-90deg)',
       },
       dateStripChar: { fontSize: base * 1.75, fontWeight: 700 },
 
@@ -354,7 +351,13 @@ function buildStyles(config: ReportCardStyleConfig) {
       // 一個沒有分隔線的長方格；這次改回來，把 borderBottom 加回來，簽章格重新變回
       // 「上面是標籤列、下面是簽名留白列」兩個有分隔線的列，延伸格那邊同步補回
       // borderTop（見下面 sign-ext 那個 View），兩條線加起來剛好是同一條分隔線。
-      signBox: { flex: 1, borderLeft: BORDER, borderTop: BORDER, borderBottom: BORDER, minHeight: 50, padding: 5, justifyContent: 'flex-start' },
+      // 【2026-09-04 修正】反映事項「導師/訓導/教務/校長簽章垂直水平置中,請把各自
+      // 下方兩列合併成一列」：拿掉 signBox 的 borderBottom（下面延伸格同步拿掉
+      // borderTop，見 ReportCardDocument 主體），簽章格重新合併回一個沒有分隔線的
+      // 長方格；justifyContent 從上一輪的 flex-start（label貼頂）改回 center，
+      // 搭配 alignItems:'center'（signLabel 本身 textAlign 已經是 center，這裡補上
+      // 容器的 alignItems，讓文字水平也置中，不是貼左），達成「垂直水平置中」。
+      signBox: { flex: 1, borderLeft: BORDER, borderTop: BORDER, minHeight: 50, padding: 5, justifyContent: 'center', alignItems: 'center' },
       signLabel: { fontSize: base, fontWeight: 700, textAlign: 'center' },
 
       // 【2026-08-23 修正】原本 minHeight:70，評語文字一長就會把框「撐高」，進而把
@@ -493,11 +496,12 @@ const REMARK_WIDTH_RATIO = LEFT_COL_FLEX / (LEFT_COL_FLEX + RIGHT_COL_FLEX);
 // 那一列下面延伸的分隔線（AttendanceDisciplinePanel 裡的簽章延伸列）也要對到
 // 同一個高度，兩處共用這個常數才不會各自寫死、之後改高度時漏改其中一處。
 const REMARK_BOX_HEIGHT = 66;
-// 最右側直式日期色帶：文字轉90度前的「列寬」，決定轉90度後文字實際撐開的高度。
-// 頁面是 A4 橫向（595.28pt 高）、styles.page 的 padding 是 12（見 buildStyles），
-// 可用高度約 595.28-12*2≈571；這裡抓 520，讓文字幾乎撐滿整條色帶又留一點邊界，
-// 不會頂到頁面上下邊。
-const DATE_STRIP_ROTATED_LENGTH = 520;
+// 封面頁中折頁「操行成績標準／出缺席加分及扣分／學業成績計算方式／特殊表現計算
+// 方式」這四段共用的標題字級／內文字級／標題與內文間距，確保四段完全一致
+// （反映事項「這四段上下置中,字體大小 上下間距要一致」）。
+const POLICY_SECTION_HEADER_FONT_SIZE = 12;
+const POLICY_SECTION_BODY_FONT_SIZE = 10.5;
+const POLICY_SECTION_SPACING = 4;
 function fitRemarkFontSize(text: string): number {
   const len = text.length;
   if (len <= 60 * REMARK_WIDTH_RATIO) return 11;
@@ -998,27 +1002,51 @@ function AttendanceDisciplinePanel({
             或字級/欄寬設定一變動，一樣會出現跟左表對不齊的情形；這裡統一加
             minHeight:0，確保永遠精準吃到 flex 比例分配到的高度，不受內容自然
             高度影響。 */}
+        {/* 【2026-09-04 修正】反映事項「全班人數、全班名次右邊的寫上學期、下學期的
+            兩列都要分割為兩欄」：原本「上學期 32」「下學期 32」是一個 Text 塞完
+            標籤+數值，這裡拆成 label／value 兩個直欄（中間補 borderLeft 垂直線），
+            跟出席記錄/懲獎記錄表格「項目｜上學期｜下學期｜合計」同一種分欄方式。 */}
         <View style={{ flex: layout.classSizeFlex, flexDirection: 'row', minHeight: 0 }}>
           <View style={[styles.sectionTitle, styles.attnLabelWideCol, { minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.classSize}</Text>
           </View>
           <View style={[styles.attnValGroupCol, { borderLeft: BORDER, minHeight: 0 }]}>
-            <View style={{ borderBottom: BORDER, padding: 2, flex: 1, minHeight: 0, justifyContent: 'center' }}>
-              <Text style={{ fontSize: 7 }}>上學期 {spring?.classSize ?? ''}</Text>
+            <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0 }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center' }}>
+                <Text style={{ fontSize: 7 }}>上學期</Text>
+              </View>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', borderLeft: BORDER }}>
+                <Text style={{ fontSize: 7 }}>{spring?.classSize ?? ''}</Text>
+              </View>
             </View>
-            <View style={{ padding: 2, flex: 1, minHeight: 0, justifyContent: 'center' }}>
-              <Text style={{ fontSize: 7 }}>下學期 {fall?.classSize ?? ''}</Text>
+            <View style={{ flexDirection: 'row', flex: 1, minHeight: 0 }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center' }}>
+                <Text style={{ fontSize: 7 }}>下學期</Text>
+              </View>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', borderLeft: BORDER }}>
+                <Text style={{ fontSize: 7 }}>{fall?.classSize ?? ''}</Text>
+              </View>
             </View>
           </View>
           <View style={[styles.sectionTitle, styles.attnLabelWideCol, { borderLeft: BORDER, minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.classRank}</Text>
           </View>
           <View style={[styles.attnValGroupCol, { borderLeft: BORDER, minHeight: 0 }]}>
-            <View style={{ borderBottom: BORDER, padding: 2, flex: 1, minHeight: 0, justifyContent: 'center' }}>
-              <Text style={{ fontSize: 7 }}>上學期 {spring?.classRank ?? ''}</Text>
+            <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0 }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center' }}>
+                <Text style={{ fontSize: 7 }}>上學期</Text>
+              </View>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', borderLeft: BORDER }}>
+                <Text style={{ fontSize: 7 }}>{spring?.classRank ?? ''}</Text>
+              </View>
             </View>
-            <View style={{ padding: 2, flex: 1, minHeight: 0, justifyContent: 'center' }}>
-              <Text style={{ fontSize: 7 }}>下學期 {fall?.classRank ?? ''}</Text>
+            <View style={{ flexDirection: 'row', flex: 1, minHeight: 0 }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center' }}>
+                <Text style={{ fontSize: 7 }}>下學期</Text>
+              </View>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', borderLeft: BORDER }}>
+                <Text style={{ fontSize: 7 }}>{fall?.classRank ?? ''}</Text>
+              </View>
             </View>
           </View>
         </View>
@@ -1171,11 +1199,26 @@ function CoverPage({
           </View>
         </View>
 
-        {/* 中折頁：操行成績標準 → 出缺席加扣分 → 學業成績計算方式／特殊表現計算方式 */}
+        {/* 中折頁：操行成績標準 → 出缺席加扣分 → 學業成績計算方式 → 特殊表現計算方式。
+            【2026-09-04 修正】反映事項「這四段上下置中,字體大小 上下間距要一致」：
+            1. 原本每段外層只有 alignItems:'center'（水平置中），沒有
+               justifyContent:'center'，內容都貼在該段配置高度的頂端，不是「上下
+               （垂直）置中」——四段統一補上 justifyContent:'center'。
+            2. 原本「學業成績計算方式」跟「特殊表現計算方式」擠在同一個 36% 高的
+               View 裡（共用一個垂直置中範圍，兩段合在一起置中，不是各自置中），
+               這裡拆成兩個獨立的 18% 區塊，四段各自佔一塊、各自垂直置中，呼應
+               「這四段」的段落數。
+            3. 標題字級原本 13／11.5／10.5／10.5 不一致，內文字級原本
+               10.5／11.5／10.5／10.5 也不一致，標題跟內文下面的間距
+               (marginBottom) 4／4／2／2 同樣不一致——四段統一改用
+               POLICY_SECTION_HEADER_FONT_SIZE／POLICY_SECTION_BODY_FONT_SIZE／
+               POLICY_SECTION_SPACING 三個共用常數，確保四段字級、間距完全一致。 */}
         <View style={{ flex: 1, paddingHorizontal: 10 }}>
-          <View style={{ height: '18%', alignItems: 'center' }}>
-            <Text style={{ fontSize: 13, fontWeight: 700, marginBottom: 4, textAlign: 'center' }}>操行成績標準：</Text>
-            <Text style={{ fontSize: 10.5, lineHeight: 1.6, textAlign: 'center' }}>
+          <View style={{ height: '25%', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ fontSize: POLICY_SECTION_HEADER_FONT_SIZE, fontWeight: 700, marginBottom: POLICY_SECTION_SPACING, textAlign: 'center' }}>
+              操行成績標準：
+            </Text>
+            <Text style={{ fontSize: POLICY_SECTION_BODY_FONT_SIZE, lineHeight: 1.6, textAlign: 'center' }}>
               90分以上至100分者為優等{'\n'}
               80分以上不滿90分者為甲等{'\n'}
               70分以上不滿80分者為乙等{'\n'}
@@ -1183,32 +1226,38 @@ function CoverPage({
               不滿60分者為丁等（不及格）
             </Text>
           </View>
-          <View style={{ height: '46%', alignItems: 'center' }}>
-            <Text style={{ fontSize: 11.5, marginBottom: 4, textAlign: 'center' }}>
+          <View style={{ height: '39%', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ fontSize: POLICY_SECTION_HEADER_FONT_SIZE, fontWeight: 700, marginBottom: POLICY_SECTION_SPACING, textAlign: 'center' }}>
               出缺席加分及扣分{p.attendanceWeightPercent !== null ? `（佔學業成績比重 ${fmtPct(p.attendanceWeightPercent)}）` : ''}：
             </Text>
-            <Text style={{ fontSize: 11.5, lineHeight: 1.9, textAlign: 'center' }}>
+            <Text style={{ fontSize: POLICY_SECTION_BODY_FONT_SIZE, lineHeight: 1.6, textAlign: 'center' }}>
               {p.attendance.map((a) => `${a.name}\u3000${fmtScore(a.rawScore)} 分\u3000${fmtImpact(a.percentOfTotal)}`).join('\n')}
             </Text>
           </View>
-          <View style={{ height: '36%', alignItems: 'center' }}>
-            <Text style={{ fontSize: 10.5, marginBottom: 2, textAlign: 'center' }}>學業成績計算方式：</Text>
-            <Text style={{ fontSize: 10.5, lineHeight: 1.5, marginBottom: 5, textAlign: 'center' }}>
+          <View style={{ height: '18%', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ fontSize: POLICY_SECTION_HEADER_FONT_SIZE, fontWeight: 700, marginBottom: POLICY_SECTION_SPACING, textAlign: 'center' }}>
+              學業成績計算方式：
+            </Text>
+            <Text style={{ fontSize: POLICY_SECTION_BODY_FONT_SIZE, lineHeight: 1.6, textAlign: 'center' }}>
               期中考 {fmtPct(p.academicWeights.midterm)}{'\n'}
               期末考 {fmtPct(p.academicWeights.final)}{'\n'}
               平時分 {fmtPct(p.academicWeights.daily)}
             </Text>
-            <Text style={{ fontSize: 10.5, marginBottom: 2, textAlign: 'center' }}>特殊表現計算方式：</Text>
+          </View>
+          <View style={{ height: '18%', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ fontSize: POLICY_SECTION_HEADER_FONT_SIZE, fontWeight: 700, marginBottom: POLICY_SECTION_SPACING, textAlign: 'center' }}>
+              特殊表現計算方式：
+            </Text>
             <View style={{ flexDirection: 'row', width: '100%' }}>
               <View style={{ flex: 1, alignItems: 'center' }}>
-                <Text style={{ fontSize: 10.5, lineHeight: 1.5, textAlign: 'center' }}>
+                <Text style={{ fontSize: POLICY_SECTION_BODY_FONT_SIZE, lineHeight: 1.6, textAlign: 'center' }}>
                   嘉獎 {p.conduct.merit1 !== null ? `+${p.conduct.merit1}` : '－'} 分{'\n'}
                   小功 {p.conduct.merit3 !== null ? `+${p.conduct.merit3}` : '－'} 分{'\n'}
                   大功 {p.conduct.merit9 !== null ? `+${p.conduct.merit9}` : '－'} 分
                 </Text>
               </View>
               <View style={{ flex: 1, alignItems: 'center' }}>
-                <Text style={{ fontSize: 10.5, lineHeight: 1.5, textAlign: 'center' }}>
+                <Text style={{ fontSize: POLICY_SECTION_BODY_FONT_SIZE, lineHeight: 1.6, textAlign: 'center' }}>
                   警告 {p.conduct.demerit1 ?? '－'} 分{'\n'}
                   小過 {p.conduct.demerit3 ?? '－'} 分{'\n'}
                   大過 {p.conduct.demerit9 ?? '－'} 分
@@ -1326,18 +1375,16 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
                 同寬）並排成一整列，兩者共用 REMARK_BOX_HEIGHT 高度、底部對齊，讓
                 「導師/訓導/教務/校長簽章」中間的垂直分隔線可以整條往下貫穿到底
                 （簽章格所在那一列的說明見上面 AttendanceDisciplinePanel）。
-                【2026-09-03 修正・二】反映事項「導師/訓導/教務/校長簽章也向下擴大
-                成兩列」：上一輪把這裡跟上面簽章標籤格之間的橫線拿掉、合併成一個
-                長方格；這次改回來，這一列補上 borderTop（跟 signBox 補回的
-                borderBottom 是同一條線，兩層邊框疊在一起沒關係，PDF 畫出來還是
-                一條線），簽章區重新變回「標籤列＋簽名留白列」上下兩列、中間有
-                分隔線的樣子，垂直分隔線一樣整條貫穿兩列到底。 */}
+                【2026-09-04 修正】反映事項「導師/訓導/教務/校長簽章垂直水平置中,
+                請把各自下方兩列合併成一列」：這一列跟上面簽章標籤格之間的橫線
+                再次拿掉（呼應 styles.signBox 的說明），兩塊合併回一個沒有橫線
+                分隔的長方格，垂直分隔線一樣整條貫穿到底。 */}
             <View style={{ flexDirection: 'row', height: REMARK_BOX_HEIGHT }}>
               <View style={[styles.remarkBox, { borderTop: BORDER }]}>
                 <Text style={styles.remarkLabel}>{labels.remark}</Text>
                 <Text style={[styles.remarkText, { fontSize: remarkFontSize, lineHeight: 1.4 }]}>{remarkDisplay}</Text>
               </View>
-              <View style={{ flex: RIGHT_COL_FLEX, flexDirection: 'row', borderTop: BORDER, borderBottom: BORDER }}>
+              <View style={{ flex: RIGHT_COL_FLEX, flexDirection: 'row', borderBottom: BORDER }}>
                 {[0, 1, 2, 3].map((i) => (
                   <View key={`sign-ext-${i}`} style={{ flex: 1, borderLeft: i === 0 ? 'none' : BORDER }} />
                 ))}
@@ -1346,10 +1393,10 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
           </View>
 
           {/* 列印日期：最右邊直式，比照樣本用中文數字。
-              【2026-09-03 修正】改成逐字拆開排版＋轉90度＋分散對齊，見上面
-              styles.dateStripRotated／dateStripChar 的說明。 */}
+              【2026-09-04 修正】改成不依賴 transform 的逐字直向堆疊，見上面
+              styles.dateStripVertical／dateStripChar 的說明。 */}
           <View style={styles.dateStrip}>
-            <View style={styles.dateStripRotated}>
+            <View style={styles.dateStripVertical}>
               {formatPrintDate(data.printedAt)
                 .split('')
                 .map((ch, i) => (
