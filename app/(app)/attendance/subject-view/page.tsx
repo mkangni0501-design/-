@@ -70,6 +70,16 @@ export default function SubjectAttendanceViewPage() {
             periodNos: [],
           });
         }
+        // 【本輪修正】反映事項「任課教師無法看到自己授課的班級學生出缺席狀況，
+        // 出現 invalid input syntax for type integer: "null""：根因是
+        // sql/14school_timetable_split.sql 把 class_schedule.period_no 放寬成可以是
+        // null（「任課教師設定」頁只設定誰教哪班哪科、還沒排入實際星期/節次時，
+        // period_no 就會是 null），這裡原本沒有濾掉，null 混進 periodNos 之後，
+        // 下面 .in('period_no', opt.periodNos) 就會把 null 當成整數值送進查詢，
+        // 觸發這個 PostgREST 錯誤。period_no 是 null 代表這筆任課紀錄根本還沒有
+        // 對應到任何實際節次，本來就不可能有出缺勤資料（attendance.period_no 是
+        // not null），直接跳過、不算進 periodNos 即可。
+        if (r.period_no == null) return;
         const entry = grouped.get(key)!;
         if (!entry.periodNos.includes(r.period_no)) entry.periodNos.push(r.period_no);
       });
