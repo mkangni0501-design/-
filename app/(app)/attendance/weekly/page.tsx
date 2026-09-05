@@ -33,6 +33,61 @@ const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公�
 // 備援值」），實際判斷改用下面從資料庫讀回來、可隨後台設定變動的 backdateGraceDays state。
 const DEFAULT_BACKDATE_GRACE_DAYS = 7;
 
+// 【本輪修正】反映事項「批次上傳全校出缺席表功能有異常，上傳了10個小時還停在
+// 處理中」——根因：handleUploadFile() 的管理員分支（一次處理整個活頁簿、一班一
+// 分頁）原本是「每一個學生 × 每一個日期 × 每一節」都各自 `await supabase.from
+// ('attendance').upsert(...)` 一次，也就是一格一次網路來回。用實際反映用的
+// 「成績出缺輸入表_全校.xlsx」試算：34個班級分頁、每班約40~55位學生、每班多達
+// 上百個日期欄位 × 5節，換算下來全校一次上傳要發出幾十萬次「各自等待」的請求，
+// 逐一序列執行，難怪會卡上好幾個小時（其實不是卡死，是照原本寫法本來就要跑這麼
+// 久，瀏覽器分頁只要背景被瀏覽器降頻、或期間網路稍有不穩，等待時間還會更久）。
+// 非管理員（單班上傳）雖然規模小很多，但同樣的寫法一學期資料量大時也會慢，一併
+// 修正。
+//
+// 修法：不要「解析一格、馬上寫入一格」，改成「同一個班級（或同一次單班上傳）解析
+// 完成後，先在記憶體裡收集好全部要寫入的紀錄，再依 CHUNK_SIZE 分批、一次
+// upsert 一批」——跟 lib/backupRestore.ts 的 restoreBackup() 對「大量資料分批
+// 寫入」用的是同一個做法。這樣網路來回次數從「儲存格數量」降到「儲存格數量 /
+// CHUNK_SIZE」，同樣的資料量會快上幾百倍。
+const ATTENDANCE_UPLOAD_CHUNK_SIZE = 500;
+
+type PendingAttendanceRecord = {
+  student_no: string;
+  record_date: string;
+  period_no: number;
+  status: string;
+  // 只用來組錯誤訊息，不會送進資料庫
+  _label: string;
+};
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+// 把收集好的一批紀錄分批 upsert，回傳成功筆數與錯誤訊息（分批失敗時，整批一起
+// 記一筆錯誤訊息，不逐格細分——批次寫入本來就是「一批要嘛一起成功、要嘛一起被
+// Postgres 判定失敗」，跟原本逐格各自回報錯誤的精細度不同，但換來的是原本這個
+// 功能「根本跑不完」的問題被解決，是值得的取捨）。
+async function upsertAttendanceRecordsInChunks(
+  records: PendingAttendanceRecord[],
+  sheetLabel: string
+): Promise<{ successCount: number; errors: string[] }> {
+  let successCount = 0;
+  const errors: string[] = [];
+  for (const chunk of chunkArray(records, ATTENDANCE_UPLOAD_CHUNK_SIZE)) {
+    const payload = chunk.map(({ student_no, record_date, period_no, status }) => ({ student_no, record_date, period_no, status }));
+    const { error } = await supabase.from('attendance').upsert(payload, { onConflict: 'student_no,record_date,period_no' });
+    if (error) {
+      errors.push(`${sheetLabel}：第 ${chunk[0]._label} ~ ${chunk[chunk.length - 1]._label} 這批（共${chunk.length}筆）寫入失敗：${error.message}`);
+    } else {
+      successCount += chunk.length;
+    }
+  }
+  return { successCount, errors };
+}
+
 type StudentRow = { student_no: string; seat_no: number; name: string };
 type ClassOption = { id: string; label: string; grade_level: string };
 
@@ -712,6 +767,9 @@ export default function WeeklyAttendancePage() {
           allErrors.push(`分頁「${sheetName}」讀不到任何學生資料，已略過這個分頁`);
           continue;
         }
+        // 先收集這個班級分頁要寫入的全部紀錄，解析完再一次分批 upsert（見上方
+        // ATTENDANCE_UPLOAD_CHUNK_SIZE 的說明），不要邊解析邊一格一格個別寫入。
+        const pending: PendingAttendanceRecord[] = [];
         for (const s of studentsFromFile) {
           const row = rowsRaw[s.rowIndex];
           for (const dc of dateColumns) {
@@ -726,14 +784,19 @@ export default function WeeklyAttendancePage() {
               const status = code == null || code === '' ? '出席' : ATTENDANCE_CODE_TO_STATUS[Number(code)];
               if (!status) continue;
               const dateStr = toDateStr(dc.date);
-              const { error } = await supabase
-                .from('attendance')
-                .upsert({ student_no: s.studentNo, record_date: dateStr, period_no: period, status }, { onConflict: 'student_no,record_date,period_no' });
-              if (error) allErrors.push(`${sheetName} ${s.name} ${dateStr} 第${period}節：${error.message}`);
-              else totalSuccess++;
+              pending.push({
+                student_no: s.studentNo,
+                record_date: dateStr,
+                period_no: period,
+                status,
+                _label: `${s.name} ${dateStr} 第${period}節`,
+              });
             }
           }
         }
+        const { successCount, errors } = await upsertAttendanceRecordsInChunks(pending, sheetName);
+        totalSuccess += successCount;
+        allErrors.push(...errors);
       }
       setReloadTick((t) => t + 1);
       return { successCount: totalSuccess, errors: allErrors };
@@ -760,9 +823,6 @@ export default function WeeklyAttendancePage() {
     const studentsFromFile = parseStudentRows(rowsRaw);
     const dateColumns = await findAttendanceDateColumns(rowsRaw, header.academicYear);
 
-    let successCount = 0;
-    const errors: string[] = [];
-
     // 明確的錯誤訊息，避免像過去那樣「讀不到日期欄位」卻只顯示「成功匯入 0 筆、無錯誤」，
     // 讓使用者誤以為是系統壞掉、其實是檔案格式對不上。
     if (dateColumns.length === 0) {
@@ -775,6 +835,8 @@ export default function WeeklyAttendancePage() {
       return { successCount: 0, errors: ['讀不到任何學生資料（從第8列起，學號欄空白視為結束）'] };
     }
 
+    // 理由同管理員分支：先收集完再分批 upsert，不要一格一格各自等待網路來回。
+    const pendingSingleClass: PendingAttendanceRecord[] = [];
     for (const s of studentsFromFile) {
       const row = rowsRaw[s.rowIndex];
       for (const dc of dateColumns) {
@@ -785,17 +847,17 @@ export default function WeeklyAttendancePage() {
           const status = ATTENDANCE_CODE_TO_STATUS[Number(code)];
           if (!status) continue;
           const dateStr = toDateStr(dc.date);
-          const { error } = await supabase
-            .from('attendance')
-            .upsert(
-              { student_no: s.studentNo, record_date: dateStr, period_no: period, status },
-              { onConflict: 'student_no,record_date,period_no' }
-            );
-          if (error) errors.push(`${s.name} ${dateStr} 第${period}節：${error.message}`);
-          else successCount++;
+          pendingSingleClass.push({
+            student_no: s.studentNo,
+            record_date: dateStr,
+            period_no: period,
+            status,
+            _label: `${s.name} ${dateStr} 第${period}節`,
+          });
         }
       }
     }
+    const { successCount, errors } = await upsertAttendanceRecordsInChunks(pendingSingleClass, `${header.gradeLevel}${header.className}`);
     if (classId === classRow.id) {
       setReloadTick((t) => t + 1);
     }
