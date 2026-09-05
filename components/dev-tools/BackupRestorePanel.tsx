@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase, getCurrentAppUser } from '@/lib/supabaseClient';
 import ErrorBanner from '@/components/ErrorBanner';
 
@@ -8,7 +8,7 @@ type BackupRow = {
   id: string;
   created_at: string;
   created_by: string | null;
-  kind: '自動' | '手動';
+  kind: '自動' | '手動' | '上傳';
   table_counts: Record<string, number | null>;
   restored_at: string | null;
   restored_by: string | null;
@@ -23,6 +23,8 @@ export default function BackupRestorePanel() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [uploadRestoring, setUploadRestoring] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function load() {
     setLoading(true);
@@ -124,6 +126,54 @@ export default function BackupRestorePanel() {
     }
   }
 
+  // 「上傳檔案還原」：給新系統／新的 Supabase 專案沒有任何 backups 紀錄可以選、
+  // 但手上還留著先前用「下載」按鈕匯出的備份 JSON 檔時使用。檔案直接上傳到
+  // Storage（不經過我們自己的 API），是因為備份檔很容易超過 Vercel 單次請求
+  // 4.5MB 的本文大小上限，直接塞進 API 請求會被擋掉；還原 API 再從 Storage
+  // 把檔案讀出來處理。
+  async function handleUploadRestoreFile(file: File) {
+    const confirmText = prompt(
+      `即將用檔案「${file.name}」的內容「還原」資料庫。\n這會覆蓋掉目前所有校務資料（學生、班級、成績、出缺勤...等），且無法復原！\n如果這是要搬到全新的 Supabase 專案，部分關聯到帳號本身的欄位（例如各種「建立者」「異動者」）可能因為帳號 id 對不上而還原失敗，屬於已知限制。\n\n如果確定要繼續，請輸入「確定還原」四個字：`
+    );
+    if (confirmText !== '確定還原') {
+      if (confirmText !== null) alert('輸入不符，已取消');
+      return;
+    }
+    const token = await getToken();
+    if (!token) {
+      alert('請重新登入');
+      return;
+    }
+    setUploadRestoring(true);
+    try {
+      const path = `${me?.id ?? 'unknown'}/${Date.now()}-${file.name}`;
+      const { error: uploadErr } = await supabase.storage.from('backup-uploads').upload(path, file);
+      if (uploadErr) {
+        alert('上傳檔案失敗：' + uploadErr.message);
+        return;
+      }
+      const res = await fetch('/api/admin/backup/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ uploadPath: path }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert('還原失敗：' + (body.error ?? '未知錯誤'));
+        return;
+      }
+      if (body.errors?.length > 0) {
+        alert('還原完成，但部分資料表有問題：\n' + body.errors.join('\n'));
+      } else {
+        alert(`還原完成。已還原 ${body.restoredTables.length} 個資料表。`);
+      }
+      load();
+    } finally {
+      setUploadRestoring(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
   const isSystemAdminS = me?.role === 'system_admin_s';
   const isAdmin = me && ['system_admin_s', 'admin_a', 'admin_b'].includes(me.role);
 
@@ -139,16 +189,41 @@ export default function BackupRestorePanel() {
         備份不含登入帳號本身（帳號請到「帳號管理」頁處理），避免還原後造成無法登入的問題。
       </p>
       <p style={{ fontSize: 12, color: '#999', marginBottom: 16 }}>
-        {isSystemAdminS ? '您是系統管理員S，可以執行「還原」。' : '「還原」功能僅系統管理員S本人可以執行；您可以查看與下載備份。'}
+        {isSystemAdminS
+          ? '您是系統管理員S，可以執行「還原」。如果這個系統本身還沒有任何備份紀錄（例如剛換到新的 Supabase 專案），可以用「上傳備份檔案還原」載入先前下載的備份 JSON 檔。'
+          : '「還原」功能僅系統管理員S本人可以執行；您可以查看與下載備份。'}
       </p>
 
       <button
         onClick={handleRunBackup}
         disabled={running}
-        style={{ padding: '8px 16px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6, fontSize: 13, marginBottom: 20 }}
+        style={{ padding: '8px 16px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6, fontSize: 13, marginBottom: 20, marginRight: 8 }}
       >
         {running ? '備份中…' : '立即備份'}
       </button>
+
+      {isSystemAdminS && (
+        <>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleUploadRestoreFile(file);
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploadRestoring}
+            style={{ padding: '8px 16px', background: '#fff', color: '#A32D2D', border: '1px solid #A32D2D', borderRadius: 6, fontSize: 13, marginBottom: 20 }}
+            title="用先前下載的備份 JSON 檔還原，適合新系統／新的 Supabase 專案沒有任何備份紀錄可以選的情況"
+          >
+            {uploadRestoring ? '還原中…' : '上傳備份檔案還原'}
+          </button>
+        </>
+      )}
 
       {loading ? (
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>

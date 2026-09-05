@@ -96,6 +96,34 @@ function matchAllColumn(table: string) {
 export type BackupSnapshot = Record<string, any[] | null>; // null = 該表不存在/略過
 export type BackupCounts = Record<string, number | null>;
 
+// 「上傳檔案還原」時，上傳的內容來自使用者手上的檔案，不像從 backups 表讀出來的
+// 那樣保證格式正確，這裡做最基本的形狀檢查：必須是物件、不能是陣列，
+// 而且至少要有一個 BACKUP_TABLES 認得的表、內容是陣列，否則多半是選錯檔案
+// （例如上傳到 Excel 匯出檔、或別的 JSON），及早擋掉、給清楚的錯誤訊息，
+// 不要讓它悄悄跑進 restoreBackup() 變成「還原了 0 個資料表」。
+export function parseUploadedSnapshot(raw: unknown): { snapshot: BackupSnapshot; matchedTables: string[] } | { error: string } {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { error: '上傳的檔案內容格式不正確（不是一個 JSON 物件）' };
+  }
+  const snapshot = raw as BackupSnapshot;
+  const matchedTables = BACKUP_TABLES.filter((t) => Array.isArray(snapshot[t]));
+  if (matchedTables.length === 0) {
+    return { error: '上傳的檔案裡看不到任何本系統認得的資料表內容，請確認上傳的是「備份與還原」頁面「下載」按鈕匯出的備份檔' };
+  }
+  return { snapshot, matchedTables };
+}
+
+// 上傳還原完成後，要把上傳的內容存一份進 backups 表（kind = '上傳'）留稽核紀錄，
+// 這裡算出跟 runBackup() 回傳格式一致的 table_counts，讓這筆紀錄在清單上跟
+// 一般備份紀錄看起來一樣、能一起下載/還原。
+export function countsFromSnapshot(snapshot: BackupSnapshot): BackupCounts {
+  const counts: BackupCounts = {};
+  for (const table of BACKUP_TABLES) {
+    counts[table] = Array.isArray(snapshot[table]) ? (snapshot[table] as any[]).length : null;
+  }
+  return counts;
+}
+
 // 【2026-08-11 修正】根因：runBackup() 原本每張表只發一次 `select('*')`，沒有用
 // `.range()` 分頁——PostgREST（Supabase 的 API 層）預設對「沒有明確指定 range」
 // 的查詢會套用伺服器端設定的單次回傳上限（這個專案上限似乎是 1000 筆，但不同表現
