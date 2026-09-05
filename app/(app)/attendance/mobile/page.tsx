@@ -49,8 +49,25 @@ const SOURCE_COLOR: Record<PeriodSource, { bg: string; text: string }> = {
   admin: { bg: '#2C2C2A', text: '#fff' },
 };
 
+// 【本輪修正】反映事項「登入學生出缺席時發現時間好像有差一天（當天顯示日期、
+// 一週日期及真實記錄日期三者不一致）」：根因是這裡原本用
+// `new Date().toISOString().slice(0, 10)` 當作「今天」的日期——toISOString()
+// 會先把時間轉成 UTC 再輸出，台灣是 UTC+8，也就是說「當地時間午夜到早上8點」
+// 這段時間，UTC 的日期其實還是「前一天」，算出來的「今天」就會整整少一天。
+// 「一週出缺勤」頁面（app/(app)/attendance/weekly/page.tsx）跟「出缺席紀錄查詢」
+// 頁面（app/(app)/attendance/report/page.tsx）都各自寫了一份用 getFullYear／
+// getMonth／getDate（本地時間）組字串的 toDateStr()，沒有這個問題——這裡本來沒有
+// 用同一種寫法，才會出現「當天顯示的日期」「一週出缺勤那頁的日期」「資料庫裡真的
+// 存進去的日期」三邊對不起來：只要老師在早上8點以前用手機登錄出缺勤，這裡顯示的
+// 「今天」就已經是錯的前一天，選它送出後，記錄也會被存到前一天，跟同一時間看
+// 「一週出缺勤」頁面顯示的（正確）今天對不上。
+// 修法：改用跟另外兩個頁面同一種本地時間組字串的寫法，不再用 toISOString()。
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 export default function MobileAttendancePage() {
