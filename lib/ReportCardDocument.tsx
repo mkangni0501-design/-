@@ -1023,6 +1023,12 @@ function AttendanceDisciplinePanel({
             兩列都要分割為兩欄」：原本「上學期 32」「下學期 32」是一個 Text 塞完
             標籤+數值，這裡拆成 label／value 兩個直欄（中間補 borderLeft 垂直線），
             跟出席記錄/懲獎記錄表格「項目｜上學期｜下學期｜合計」同一種分欄方式。 */}
+        {/* 【本輪修正】反映事項「全班人數、全班名次右邊的文字及數字請放大」：
+            這裡的「上學期／下學期」標籤跟後面的數值原本都是寫死 fontSize:7，
+            比其他同一列（曠課~全勤）的數值格用的 styles.cell.fontSize（＝可在
+            後台「成績單樣式設定」調整的 base）明顯小了一截，兩種資料看起來
+            大小不一致。改成套用同一個 styles.cell.fontSize，字級跟其他數值格
+            一致（也會一起隨後台設定放大/縮小），不再是獨立寫死的小字。 */}
         <View style={{ flex: layout.classSizeFlex, flexDirection: 'row', minHeight: 0 }}>
           <View style={[styles.sectionTitle, styles.attnLabelWideCol, { minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.classSize}</Text>
@@ -1030,18 +1036,18 @@ function AttendanceDisciplinePanel({
           <View style={[styles.attnValGroupCol, { borderLeft: BORDER, minHeight: 0 }]}>
             <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.springTermBg }}>
               <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>上學期</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>上學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>{spring?.classSize ?? ''}</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{spring?.classSize ?? ''}</Text>
               </View>
             </View>
             <View style={{ flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.fallTermBg }}>
               <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>下學期</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>下學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>{fall?.classSize ?? ''}</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{fall?.classSize ?? ''}</Text>
               </View>
             </View>
           </View>
@@ -1051,18 +1057,18 @@ function AttendanceDisciplinePanel({
           <View style={[styles.attnValGroupCol, { borderLeft: BORDER, minHeight: 0 }]}>
             <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.springTermBg }}>
               <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>上學期</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>上學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>{spring?.classRank ?? ''}</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{spring?.classRank ?? ''}</Text>
               </View>
             </View>
             <View style={{ flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.fallTermBg }}>
               <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>下學期</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>下學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
-                <Text style={{ fontSize: 7, textAlign: 'center' }}>{fall?.classRank ?? ''}</Text>
+                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{fall?.classRank ?? ''}</Text>
               </View>
             </View>
           </View>
@@ -1082,12 +1088,23 @@ function AttendanceDisciplinePanel({
             高度；字體從原本自訂的 fontSize:8 改成跟「全班人數」同一個
             styles.sectionTitle（含灰底、粗體、置中），並排的「升留級」欄外觀
             (灰底＋sectionTitle 字體) 也跟著改成跟「家長簽章及建議」一致，兩欄
-            風格統一、也符合「字體請跟全班人數相同」的要求。 */}
+            風格統一、也符合「字體請跟全班人數相同」的要求。
+            【本輪修正】反映事項「升留級、家長簽章及建議中間的垂直線對齊上下格」：
+            這一列跟上面「全班人數／全班名次」列一樣都是 flex:2（占2格，對齊左表
+            2個相鄰科目欄），但上面那一列「全班人數 group」跟「全班名次 group」
+            用的是完全相同的欄寬設定（attnLabelWideCol＋attnValGroupCol），兩組
+            寬度必然相等，中間的垂直線因此精準落在整列寬度的正中央（50%）；這一列
+            原本卻是 flex:1／flex:3（25%／75%）分「升留級」跟「家長簽章及建議」，
+            分隔線落在25%的位置，兩條理論上該對齊左表同一組科目欄格線的垂直線，
+            實際上一條在50%、一條在25%，看起來就是對不上。改成 flex:1／flex:1
+            （50%／50%），這條線就會精準落在跟上面那條同一個位置，上下對齊；
+            下面的「gap」間隔列（見下方）也一併同步改成 flex:1／flex:1，維持
+            兩段線在同一直線上、貫穿到底。 */}
         <View style={{ flex: layout.promotionFlex, flexDirection: 'row', minHeight: 0, borderTop: BORDER, borderBottom: BORDER }}>
           <View style={[styles.sectionTitle, { flex: 1, minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.promotionStatus}</Text>
           </View>
-          <View style={[styles.sectionTitle, { flex: 3, minHeight: 0, borderLeft: BORDER }]}>
+          <View style={[styles.sectionTitle, { flex: 1, minHeight: 0, borderLeft: BORDER }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.parentSignature}</Text>
           </View>
         </View>
@@ -1107,12 +1124,14 @@ function AttendanceDisciplinePanel({
             線」：這段空白（從「升留級/家長簽章及建議」底線到「服務」列上緣之間，
             對應左表空白科目列＋學業平均＋操行成績＋禮貌＋衣著）原本完全沒有格線，
             只是純空白——這裡補上跟上面「升留級｜家長簽章及建議」同一個位置
-            （flex:1｜flex:3）的垂直分隔線，貫穿整段空白，讓左右欄位視覺上連續，
-            不會在空白區段斷開。 */}
+            的垂直分隔線，貫穿整段空白，讓左右欄位視覺上連續，不會在空白區段斷開。
+            【本輪修正】上面「升留級｜家長簽章及建議」的分隔線位置從 flex:1｜flex:3
+            改成 flex:1｜flex:1（見上方說明），這裡跟著同步改，兩段線才會維持在
+            同一條直線上。 */}
         {layout.gapFlex > 0 && (
           <View style={{ flex: layout.gapFlex, minHeight: 0, flexDirection: 'row' }}>
             <View style={{ flex: 1 }} />
-            <View style={{ flex: 3, borderLeft: BORDER }} />
+            <View style={{ flex: 1, borderLeft: BORDER }} />
           </View>
         )}
         <View style={[styles.row, { flex: layout.signatureFlex, minHeight: 0, borderBottom: 'none' }]}>

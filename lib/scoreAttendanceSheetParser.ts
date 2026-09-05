@@ -136,8 +136,16 @@ export async function findAttendanceDateColumns(rowsRaw: any[][], academicYear?:
     if (v instanceof Date) {
       columns.push({ colIndex: idx, date: v });
     } else if (typeof v === 'number' && v > 40000 && XLSX) {
-      // Excel 日期序號（極少數情況 sheet_to_json 不會自動轉成 Date）
-      columns.push({ colIndex: idx, date: XLSX.SSF.parse_date_code(v) as any });
+      // Excel 日期序號（極少數情況 sheet_to_json 不會自動轉成 Date）。
+      // 【本輪修正】根因：XLSX.SSF.parse_date_code(v) 回傳的不是 JS 的 Date
+      // 物件，而是 { y, m, d, H, M, S, ... } 這種純數字欄位的日期代碼物件——
+      // 這裡原本直接把它當 Date 塞進 columns，後面 toDateStr() 呼叫
+      // `.getFullYear()` 時，因為這個物件根本沒有這個方法，就丟出
+      // 「d.getFullYear is not a function」，導致「匯入全校出缺席表」整批失敗。
+      // 修法：手動把這個日期代碼物件轉成真正的 `new Date(y, m-1, d)`，日期格式
+      // 不對、轉不出來（回傳 undefined）的儲存格則直接跳過，不要讓整批中斷。
+      const code = XLSX.SSF.parse_date_code(v);
+      if (code) columns.push({ colIndex: idx, date: new Date(code.y, code.m - 1, code.d) });
     } else if (typeof v === 'string' && academicYear) {
       const m = v.trim().match(TEXT_DATE_RE);
       if (m) {
