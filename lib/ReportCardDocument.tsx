@@ -348,6 +348,10 @@ function buildStyles(config: ReportCardStyleConfig) {
       // 足夠空間），數值格併「下學期＋合計」兩欄的寬度——併的還是同一組格線
       // 上的欄位，只是併法不同，最終這一列的左緣/中線/右緣還是精準對在
       // 「項目/上學期/下學期/合計」表頭同樣的格線上，不會跟上面的格線對不齊。
+      // 【本輪修正】attnLabelWideCol／attnValGroupCol 這兩個 width 版本已經不再
+      // 使用（全班人數/全班名次那一列改用 flex 版本，理由見下面該處的說明），
+      // 這裡保留定義只是因為上面舊的說明文字裡還有引用到這兩個名字，方便對照；
+      // 沒有其他地方在用了。
       attnLabelWideCol: { width: `${21.17 + 26.28}%` },
       attnValGroupCol: { width: `${26.28 * 2}%` },
 
@@ -1029,45 +1033,61 @@ function AttendanceDisciplinePanel({
             後台「成績單樣式設定」調整的 base）明顯小了一截，兩種資料看起來
             大小不一致。改成套用同一個 styles.cell.fontSize，字級跟其他數值格
             一致（也會一起隨後台設定放大/縮小），不再是獨立寫死的小字。 */}
+        {/* 【本輪修正】反映事項「全班人數與全班名次右邊的上下學期表格右側垂直線
+            請對齊上下方表格，整列上下方橫線請對齊左側表格高度」：這一列原本用
+            styles.attnLabelWideCol／styles.attnValGroupCol（固定 width 百分比，
+            2組label+value合計超過100%寬度，全靠 Yoga 的 flex-shrink 自動壓縮
+            回100%）——shrink 是「先假設每個元素都拿得到自己宣告的寬度，超出容器
+            的部分再按比例砍回來」，這個砍量的計算在不同字級/內容長度下可能跟
+            文字本身的最小寬度打架（例如「全班名次」四個字要求的最小寬度，可能
+            比 shrink 後分配到的寬度還寬，Yoga 就不會真的壓到那麼窄，這一格會比
+            預期寬，後面的值欄跟著被往右推，右邊界因此對不齊）。改成直接用
+            flex（沿用原本 47.45／52.56 這兩個數字本身的比例，不要再包一層
+            width%），4個子項目的寬度由 Yoga 一次性按比例分配、恰好加總等於
+            這一列的整個寬度，不會有「先超出、再砍回來」這一步、也就不會被
+            內容最小寬度卡住，右邊界永遠精準對齊。同時把裡面每一層 View 都加上
+            minHeight:0（含最裡面「上學期/下學期」兩個子列以及各自的
+            標籤/數值格），避免任何一層文字內容的預設高度蓋過 flex 分配到的
+            高度，累積誤差導致整列比左表對應高度多出幾個像素。 */}
         <View style={{ flex: layout.classSizeFlex, flexDirection: 'row', minHeight: 0 }}>
-          <View style={[styles.sectionTitle, styles.attnLabelWideCol, { minHeight: 0 }]}>
+          <View style={[styles.sectionTitle, { flex: 47.45, minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.classSize}</Text>
           </View>
-          <View style={[styles.attnValGroupCol, { borderLeft: BORDER, minHeight: 0 }]}>
+          <View style={{ flex: 52.56, borderLeft: BORDER, minHeight: 0 }}>
             <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.springTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>上學期</Text>
               </View>
-              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{spring?.classSize ?? ''}</Text>
               </View>
             </View>
             <View style={{ flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.fallTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>下學期</Text>
               </View>
-              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{fall?.classSize ?? ''}</Text>
               </View>
             </View>
           </View>
-          <View style={[styles.sectionTitle, styles.attnLabelWideCol, { borderLeft: BORDER, minHeight: 0 }]}>
+          <View style={[styles.sectionTitle, { flex: 47.45, borderLeft: BORDER, minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.classRank}</Text>
           </View>
-          <View style={[styles.attnValGroupCol, { borderLeft: BORDER, minHeight: 0 }]}>
+          <View style={{ flex: 52.56, borderLeft: BORDER, minHeight: 0 }}>
             <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.springTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>上學期</Text>
               </View>
-              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{spring?.classRank ?? ''}</Text>
               </View>
             </View>
             <View style={{ flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.fallTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center' }}>
+              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>下學期</Text>
               </View>
-              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER }}>
+              <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{fall?.classRank ?? ''}</Text>
               </View>
             </View>
@@ -1441,8 +1461,15 @@ export function ReportCardDocument({ data, styleConfig }: { data: ReportCardData
                 請把各自下方兩列合併成一列」：這一列跟上面簽章標籤格之間的橫線
                 再次拿掉（呼應 styles.signBox 的說明），兩塊合併回一個沒有橫線
                 分隔的長方格，垂直分隔線一樣整條貫穿到底。 */}
-            <View style={{ flexDirection: 'row', height: REMARK_BOX_HEIGHT }}>
-              <View style={[styles.remarkBox, { borderTop: BORDER }]}>
+            {/* 【本輪修正】反映事項「導師評語的橫線請延伸至整張表格邊框」：原本
+                borderTop 只畫在 remarkBox 自己身上（寬度只到 leftCol 右緣為止，
+                57.7%），右邊「簽章延伸格」那一段在這個高度沒有對應的邊框，兩段
+                視覺上雖然剛好接在同一條水平線上、但只有左半邊「真的有畫線」，
+                右半邊要嘛沒畫、要嘛是靠別的元件湊巧對齊——不是「整張表格邊框」。
+                改成把 borderTop 移到最外層這個橫跨 leftCol+rightCol 全寬的 row
+                容器上，一條線畫滿整個表格寬度，兩個子元件都不用再各自處理。 */}
+            <View style={{ flexDirection: 'row', height: REMARK_BOX_HEIGHT, borderTop: BORDER }}>
+              <View style={styles.remarkBox}>
                 <Text style={styles.remarkLabel}>{labels.remark}</Text>
                 <Text style={[styles.remarkText, { fontSize: remarkFontSize, lineHeight: 1.4 }]}>{remarkDisplay}</Text>
               </View>
