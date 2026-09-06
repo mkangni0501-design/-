@@ -26,6 +26,7 @@ import {
 import { getTeacherLetterSettings, saveTeacherLetterSettings, TeacherLetterSettings } from '@/lib/teacherLetterSettings';
 import { buildCertificateContent, buildAppointmentContent } from '@/lib/teacherLetterContent';
 import { supabase } from '@/lib/supabaseClient';
+import { showPdfInWindow } from '@/lib/pdfPreview';
 
 // 開發人員區「聘書」：把「0808.xlsm」（原本用Excel VBA巨集手動列印）的邏輯搬到網頁上，
 // 「歷年教師資料」「自聘教師資料」「當年教師資料」3張資料表改成網頁管理，提供「下載範本」
@@ -568,7 +569,7 @@ function PrintSection({ userId }: { userId: string | null }) {
         }
         blob = await res.blob();
         if (printWindow) {
-          printWindow.location.href = URL.createObjectURL(blob);
+          showPdfInWindow(printWindow, blob, '教師信函');
         }
         return;
       }

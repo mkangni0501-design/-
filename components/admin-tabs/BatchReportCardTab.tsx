@@ -3,6 +3,7 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { downloadMultiClassScoreExcel, type ClassScoreExcelParams } from '@/lib/excelTemplates';
+import { showPdfInWindow } from '@/lib/pdfPreview';
 
 type ClassOption = { id: string; label: string; grade_level: string; department: string };
 
@@ -210,8 +211,7 @@ export default function BatchReportCardTab() {
         URL.revokeObjectURL(dUrl);
         return;
       }
-      const blobUrl = URL.createObjectURL(blob);
-      printWindow.location.href = blobUrl;
+      showPdfInWindow(printWindow, blob, '成績單');
     } catch (err: any) {
       printWindow.close();
       alert('批次列印發生錯誤：' + (err?.message ?? String(err)));

@@ -5,6 +5,7 @@ import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabas
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { isDepartmentLead } from '@/lib/departments';
 import { downloadClassScoreExcel } from '@/lib/excelTemplates';
+import { showPdfInWindow } from '@/lib/pdfPreview';
 
 type SubjectRow = { enrollment_id: string; subject: string; midterm: number | null; final: number | null; daily: number | null };
 type RankRow = {
@@ -447,7 +448,7 @@ export default function ClassSummaryPage() {
         URL.revokeObjectURL(url);
         return;
       }
-      printWindow.location.href = URL.createObjectURL(blob);
+      showPdfInWindow(printWindow, blob, '成績單');
     } catch (err: any) {
       printWindow.close();
       alert('列印成績單發生錯誤：' + (err?.message ?? String(err)));
@@ -530,7 +531,7 @@ export default function ClassSummaryPage() {
         URL.revokeObjectURL(dUrl);
         return;
       }
-      printWindow.location.href = URL.createObjectURL(blob);
+      showPdfInWindow(printWindow, blob, '成績單');
     } catch (err: any) {
       printWindow.close();
       alert('批次列印發生錯誤：' + (err?.message ?? String(err)));

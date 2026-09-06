@@ -1,10 +1,19 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { supabase, getCurrentAppUser, getCurrentTeacherId, isAdminInCurrentView } from '@/lib/supabaseClient';
 import ErrorBanner from '@/components/ErrorBanner';
 
-type ClassOption = { id: string; label: string; academic_year: number; grade_level: string; class_name: string };
+type ClassOption = {
+  id: string;
+  label: string;
+  academic_year: number;
+  grade_level: string;
+  class_name: string;
+  homeroom_teacher_id: string | null;
+};
+
+type GuardianPhone = { relation: string; name: string | null; phone: string | null };
 type RosterRow = {
   id: string;
   student_no: string;
@@ -44,7 +53,9 @@ const DETAIL_FIELDS: { key: keyof StudentDetail; label: string }[] = [
 
 // 學生名冊：跟「查詢學生」不同，這裡刻意做成「先選班級、只看座號/學號/姓名」的簡單清單，
 // 方便要點名、要核對座位表的人快速掃過一個班級，不用先面對全校清單或編輯表單。
-// 點一列會展開該生的個人資料（唯讀），要修改資料仍請到「學籍設定及查詢→查詢學生」。
+// 點一列會展開該生的資料——但「看得到多少」依身分分流：只有系統管理員／該班導師
+// 能看到完整個人資料；其他教師點開只看得到監護人電話，避免任何教師都能看到全校
+// 學生的身分證字號、地址等個資（見 sql/83fix_roster_pii_exposure.sql）。
 export default function StudentsRosterTab() {
   const [classes, setClasses] = useState<ClassOption[]>([]);
   const [classId, setClassId] = useState('');
@@ -52,16 +63,24 @@ export default function StudentsRosterTab() {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [myTeacherId, setMyTeacherId] = useState<string | null>(null);
+
   const [openStudentNo, setOpenStudentNo] = useState<string | null>(null);
   const [detail, setDetail] = useState<StudentDetail | null>(null);
+  const [guardianPhones, setGuardianPhones] = useState<GuardianPhone[] | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
   useEffect(() => {
     (async () => {
+      const appUser = await getCurrentAppUser();
+      if (appUser) setIsAdmin(isAdminInCurrentView(appUser.role));
+      setMyTeacherId(await getCurrentTeacherId());
+
       const { data, error } = await supabase
         .from('classes')
-        .select('id, academic_year, grade_level, class_name')
+        .select('id, academic_year, grade_level, class_name, homeroom_teacher_id')
         .order('academic_year', { ascending: false })
         .order('grade_level')
         .order('class_name');
@@ -75,11 +94,17 @@ export default function StudentsRosterTab() {
         academic_year: c.academic_year,
         grade_level: c.grade_level,
         class_name: c.class_name,
+        homeroom_teacher_id: c.homeroom_teacher_id ?? null,
       }));
       setClasses(options);
       if (options.length > 0) setClassId(options[0].id);
     })();
   }, []);
+
+  // 目前選到的班級，我是不是這班的導師（或系統管理員／管理視角）——決定點開學生
+  // 之後看得到完整個人資料、還是只看得到監護人電話。
+  const selectedClass = classes.find((c) => c.id === classId) ?? null;
+  const canSeeFullDetail = isAdmin || (!!myTeacherId && !!selectedClass && selectedClass.homeroom_teacher_id === myTeacherId);
 
   useEffect(() => {
     if (!classId) {
@@ -108,21 +133,35 @@ export default function StudentsRosterTab() {
     }
     setOpenStudentNo(studentNo);
     setDetail(null);
+    setGuardianPhones(null);
     setDetailError(null);
     setDetailLoading(true);
-    const { data, error } = await supabase
-      .from('students')
-      .select(
-        'student_no, name, gender, thai_name, dob, id_number, nationality, religion, blood_type, address, phone, previous_school, previous_school_grade'
-      )
-      .eq('student_no', studentNo)
-      .single();
-    setDetailLoading(false);
-    if (error) {
-      setDetailError('讀取學生個人資料失敗：' + error.message);
+
+    if (canSeeFullDetail) {
+      const { data, error } = await supabase
+        .from('students')
+        .select(
+          'student_no, name, gender, thai_name, dob, id_number, nationality, religion, blood_type, address, phone, previous_school, previous_school_grade'
+        )
+        .eq('student_no', studentNo)
+        .single();
+      setDetailLoading(false);
+      if (error) {
+        setDetailError('讀取學生個人資料失敗：' + error.message);
+        return;
+      }
+      setDetail(data as StudentDetail);
       return;
     }
-    setDetail(data as StudentDetail);
+
+    // 不是這班導師（也不是管理員）：只給監護人電話，不查、不顯示其他個人資料。
+    const { data, error } = await supabase.rpc('guardian_phones_for_roster', { p_student_no: studentNo });
+    setDetailLoading(false);
+    if (error) {
+      setDetailError('讀取監護人電話失敗：' + error.message);
+      return;
+    }
+    setGuardianPhones((data ?? []) as GuardianPhone[]);
   }
 
   return (
@@ -178,6 +217,23 @@ export default function StudentsRosterTab() {
                             {detail[key] || '—'}
                           </div>
                         ))}
+                      </div>
+                    )}
+                    {guardianPhones && (
+                      <div style={{ fontSize: 12 }}>
+                        <p style={{ color: '#999', marginBottom: 4 }}>
+                          您不是這位學生的導師，僅顯示監護人電話；完整個人資料請洽該生導師。
+                        </p>
+                        {guardianPhones.length === 0 ? (
+                          <p>（目前沒有登記監護人電話）</p>
+                        ) : (
+                          guardianPhones.map((g, i) => (
+                            <div key={i}>
+                              {g.relation}
+                              {g.name ? `（${g.name}）` : ''}：{g.phone || '—'}
+                            </div>
+                          ))
+                        )}
                       </div>
                     )}
                   </td>

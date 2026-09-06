@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { supabase, getCurrentAppUser, getCurrentTeacherId, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
+import { showPdfInWindow } from '@/lib/pdfPreview';
 import { departmentForGrade } from '@/lib/gradeMapping';
 import { readWorkbook, parseSheetHeader, parseStudentRows, findScoreBlocks } from '@/lib/scoreAttendanceSheetParser';
 import ExcelUploadButton from '@/components/ExcelUploadButton';
@@ -426,7 +427,7 @@ export default function ScoreEntryPage() {
         return;
       }
       const blob = await res.blob();
-      printWindow.location.href = URL.createObjectURL(blob);
+      showPdfInWindow(printWindow, blob, '成績單');
     } catch (err: any) {
       printWindow.close();
       alert('列印成績單發生錯誤：' + (err?.message ?? String(err)));
