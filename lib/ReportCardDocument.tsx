@@ -818,7 +818,7 @@ function ScoreTable({
 
 // 操行成績等第換算：90以上優、80-89甲、70-79乙、60-69丙、未滿60丁
 // （2026-08-18 依學校確認的實際級距更新；上一輪用「65分=丙」反推的級距是錯的）。
-function conductGradeLabel(score: number | null): string {
+export function conductGradeLabel(score: number | null): string {
   if (score === null || score === undefined) return '';
   if (score >= 90) return '優';
   if (score >= 80) return '甲';
