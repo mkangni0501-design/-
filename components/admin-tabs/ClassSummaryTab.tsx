@@ -399,18 +399,19 @@ export default function ClassSummaryPage() {
     });
   }
 
-  async function handlePrintReportCard(enrollmentId: string, format: 'pdf' | 'docx' = 'pdf') {
+  async function handlePrintReportCard(enrollmentId: string, format: 'pdf' | 'docx' | 'xlsx' = 'pdf') {
     // 【2026-08-19】同一個「window.open 被瀏覽器靜靜擋掉」的問題（見上面
     // handleBatchPrintClass 的說明），這裡也一併修正：點擊當下先同步開好空白分頁。
-    // Word 合併列印（.docx）瀏覽器不會直接開啟預覽，開的空白分頁只是用來放
-    // 「正在產生」的提示，實際檔案是直接觸發下載，跟 PDF 那條路徑用同一組函式、
-    // 只差在最後怎麼處理拿到的 blob。
+    // Word 合併列印（.docx）／Excel 範本（.xlsx）瀏覽器不會直接開啟預覽，開的
+    // 空白分頁只是用來放「正在產生」的提示，實際檔案是直接觸發下載，跟 PDF
+    // 那條路徑用同一組函式、只差在最後怎麼處理拿到的 blob。
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${format === 'docx' ? '（Word 合併列印）' : ' PDF'}，請稍候…</p>`);
+    const formatLabel = format === 'docx' ? '（Word 合併列印）' : format === 'xlsx' ? '（Excel 範本）' : ' PDF';
+    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${formatLabel}，請稍候…</p>`);
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData.session?.access_token;
@@ -419,7 +420,7 @@ export default function ClassSummaryPage() {
         alert('請重新登入');
         return;
       }
-      const res = await fetch(`/api/reports/report-card/${enrollmentId}${format === 'docx' ? '?format=docx' : ''}`, {
+      const res = await fetch(`/api/reports/report-card/${enrollmentId}${format !== 'pdf' ? `?format=${format}` : ''}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!res.ok) {
@@ -438,12 +439,12 @@ export default function ClassSummaryPage() {
         return;
       }
       const blob = await res.blob();
-      if (format === 'docx') {
+      if (format === 'docx' || format === 'xlsx') {
         printWindow.close();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `report-card-${enrollmentId}.docx`;
+        a.download = `report-card-${enrollmentId}.${format}`;
         a.click();
         URL.revokeObjectURL(url);
         return;
@@ -457,7 +458,7 @@ export default function ClassSummaryPage() {
 
   // 批次列印「目前這個班」全班成績單（導師印自己班、管理員印目前選到的班都能用）。
   // 教務部門要一次印多班／全校，請到「成績相關設定及查詢」→「批次列印成績單（多班／全校）」分頁。
-  async function handleBatchPrintClass(skipIncomplete = false, format: 'pdf' | 'docx' = 'pdf') {
+  async function handleBatchPrintClass(skipIncomplete = false, format: 'pdf' | 'docx' | 'xlsx' = 'pdf') {
     if (!classId) return;
     // 【2026-08-19 修正】「按了沒反應」的根因：window.open() 原本寫在 fetch 之後
     // （await 過網路請求才呼叫），瀏覽器的彈出視窗封鎖機制只認「使用者點擊當下、
@@ -473,7 +474,8 @@ export default function ClassSummaryPage() {
       alert('瀏覽器擋下了新分頁（彈出視窗封鎖），請到瀏覽器網址列允許本網站開啟彈出視窗後再試一次。');
       return;
     }
-    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${format === 'docx' ? '（Word 合併列印）' : ' PDF'}，請稍候…</p>`);
+    const formatLabel = format === 'docx' ? '（Word 合併列印）' : format === 'xlsx' ? '（Excel 範本）' : ' PDF';
+    printWindow.document.write(`<p style="font-family:sans-serif;padding:24px">正在產生成績單${formatLabel}，請稍候…</p>`);
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData.session?.access_token;
@@ -484,7 +486,7 @@ export default function ClassSummaryPage() {
       }
       const params = new URLSearchParams();
       if (skipIncomplete) params.set('skipIncomplete', 'true');
-      if (format === 'docx') params.set('format', 'docx');
+      if (format !== 'pdf') params.set('format', format);
       const url = `/api/reports/report-card/batch${params.toString() ? '?' + params.toString() : ''}`;
       const res = await fetch(url, {
         method: 'POST',
@@ -521,12 +523,14 @@ export default function ClassSummaryPage() {
       }
 
       const blob = await res.blob();
-      if (format === 'docx') {
+      if (format === 'docx' || format === 'xlsx') {
         printWindow.close();
         const a = document.createElement('a');
         const dUrl = URL.createObjectURL(blob);
         a.href = dUrl;
-        a.download = `report-cards-batch-${classId}.docx`;
+        // Excel 範本的批次列印是打包成 .zip（每位學生一個獨立檔案，見
+        // app/api/reports/report-card/batch/route.tsx 的說明），不是單一 .xlsx。
+        a.download = format === 'xlsx' ? `report-cards-batch-${classId}.zip` : `report-cards-batch-${classId}.docx`;
         a.click();
         URL.revokeObjectURL(dUrl);
         return;
@@ -622,6 +626,13 @@ export default function ClassSummaryPage() {
             style={{ fontSize: 12, padding: '4px 12px', borderRadius: 6, background: '#2C6E9E', color: '#fff', border: 'none' }}
           >
             批次列印全班成績單（Word 合併列印）
+          </button>
+          <button
+            onClick={() => handleBatchPrintClass(false, 'xlsx')}
+            className="no-print"
+            style={{ fontSize: 12, padding: '4px 12px', borderRadius: 6, background: '#1E7B45', color: '#fff', border: 'none' }}
+          >
+            批次列印全班成績單（Excel 範本）
           </button>
         </div>
       )}
@@ -788,6 +799,14 @@ export default function ClassSummaryPage() {
                             style={{ fontSize: 12, padding: '2px 8px', color: '#2C6E9E', border: '1px solid #2C6E9E', borderRadius: 4, background: '#fff' }}
                           >
                             Word
+                          </button>
+                          <button
+                            onClick={() => handlePrintReportCard(en.id, 'xlsx')}
+                            className="no-print"
+                            title="Excel 範本"
+                            style={{ fontSize: 12, padding: '2px 8px', color: '#1E7B45', border: '1px solid #1E7B45', borderRadius: 4, background: '#fff' }}
+                          >
+                            Excel
                           </button>
                         </span>
                       ) : (
