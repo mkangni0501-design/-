@@ -16,6 +16,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { ReportCardDocument } from '@/lib/ReportCardDocument';
 import { getReportCardResult, canAccessClass, getActiveReportCardStyle } from '@/lib/reportCard';
 import { getActiveTemplateBuffer, mergeReportCardDocx, mergeMultipleDocx } from '@/lib/reportCardDocxTemplate';
+import { getActiveXlsxTemplateBuffer, fillReportCardXlsx } from '@/lib/reportCardXlsxTemplate';
+import PizZip from 'pizzip';
 
 export async function POST(req: NextRequest) {
   const { classIds } = await req.json();
@@ -85,8 +87,46 @@ export async function POST(req: NextRequest) {
 
   // ---- 5. 輸出格式：預設 PDF，加上 ?format=docx 改成「Word 合併列印」批次版——
   // 每位學生各自套用同一份範本合併出一份 .docx，再全部接成同一個檔案下載（每位
-  // 學生之間插入分頁），跟原本 PDF 批次列印「合併成一份檔案」的行為一致。----
+  // 學生之間插入分頁），跟原本 PDF 批次列印「合併成一份檔案」的行為一致。
+  // ?format=xlsx 改成「直接套用學校 Excel 範本」批次版——每位學生各自是一份
+  // 完整、獨立可以開啟列印的 .xlsx（範本裡的公式各自獨立計算，不會互相干擾），
+  // 但 Excel 檔案本身沒有「像 PDF 一樣把好幾份接成一份」這種概念，所以整批
+  // 打包成一個 .zip（裡面每個學生一個檔案），不是接成一份巨大的 xlsx。----
   const format = req.nextUrl.searchParams.get('format');
+  if (format === 'xlsx') {
+    const templateBuffer = await getActiveXlsxTemplateBuffer();
+    const zip = new PizZip();
+    const usedNames = new Set<string>();
+    for (const item of readyList) {
+      const result = await getReportCardResult(item.enrollmentId);
+      if ('reason' in result) continue;
+      let xlsxBuffer: Buffer;
+      try {
+        xlsxBuffer = await fillReportCardXlsx(templateBuffer, result.data);
+      } catch (err: any) {
+        return NextResponse.json({ error: `套用 Excel 範本失敗（學生：${result.studentName}）：${err?.message ?? String(err)}` }, { status: 500 });
+      }
+      let name = `${result.studentNo}-${result.studentName}.xlsx`;
+      // 同名防呆（理論上學號不會重複，這裡只是保險，避免萬一撞名字被 zip 蓋掉）。
+      let suffix = 2;
+      while (usedNames.has(name)) {
+        name = `${result.studentNo}-${result.studentName}(${suffix}).xlsx`;
+        suffix++;
+      }
+      usedNames.add(name);
+      zip.file(name, xlsxBuffer);
+    }
+    const zipBuffer = zip.generate({ type: 'nodebuffer' }) as Buffer;
+    const zipHeaders: Record<string, string> = {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="report-cards-batch-xlsx.zip"`,
+      'X-Total-Printed': String(readyList.length),
+    };
+    if (notReady.length > 0) {
+      zipHeaders['X-Skipped-Students'] = encodeURIComponent(JSON.stringify(notReady));
+    }
+    return new NextResponse(new Uint8Array(zipBuffer), { headers: zipHeaders });
+  }
   if (format === 'docx') {
     const templateBuffer = await getActiveTemplateBuffer();
     const studentDocxBuffers: Buffer[] = [];

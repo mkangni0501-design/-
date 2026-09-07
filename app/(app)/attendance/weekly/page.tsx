@@ -767,12 +767,29 @@ export default function WeeklyAttendancePage() {
           allErrors.push(`分頁「${sheetName}」讀不到任何學生資料，已略過這個分頁`);
           continue;
         }
+        // 【本輪修正】反映事項「總節數應計算整學期時間內的星期一到六節數，所以
+        // 出席節數有上限，應計算到現在日期的總數」——根因：管理員整批上傳這個
+        // 分支，空白儲存格會直接當成「出席」寫入（見下面的說明）。學校目前的
+        // 「成績出缺輸入表」是學期一開始就把整學期所有日期欄位都建好、之後每天
+        // 陸續填寫，這代表學期還沒走到的「未來日期」欄位在還沒填之前也一定是
+        // 空白——如果照舊把空白一律當「出席」寫入，等於還沒發生的日子也會被
+        // 算進「出席節數」，「出席節數」自然沒有上限、也對不上「到今天為止」
+        // 應該有的節數。改成明確跳過「日期晚於今天」的欄位，不寫入任何紀錄
+        // （不管欄位是空白還是已經填了代碼——都還沒發生，不該有出缺勤紀錄），
+        // 這樣「出席節數」的總和就會自然以「到目前為止的實際上課日」為上限。
+        const todayStr = toDateStr(new Date());
+        let skippedFutureCount = 0;
         // 先收集這個班級分頁要寫入的全部紀錄，解析完再一次分批 upsert（見上方
         // ATTENDANCE_UPLOAD_CHUNK_SIZE 的說明），不要邊解析邊一格一格個別寫入。
         const pending: PendingAttendanceRecord[] = [];
         for (const s of studentsFromFile) {
           const row = rowsRaw[s.rowIndex];
           for (const dc of dateColumns) {
+            const dateStr = toDateStr(dc.date);
+            if (dateStr > todayStr) {
+              skippedFutureCount++;
+              continue;
+            }
             for (let period = 1; period <= 5; period++) {
               const colIdx = dc.colIndex + (period - 1);
               const code = row[colIdx];
@@ -783,7 +800,6 @@ export default function WeeklyAttendancePage() {
               // 單班上傳，維持「空白跳過、只更新有填的格子」這個比較安全的預設。）
               const status = code == null || code === '' ? '出席' : ATTENDANCE_CODE_TO_STATUS[Number(code)];
               if (!status) continue;
-              const dateStr = toDateStr(dc.date);
               pending.push({
                 student_no: s.studentNo,
                 record_date: dateStr,
@@ -797,6 +813,9 @@ export default function WeeklyAttendancePage() {
         const { successCount, errors } = await upsertAttendanceRecordsInChunks(pending, sheetName);
         totalSuccess += successCount;
         allErrors.push(...errors);
+        if (skippedFutureCount > 0) {
+          allErrors.push(`分頁「${sheetName}」：已略過 ${skippedFutureCount} 個晚於今天（${todayStr}）的日期欄位，未來日期不會寫入出缺勤紀錄`);
+        }
       }
       setReloadTick((t) => t + 1);
       return { successCount: totalSuccess, errors: allErrors };
@@ -836,17 +855,26 @@ export default function WeeklyAttendancePage() {
     }
 
     // 理由同管理員分支：先收集完再分批 upsert，不要一格一格各自等待網路來回。
+    // 同樣加上「跳過晚於今天的日期」，理由同上（見管理員分支的說明）：這裡雖然
+    // 空白本來就會跳過，但如果老師不小心把還沒發生的日期欄位也填了代碼，一樣
+    // 不該真的寫進資料庫，避免「出席節數」把還沒發生的日子也算進去。
+    const todayStrSingleClass = toDateStr(new Date());
+    let skippedFutureSingleClass = 0;
     const pendingSingleClass: PendingAttendanceRecord[] = [];
     for (const s of studentsFromFile) {
       const row = rowsRaw[s.rowIndex];
       for (const dc of dateColumns) {
+        const dateStr = toDateStr(dc.date);
+        if (dateStr > todayStrSingleClass) {
+          skippedFutureSingleClass++;
+          continue;
+        }
         for (let period = 1; period <= 5; period++) {
           const colIdx = dc.colIndex + (period - 1);
           const code = row[colIdx];
           if (code == null || code === '') continue;
           const status = ATTENDANCE_CODE_TO_STATUS[Number(code)];
           if (!status) continue;
-          const dateStr = toDateStr(dc.date);
           pendingSingleClass.push({
             student_no: s.studentNo,
             record_date: dateStr,
@@ -858,6 +886,9 @@ export default function WeeklyAttendancePage() {
       }
     }
     const { successCount, errors } = await upsertAttendanceRecordsInChunks(pendingSingleClass, `${header.gradeLevel}${header.className}`);
+    if (skippedFutureSingleClass > 0) {
+      errors.push(`已略過 ${skippedFutureSingleClass} 個晚於今天（${todayStrSingleClass}）的日期欄位，未來日期不會寫入出缺勤紀錄`);
+    }
     if (classId === classRow.id) {
       setReloadTick((t) => t + 1);
     }

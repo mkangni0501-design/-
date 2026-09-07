@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { ReportCardDocument } from '@/lib/ReportCardDocument';
 import { getReportCardResult, canAccessClass, getActiveReportCardStyle } from '@/lib/reportCard';
 import { getActiveTemplateBuffer, mergeReportCardDocx } from '@/lib/reportCardDocxTemplate';
+import { getActiveXlsxTemplateBuffer, fillReportCardXlsx } from '@/lib/reportCardXlsxTemplate';
 
 export async function GET(req: NextRequest, { params }: { params: { enrollmentId: string } }) {
   const enrollmentId = params.enrollmentId;
@@ -41,10 +42,25 @@ export async function GET(req: NextRequest, { params }: { params: { enrollmentId
   }
 
   // ---- 3. 輸出格式：預設是原本的 PDF（react-pdf），加上 ?format=docx 改成「Word
-  // 合併列印」——用管理員在【成績單合併列印範本】頁上傳的範本（沒上傳過就用內建
-  // 預設範本），把同一份 result.data 套進去。兩種格式資料來源完全一樣，只是排版
-  // 引擎不同，PDF 那條路徑完全沒被動到。----
+  // 合併列印」，?format=xlsx 改成「直接套用學校 Excel 範本」——用管理員上傳的
+  // 範本（沒上傳過就用內建預設範本，就是學校提供的那份 Excel 檔案）。三種格式
+  // 資料來源完全一樣，只是排版引擎不同，PDF 那條路徑完全沒被動到。----
   const format = req.nextUrl.searchParams.get('format');
+  if (format === 'xlsx') {
+    const templateBuffer = await getActiveXlsxTemplateBuffer();
+    let xlsxBuffer: Buffer;
+    try {
+      xlsxBuffer = await fillReportCardXlsx(templateBuffer, result.data);
+    } catch (err: any) {
+      return NextResponse.json({ error: '套用 Excel 範本失敗：' + (err?.message ?? String(err)) }, { status: 500 });
+    }
+    return new NextResponse(new Uint8Array(xlsxBuffer), {
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="report-card-${result.studentNo}.xlsx"`,
+      },
+    });
+  }
   if (format === 'docx') {
     const templateBuffer = await getActiveTemplateBuffer();
     let docxBuffer: Buffer;

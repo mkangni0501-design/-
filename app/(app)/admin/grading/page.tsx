@@ -15,6 +15,7 @@ import SchoolRankingsTab from '@/components/admin-tabs/SchoolRankingsTab';
 import HistoryTab from '@/components/admin-tabs/HistoryTab';
 import BatchReportCardTab from '@/components/admin-tabs/BatchReportCardTab';
 import ReportCardMergeTemplateTab from '@/components/admin-tabs/ReportCardMergeTemplateTab';
+import ReportCardXlsxTemplateTab from '@/components/admin-tabs/ReportCardXlsxTemplateTab';
 
 type TabKey =
   | 'settings'
@@ -26,7 +27,8 @@ type TabKey =
   | 'history'
   | 'batch-print'
   | 'report-card-style'
-  | 'report-card-merge-template';
+  | 'report-card-merge-template'
+  | 'report-card-xlsx-template';
 
 const TABS: { key: TabKey; label: string; adminOnly: boolean }[] = [
   { key: 'settings', label: '成績相關設定', adminOnly: true },
@@ -39,6 +41,7 @@ const TABS: { key: TabKey; label: string; adminOnly: boolean }[] = [
   { key: 'batch-print', label: '批次列印成績單（多班／全校）', adminOnly: true },
   { key: 'report-card-style', label: '成績單樣式設定', adminOnly: true },
   { key: 'report-card-merge-template', label: '成績單合併列印範本', adminOnly: true },
+  { key: 'report-card-xlsx-template', label: '成績單Excel範本', adminOnly: true },
 ];
 
 const TAB_KEYS: TabKey[] = TABS.map((t) => t.key);
@@ -120,6 +123,7 @@ function GradingHubPageInner() {
       {tab === 'batch-print' && isAdmin && <BatchReportCardTab />}
       {tab === 'report-card-style' && isAdmin && <ReportCardStyleTab />}
       {tab === 'report-card-merge-template' && isAdmin && <ReportCardMergeTemplateTab />}
+      {tab === 'report-card-xlsx-template' && isAdmin && <ReportCardXlsxTemplateTab />}
     </main>
   );
 }
