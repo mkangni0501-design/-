@@ -164,31 +164,31 @@ export async function fillReportCardXlsx(templateBuffer: Buffer, data: ReportCar
 
   // ---------- 科目成績：固定10列（第6~15列），科目不夠的班級後面幾列留空白，
   // 跟 PDF／Word 版本同一套「固定格數」設計；第16列固定是「出缺席」。----------
+  //
+  // 【本輪修正】反映事項「成績單EXCEL版本出現下學期成績及相關資料，但是目前
+  // 應該是空的（全校都是）」——根因：內建預設範本就是您上傳的那份 Excel，
+  // 裡面本來就有一位學生（黃拉拉）「上下學期都填好」的範例資料。原本這裡的
+  // 邏輯是「該學期 ready 才寫入」，等於「不寫」——但「不寫」不等於「清空」，
+  // 範本裡原本就有的下學期範例資料，沒被寫入任何新值蓋過去，就這樣原封不動
+  // 留在輸出的檔案裡，看起來像是「查得到不存在的下學期資料」。改成不管這學期
+  // ready 與否，一律明確寫入（ready 就寫真正的值，不 ready 就寫 null 清空），
+  // 不再有「跳過不寫」這個選項，確保不會有任何範本裡的舊資料殘留。
   const maxSubjects = Math.max(spring?.subjects.length ?? 0, fall?.subjects.length ?? 0);
   void maxSubjects; // 目前用固定10列，這個數字只是保留給以後想做「超過10科要警告」時用。
   for (let i = 0; i < 10; i++) {
     const row = SUBJECT_FIRST_ROW + i;
-    const s = spring?.subjects[i];
-    const f = fall?.subjects[i];
+    const s = spring?.ready ? spring.subjects[i] : undefined;
+    const f = fall?.ready ? fall.subjects[i] : undefined;
     const subjectName = s?.subject ?? f?.subject ?? null;
     const weight = s?.weight ?? f?.weight ?? null;
-    if (subjectName == null) {
-      // 這一列沒有科目：不寫入任何值，保留範本原本的空白（範本的公式儲存格
-      // 遇到空白輸入格，本來就會顯示空白，不用特別清除）。
-      continue;
-    }
     setCell(detail, `A${row}`, subjectName);
     setCell(detail, `B${row}`, weight);
-    if (spring?.ready) {
-      setCell(detail, `C${row}`, s?.midterm ?? null);
-      setCell(detail, `D${row}`, s?.final ?? null);
-      setCell(detail, `E${row}`, s?.daily ?? null);
-    }
-    if (fall?.ready) {
-      setCell(detail, `G${row}`, f?.midterm ?? null);
-      setCell(detail, `H${row}`, f?.final ?? null);
-      setCell(detail, `I${row}`, f?.daily ?? null);
-    }
+    setCell(detail, `C${row}`, s?.midterm ?? null);
+    setCell(detail, `D${row}`, s?.final ?? null);
+    setCell(detail, `E${row}`, s?.daily ?? null);
+    setCell(detail, `G${row}`, f?.midterm ?? null);
+    setCell(detail, `H${row}`, f?.final ?? null);
+    setCell(detail, `I${row}`, f?.daily ?? null);
   }
 
   // ---------- 出缺席（固定第16列）：範本這一列的分數是「輸入值」不是公式
@@ -196,11 +196,11 @@ export async function fillReportCardXlsx(templateBuffer: Buffer, data: ReportCar
   // 系統既有、全站統一算法算出來的 attendanceScore（跟 PDF／Word 版、學業平均
   // 排名用的是同一個數字，確保三種格式的成績單一定互相對得起來）。----------
   setCell(detail, `A${ATTENDANCE_SUBJECT_ROW}`, '出缺席');
-  if (spring?.ready) {
-    for (const col of ['C', 'D', 'E', 'F']) setCell(detail, `${col}${ATTENDANCE_SUBJECT_ROW}`, spring.attendanceScore);
+  for (const col of ['C', 'D', 'E', 'F']) {
+    setCell(detail, `${col}${ATTENDANCE_SUBJECT_ROW}`, spring?.ready ? spring.attendanceScore : null);
   }
-  if (fall?.ready) {
-    for (const col of ['G', 'H', 'I', 'J']) setCell(detail, `${col}${ATTENDANCE_SUBJECT_ROW}`, fall.attendanceScore);
+  for (const col of ['G', 'H', 'I', 'J']) {
+    setCell(detail, `${col}${ATTENDANCE_SUBJECT_ROW}`, fall?.ready ? fall.attendanceScore : null);
   }
 
   // ---------- 操行成績（禮貌/衣著/服務/紀律 是輸入值，操行成績本身/等第範本
@@ -208,45 +208,33 @@ export async function fillReportCardXlsx(templateBuffer: Buffer, data: ReportCar
   // 打死的文字、不是公式，跟我們系統既有的等第換算規則（見
   // lib/ReportCardDocument.tsx 的 conductGradeLabel）不一定會自動同步，這裡
   // 直接算好寫入，確保等第跟操行分數永遠對得上。----------
-  if (spring?.ready) {
-    setCell(detail, `C${CONDUCT_POLITENESS_ROW}`, spring.conduct.politeness);
-    setCell(detail, `C${CONDUCT_DRESS_ROW}`, spring.conduct.dress);
-    setCell(detail, `C${CONDUCT_SERVICE_ROW}`, spring.conduct.service);
-    setCell(detail, `C${CONDUCT_DISCIPLINE_ROW}`, spring.conduct.discipline);
-    setCell(detail, `E${CONDUCT_OVERALL_ROW}`, conductGradeLabel(spring.conduct.overall));
-  }
-  if (fall?.ready) {
-    setCell(detail, `G${CONDUCT_POLITENESS_ROW}`, fall.conduct.politeness);
-    setCell(detail, `G${CONDUCT_DRESS_ROW}`, fall.conduct.dress);
-    setCell(detail, `G${CONDUCT_SERVICE_ROW}`, fall.conduct.service);
-    setCell(detail, `G${CONDUCT_DISCIPLINE_ROW}`, fall.conduct.discipline);
-    setCell(detail, `I${CONDUCT_OVERALL_ROW}`, conductGradeLabel(fall.conduct.overall));
-  }
+  setCell(detail, `C${CONDUCT_POLITENESS_ROW}`, spring?.ready ? spring.conduct.politeness : null);
+  setCell(detail, `C${CONDUCT_DRESS_ROW}`, spring?.ready ? spring.conduct.dress : null);
+  setCell(detail, `C${CONDUCT_SERVICE_ROW}`, spring?.ready ? spring.conduct.service : null);
+  setCell(detail, `C${CONDUCT_DISCIPLINE_ROW}`, spring?.ready ? spring.conduct.discipline : null);
+  setCell(detail, `E${CONDUCT_OVERALL_ROW}`, spring?.ready ? conductGradeLabel(spring.conduct.overall) : null);
+  setCell(detail, `G${CONDUCT_POLITENESS_ROW}`, fall?.ready ? fall.conduct.politeness : null);
+  setCell(detail, `G${CONDUCT_DRESS_ROW}`, fall?.ready ? fall.conduct.dress : null);
+  setCell(detail, `G${CONDUCT_SERVICE_ROW}`, fall?.ready ? fall.conduct.service : null);
+  setCell(detail, `G${CONDUCT_DISCIPLINE_ROW}`, fall?.ready ? fall.conduct.discipline : null);
+  setCell(detail, `I${CONDUCT_OVERALL_ROW}`, fall?.ready ? conductGradeLabel(fall.conduct.overall) : null);
 
   // ---------- 出席記錄／懲獎記錄：次數是輸入值，「合計」欄範本本身有公式
   // （雖然範例檔案 M5~M8 那幾列公式寫成相乘不是相加，看起來像是範本自己的
   // 筆誤，但這是學校自己範本裡原本就有的公式，我們不擅自幫忙「修正」——
   // 不去動任何公式儲存格，只填輸入值，公式怎麼算是學校自己範本的事）。----------
-  if (spring?.ready) {
-    for (const [item, row] of Object.entries(ATTENDANCE_ITEM_ROWS)) {
-      setCell(detail, `N${row}`, spring.attendance[item as keyof typeof spring.attendance]);
-    }
-    for (const [item, row] of Object.entries(DISCIPLINE_ITEM_ROWS)) {
-      setCell(detail, `R${row}`, spring.discipline[item as keyof typeof spring.discipline]);
-    }
-    setCell(detail, CLASS_SIZE_SPRING_CELL, spring.classSize);
-    setCell(detail, CLASS_RANK_SPRING_CELL, spring.classRank);
+  for (const [item, row] of Object.entries(ATTENDANCE_ITEM_ROWS)) {
+    setCell(detail, `N${row}`, spring?.ready ? spring.attendance[item as keyof typeof spring.attendance] : null);
+    setCell(detail, `O${row}`, fall?.ready ? fall.attendance[item as keyof typeof fall.attendance] : null);
   }
-  if (fall?.ready) {
-    for (const [item, row] of Object.entries(ATTENDANCE_ITEM_ROWS)) {
-      setCell(detail, `O${row}`, fall.attendance[item as keyof typeof fall.attendance]);
-    }
-    for (const [item, row] of Object.entries(DISCIPLINE_ITEM_ROWS)) {
-      setCell(detail, `S${row}`, fall.discipline[item as keyof typeof fall.discipline]);
-    }
-    setCell(detail, CLASS_SIZE_FALL_CELL, fall.classSize);
-    setCell(detail, CLASS_RANK_FALL_CELL, fall.classRank);
+  for (const [item, row] of Object.entries(DISCIPLINE_ITEM_ROWS)) {
+    setCell(detail, `R${row}`, spring?.ready ? spring.discipline[item as keyof typeof spring.discipline] : null);
+    setCell(detail, `S${row}`, fall?.ready ? fall.discipline[item as keyof typeof fall.discipline] : null);
   }
+  setCell(detail, CLASS_SIZE_SPRING_CELL, spring?.ready ? spring.classSize : null);
+  setCell(detail, CLASS_SIZE_FALL_CELL, fall?.ready ? fall.classSize : null);
+  setCell(detail, CLASS_RANK_SPRING_CELL, spring?.ready ? spring.classRank : null);
+  setCell(detail, CLASS_RANK_FALL_CELL, fall?.ready ? fall.classRank : null);
 
   // ---------- 導師評語 ----------
   setCell(detail, REMARK_CELL, data.remark || '');
