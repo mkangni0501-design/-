@@ -175,6 +175,18 @@ export default function WeeklyAttendancePage() {
   const [notifyBusy, setNotifyBusy] = useState(false);
   const notifyPrompt = notifyQueue[0] ?? null;
 
+  // 【本輪新增】反映事項「請增加儲存鍵，讓教師能直接做一週個別學生出缺記錄，
+  // 目前只能用整天紀錄的方式套用」：原本每個儲存格的下拉選單一改就立刻寫入
+  // 資料庫（一格一次來回），要一次填一位學生一整週、每節各自不同的狀態時，
+  // 得等好幾十次個別寫入，體驗上等於「逼人只能用批次套用（一次一整天同一個
+  // 狀態）」。改成下拉選單先「暫存」在這裡（不立刻寫入），畫面上用淺黃底標示
+  // 尚未儲存，累積填好一整週要改的每一格之後，按下方新增的「儲存」按鈕一次送出
+  // 全部暫存的變更；如果本頁被關閉/重新整理，暫存但還沒按儲存的變更會遺失
+  // （不會半途寫入一半），這是刻意的設計，才能保證「儲存」永遠代表使用者確認過
+  // 全部內容。key 格式跟 attMap 一致："{student_no}|{dateStr}|{period}"。
+  const [pendingChanges, setPendingChanges] = useState<Record<string, string>>({});
+  const [savingPending, setSavingPending] = useState(false);
+
   function toggleSelectedStudent(studentNo: string) {
     setSelectedStudents((prev) => {
       const next = new Set(prev);
@@ -201,6 +213,20 @@ export default function WeeklyAttendancePage() {
   useEffect(() => {
     if (locked && !isAdmin) setShowOpenRequest(true);
   }, [locked, isAdmin]);
+
+  // 【本輪新增】還有尚未按「儲存」的暫存變更時，離開頁面（重新整理／關閉分頁）
+  // 前跳出瀏覽器內建的確認提示，避免選好一整週的資料卻忘記按儲存、一離開就
+  // 全部消失。
+  useEffect(() => {
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      if (Object.keys(pendingChanges).length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [pendingChanges]);
 
   useEffect(() => {
     (async () => {
@@ -438,14 +464,25 @@ export default function WeeklyAttendancePage() {
   }
 
   const LEAVE_STATUSES = ['事假', '病假', '公假'] as const;
+  // 【本輪新增】反映事項「【出缺席登錄：導師協助任課教師點名設定】功能，開啟時
+  // 請增加【遲到】、【曠課】選項」：原本這個開關只開放把「出席」改成事假/病假/
+  // 公假三種請假狀態，但實務上任課教師點名當下更常見的誤植是「其實遲到/曠課、
+  // 卻按成出席」，這種情況不算「請假」，原本的規則沒辦法讓導師協助更正。這裡
+  // 新增這兩個額外選項，一樣只在這個開關開啟、且目前狀態是「出席」時才適用。
+  const ASSIST_EXTRA_STATUSES = ['遲到', '曠課'] as const;
   // 非任教科目時，這個狀態改動允不允許：一律可以從「曠課」改成事假/病假/公假三種
-  // 之一；「出席」改成事假/病假/公假，則要看開發人員區「同意由導師協助任課教師
-  // 點名」這個開關（homeroomAssistEnabled）有沒有開啟——這是本輪新增的部分，關閉
-  // 時完全比照原本規則（沿用同一個狀態也視為允許，等於「不改」）。
+  // 之一；「出席」改成事假/病假/公假/遲到/曠課，則要看開發人員區「同意由導師協助
+  // 任課教師點名」這個開關（homeroomAssistEnabled）有沒有開啟——這是本輪新增的
+  // 部分，關閉時完全比照原本規則（沿用同一個狀態也視為允許，等於「不改」）。
   function isAllowedNonTeachingChange(currentStatus: string, nextStatus: string) {
     if (nextStatus === currentStatus) return true;
     if (currentStatus === '曠課' && (LEAVE_STATUSES as readonly string[]).includes(nextStatus)) return true;
-    if (homeroomAssistEnabled && currentStatus === '出席' && (LEAVE_STATUSES as readonly string[]).includes(nextStatus)) return true;
+    if (
+      homeroomAssistEnabled &&
+      currentStatus === '出席' &&
+      ([...LEAVE_STATUSES, ...ASSIST_EXTRA_STATUSES] as readonly string[]).includes(nextStatus)
+    )
+      return true;
     return false;
   }
 
@@ -478,31 +515,71 @@ export default function WeeklyAttendancePage() {
     setNotifyQueue((prev) => prev.slice(1));
   }
 
-  async function handleSetStatus(student_no: string, dateStr: string, period: number, status: string) {
-    // 【本輪新增】非任教科目時，只能把「曠課」改成事假/病假/公假——這裡是最後一道
-    // 防線（下拉選單本身也已經限制選項，但這裡再擋一次，避免有其他呼叫路徑繞過
-    // UI 限制），管理員不受影響。
-    if (!isAdmin && !isOwnTaughtPeriod(dateStr, period)) {
-      const currentStatus = attMap[`${student_no}|${dateStr}|${period}`] ?? '出席';
+  // 【本輪修改】原本是「一改就立刻寫入資料庫」，改成只「暫存」這一格要改成的
+  // 狀態，實際寫入移到 handleSaveIndividualChanges()（按下「儲存」按鈕時）才會
+  // 真的送出——不合法的變動（不是自己任教節次、又不符合允許的更正規則）還是
+  // 在這裡立刻擋下來、不會暫存，避免累積一堆選好之後儲存時才發現一半不能用。
+  function stageStatus(student_no: string, dateStr: string, period: number, status: string) {
+    const notOwnPeriod = !isAdmin && !isOwnTaughtPeriod(dateStr, period);
+    if (notOwnPeriod) {
+      const currentStatus = pendingChanges[`${student_no}|${dateStr}|${period}`] ?? attMap[`${student_no}|${dateStr}|${period}`] ?? '出席';
       if (!isAllowedNonTeachingChange(currentStatus, status)) {
         alert(
           homeroomAssistEnabled
-            ? '這一節不是您任教的科目，只能把「曠課」或「出席」改成事假／病假／公假。'
+            ? '這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假；「出席」可以改成事假／病假／公假／遲到／曠課。'
             : '這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假。'
         );
         return;
       }
     }
-    const { error } = await supabase.from('attendance').upsert(
-      { student_no, record_date: dateStr, period_no: period, status },
-      { onConflict: 'student_no,record_date,period_no' }
-    );
+    setPendingChanges((prev) => ({ ...prev, [`${student_no}|${dateStr}|${period}`]: status }));
+  }
+
+  // 【本輪新增】「儲存」按鈕：把 pendingChanges 裡暫存的每一格，一次分批送出。
+  // 反映事項「請在導師更正任課老師課堂時出缺席的功能下按下套用或者儲存時，跳出
+  // 修正的確認框，讓導師確認所填寫的資料是否正確（並提醒若送出後發現錯誤須申請
+  // 開放修正），點選正確後才發出」：這裡統一在真正送出前，只要暫存的變更裡有
+  // 任何一格是「非本人任教節次」的更正，就跳出一次確認（列出總共幾格），不用
+  // 每改一格就跳一次，累積填完一整週再一次確認、一次送出。
+  async function handleSaveIndividualChanges() {
+    const entries = Object.entries(pendingChanges);
+    if (entries.length === 0) {
+      alert('目前沒有尚未儲存的變更。');
+      return;
+    }
+    let nonTeachingChangeCount = 0;
+    for (const key of Object.keys(pendingChanges)) {
+      const [, dateStr, periodStr] = key.split('|');
+      if (!isAdmin && !isOwnTaughtPeriod(dateStr, Number(periodStr))) nonTeachingChangeCount++;
+    }
+    if (nonTeachingChangeCount > 0) {
+      const confirmed = window.confirm(
+        `這次儲存的變更裡，有 ${nonTeachingChangeCount} 格不是您任教的科目（正在幫任課教師修正）。\n\n` +
+          '請再次確認所有填寫的資料正確無誤後再送出——送出後如果發現改錯了，需要另外申請開放修正，不能直接再改一次。'
+      );
+      if (!confirmed) return;
+    }
+    setSavingPending(true);
+    const payload = entries.map(([key, status]) => {
+      const [student_no, record_date, periodStr] = key.split('|');
+      return { student_no, record_date, period_no: Number(periodStr), status };
+    });
+    const { error } = await supabase.from('attendance').upsert(payload, { onConflict: 'student_no,record_date,period_no' });
+    setSavingPending(false);
     if (error) {
       alert('儲存失敗：' + error.message);
       return;
     }
-    setAttMap((prev) => ({ ...prev, [`${student_no}|${dateStr}|${period}`]: status }));
-    checkAndPromptNotify(student_no);
+    setAttMap((prev) => {
+      const next = { ...prev };
+      payload.forEach((p) => {
+        next[`${p.student_no}|${p.record_date}|${p.period_no}`] = p.status;
+      });
+      return next;
+    });
+    const affectedStudents = new Set(payload.map((p) => p.student_no));
+    setPendingChanges({});
+    affectedStudents.forEach((studentNo) => checkAndPromptNotify(studentNo));
   }
 
   async function handleSubmitCorrectionRequest() {
@@ -591,6 +668,7 @@ export default function WeeklyAttendancePage() {
     const payload: { student_no: string; record_date: string; period_no: number; status: string }[] = [];
     const skippedDates = new Set<string>();
     let skippedNonTeachingCount = 0;
+    let nonTeachingChangeCount = 0;
     Array.from(selectedDates).forEach((dateStr) => {
       if (!isEditable(dateStr)) {
         skippedDates.add(dateStr);
@@ -604,12 +682,14 @@ export default function WeeklyAttendancePage() {
           // 也一起被覆蓋掉——非管理員時，每一節都個別檢查：不是自己任課的節次，
           // 只有「目前是曠課、且要改成事假/病假/公假」才會真的套用，其他情況直接
           // 跳過那一節（不覆蓋），不是整批擋下來。
-          if (!isAdmin && !isOwnTaughtPeriod(dateStr, period)) {
+          const notOwnPeriod = !isAdmin && !isOwnTaughtPeriod(dateStr, period);
+          if (notOwnPeriod) {
             const currentStatus = attMap[`${studentNo}|${dateStr}|${period}`] ?? '出席';
             if (!isAllowedNonTeachingChange(currentStatus, batchStatus)) {
               skippedNonTeachingCount++;
               continue;
             }
+            nonTeachingChangeCount++;
           }
           payload.push({ student_no: studentNo, record_date: dateStr, period_no: period, status: batchStatus });
         }
@@ -620,11 +700,25 @@ export default function WeeklyAttendancePage() {
       alert(
         skippedNonTeachingCount > 0
           ? homeroomAssistEnabled
-            ? '勾選範圍內都不是您任教的科目、或狀態不是「曠課」／「出席」，非任教科目只能把曠課／出席改成事假/病假/公假。'
+            ? '勾選範圍內都不是您任教的科目、或狀態不符合可修正的規則（曠課只能改成事假/病假/公假；出席可以改成事假/病假/公假/遲到/曠課）。'
             : '勾選範圍內都不是您任教的科目、或狀態不是「曠課」，非任教科目只能把曠課改成事假/病假/公假。'
           : '勾選的日期都無法直接登錄（已鎖定或超過補登範圍），請改用「申請開放」或單筆修正申請。'
       );
       return;
+    }
+    // 【本輪新增】反映事項「導師更正任課老師課堂時出缺席，按下套用時跳出確認框」：
+    // 批次套用裡只要包含「非本人任教節次」的修改，就在真正送出前多一道確認，
+    // 提醒導師這是在幫別科老師改資料、送出後改錯了要另外申請開放修正。純粹是
+    // 導師改自己任教節次的批次套用，維持原樣不用多這一次確認。
+    if (nonTeachingChangeCount > 0) {
+      const confirmed = window.confirm(
+        `這次套用裡有 ${nonTeachingChangeCount} 節不是您任教的科目（正在幫任課教師修正），將全部改成「${batchStatus}」。\n\n` +
+          '請再次確認資料正確無誤後再送出——送出後如果發現改錯了，需要另外申請開放修正，不能直接再改一次。'
+      );
+      if (!confirmed) {
+        setBatchBusy(false);
+        return;
+      }
     }
     const { error } = await supabase.from('attendance').upsert(payload, { onConflict: 'student_no,record_date,period_no' });
     setBatchBusy(false);
@@ -1006,13 +1100,13 @@ export default function WeeklyAttendancePage() {
               <summary style={{ fontSize: 12, color: '#666', cursor: 'pointer' }}>批次登錄說明</summary>
               <p style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
                 勾選學生、勾選日期，再選擇出席狀況一起套用（會套用到該天所有節次）。
-                {!isAdmin && '非任教科目的節次，只有目前是「曠課」且改成事假/病假/公假時才會套用，其他節次會自動略過。'}
+                {!isAdmin && '非任教科目的節次，只有目前是「曠課」改成事假/病假/公假、或（開啟導師協助點名時）目前是「出席」改成事假/病假/公假/遲到/曠課，才會套用，其他節次會自動略過。'}
               </p>
             </details>
           ) : (
             <p style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
               批次登錄：勾選學生、勾選日期，再選擇出席狀況一起套用（會套用到該天所有節次）。
-              {!isAdmin && '非任教科目的節次，只有目前是「曠課」且改成事假/病假/公假時才會套用，其他節次會自動略過。'}
+              {!isAdmin && '非任教科目的節次，只有目前是「曠課」改成事假/病假/公假、或（開啟導師協助點名時）目前是「出席」改成事假/病假/公假/遲到/曠課，才會套用，其他節次會自動略過。'}
             </p>
           )}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
@@ -1068,7 +1162,50 @@ export default function WeeklyAttendancePage() {
       {loading ? (
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
       ) : (
-        <table style={{ borderCollapse: 'collapse', fontSize: 12 }}>
+        <>
+          {/* 【本輪新增】反映事項「請增加儲存鍵，讓教師能直接做一週個別學生出缺記錄，
+              目前只能用整天紀錄的方式套用」：下面表格裡每一格的下拉選單改成先暫存、
+              不立刻寫入（見上面 stageStatus 的說明），這裡放「儲存」按鈕跟目前還有
+              幾格尚未儲存的提示，用 sticky 讓捲動表格時也看得到，不用捲回最上面才
+              按得到儲存。 */}
+          {Object.keys(pendingChanges).length > 0 && (
+            <div
+              style={{
+                position: 'sticky',
+                top: 0,
+                zIndex: 5,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '8px 12px',
+                marginBottom: 8,
+                background: '#FFF6D9',
+                border: '1px solid #D9A400',
+                borderRadius: 6,
+              }}
+            >
+              <span style={{ fontSize: 13, color: '#5A4400' }}>
+                尚有 {Object.keys(pendingChanges).length} 格已選擇但還沒儲存
+              </span>
+              <button
+                onClick={handleSaveIndividualChanges}
+                disabled={savingPending}
+                style={{ padding: '4px 14px', fontSize: 12, background: '#D9A400', color: '#fff', border: 'none', borderRadius: 6 }}
+              >
+                {savingPending ? '儲存中…' : '儲存'}
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm('確定要放棄目前尚未儲存的變更嗎？')) setPendingChanges({});
+                }}
+                disabled={savingPending}
+                style={{ padding: '4px 14px', fontSize: 12, background: '#fff', color: '#666', border: '1px solid #ccc', borderRadius: 6 }}
+              >
+                放棄變更
+              </button>
+            </div>
+          )}
+          <table style={{ borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr>
               <th rowSpan={2} style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, background: '#fff' }}>
@@ -1111,14 +1248,21 @@ export default function WeeklyAttendancePage() {
                     }
                     const period = p + 1;
                     const key = `${s.student_no}|${dateStr}|${period}`;
-                    const status = attMap[key] ?? '出席';
+                    // 【本輪修改】優先顯示「尚未儲存的暫存變更」，還沒暫存過的格子才顯示
+                    // 資料庫裡原本的值——這樣選好之後畫面會立刻反映選到的狀態，不用等按
+                    // 「儲存」、真正寫入資料庫之後才更新畫面。
+                    const hasPending = key in pendingChanges;
+                    const savedStatus = attMap[key] ?? '出席';
+                    const status = pendingChanges[key] ?? savedStatus;
                     const editable = isEditable(dateStr);
                     // 【本輪新增】非管理員時，判斷這一節是不是自己任教的節次——不是的話，
                     // 只能把「曠課」改成事假/病假/公假，其他狀態一律唯讀（不給下拉選單）。
                     const ownTaught = isAdmin || isOwnTaughtPeriod(dateStr, period);
-                    // 【本輪新增】homeroomAssistEnabled 開啟時，非任教節次的「出席」也視為
-                    // 可編輯（只能再改成事假/病假/公假，見下面 options／isAllowedNonTeachingChange）。
-                    const nonTeachingEditableStatus = status === '曠課' || (homeroomAssistEnabled && status === '出席');
+                    // 【本輪修正】這裡判斷「這一格能不能編輯」要看資料庫裡原本的狀態
+                    // （savedStatus），不能看暫存中的狀態（status）——不然選好一個允許的
+                    // 更正（例如曠課→事假）之後，這一格會立刻被「已經不是曠課了」鎖住，
+                    // 使用者反而沒辦法在按下「儲存」之前反悔改選別的值。
+                    const nonTeachingEditableStatus = savedStatus === '曠課' || (homeroomAssistEnabled && savedStatus === '出席');
                     const nonTeachingLockedStatus = !ownTaught && !nonTeachingEditableStatus;
                     if (editable && nonTeachingLockedStatus) {
                       return (
@@ -1126,7 +1270,7 @@ export default function WeeklyAttendancePage() {
                           key={key}
                           title={
                             homeroomAssistEnabled
-                              ? '非任教科目：只有「曠課」或「出席」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師'
+                              ? '非任教科目：「曠課」的學生能改成事假／病假／公假；「出席」的學生能改成事假／病假／公假／遲到／曠課，其他狀態請洽該科任課教師'
                               : '非任教科目：只有「曠課」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師'
                           }
                           style={{ padding: 4, textAlign: 'center', color: '#999', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}
@@ -1138,28 +1282,34 @@ export default function WeeklyAttendancePage() {
                     if (editable) {
                       const options = ownTaught
                         ? STATUS_OPTIONS
-                        : status === '出席'
-                          ? (['出席', ...LEAVE_STATUSES] as const)
+                        : savedStatus === '出席'
+                          ? ([
+                              '出席',
+                              ...LEAVE_STATUSES,
+                              ...(homeroomAssistEnabled ? ASSIST_EXTRA_STATUSES : []),
+                            ] as const)
                           : (['曠課', ...LEAVE_STATUSES] as const);
                       return (
                         <td key={key} style={{ padding: 2, textAlign: 'center', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}>
                           <select
                             value={status}
-                            onChange={(e) => handleSetStatus(s.student_no, dateStr, period, e.target.value)}
+                            onChange={(e) => stageStatus(s.student_no, dateStr, period, e.target.value)}
                             title={
-                              ownTaught
-                                ? undefined
-                                : homeroomAssistEnabled
-                                  ? '非任教科目：只能把「曠課」或「出席」改成事假／病假／公假'
-                                  : '非任教科目：只能把「曠課」改成事假／病假／公假'
+                              hasPending
+                                ? '尚未儲存：按下方「儲存」按鈕才會真正寫入'
+                                : ownTaught
+                                  ? undefined
+                                  : homeroomAssistEnabled
+                                    ? '非任教科目：只能把「曠課」改成事假／病假／公假；「出席」可以改成事假／病假／公假／遲到／曠課'
+                                    : '非任教科目：只能把「曠課」改成事假／病假／公假'
                             }
                             style={{
                               fontSize: 11,
                               padding: '2px 2px',
-                              border: '1px solid #639922',
+                              border: hasPending ? '2px solid #D9A400' : '1px solid #639922',
                               borderRadius: 4,
                               color: status === '出席' ? '#3B6D11' : '#A36A2D',
-                              background: '#fff',
+                              background: hasPending ? '#FFF6D9' : '#fff',
                             }}
                           >
                             {options.map((opt) => (
@@ -1217,6 +1367,7 @@ export default function WeeklyAttendancePage() {
             )}
           </tbody>
         </table>
+        </>
       )}
 
       {requestCell && (

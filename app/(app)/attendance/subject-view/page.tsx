@@ -6,7 +6,7 @@ import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
 import { resolveCurrentTerm } from '@/lib/academicTerm';
 
-type ClassSubjectOption = { class_id: string; subject: string; label: string; periodNos: number[] };
+type ClassSubjectOption = { class_id: string; subject: string; label: string; periodNos: number[]; slots: { weekday: number; period_no: number }[] };
 type StudentRow = { student_no: string; seat_no: number; name: string };
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
@@ -23,6 +23,7 @@ export default function SubjectAttendanceViewPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [noAssignment, setNoAssignment] = useState(false);
+  const [termDateRange, setTermDateRange] = useState<{ start: string | null; end: string | null }>({ start: null, end: null });
 
   useEffect(() => {
     getSiteContentMap().then(setSiteContent);
@@ -41,10 +42,32 @@ export default function SubjectAttendanceViewPage() {
 
       // 【2026-08 修正】原本沒有依學年學期篩選，會把過去學年度的任課紀錄也混進來，
       // 選單裡出現早已結束的班級/科目。改成只抓目前生效學年學期的任課紀錄。
+      //
+      // 【本輪修正】反映事項「統計的總節數還是錯誤，國文一星期不只4節卻只算出4節、
+      // 班會一星期一節卻有20節事假，請用科目確認從開學至今的出缺席公式」——
+      // 根因：class_schedule 只記錄「目前這個學年學期」的課表，同一個
+      // （星期幾,第幾節）在不同學期代表不同科目是正常的；但下面查 attendance
+      // 紀錄時完全沒有限制日期範圍，等於把這個學生「從入學到現在、不管哪個
+      // 學年學期」的全部出缺勤都撈出來，拿去跟「只有這學期」的課表比對——換學期
+      // 之後課表通常會變動，上學期同一個節次可能是別科，於是被誤判成/誤判不是
+      // 這學期這堂課的紀錄，兩種方向的誤差都有可能發生（該算的沒算到、不該算的
+      // 算進去了），這才是即使已經改成比對「星期幾+第幾節」、數字還是兜不起來的
+      // 真正原因。改成額外查 academic_terms 拿到「這學期開學日」，出缺勤紀錄限制
+      // 在「開學日 ~ 今天」這個範圍內，不再撈到其他學期的舊資料。
       const currentTerm = await resolveCurrentTerm();
+      if (currentTerm) {
+        const { data: termRow } = await supabase
+          .from('academic_terms')
+          .select('term_start_date')
+          .eq('academic_year', currentTerm.academic_year)
+          .eq('term', currentTerm.term)
+          .maybeSingle();
+        const todayStr = new Date().toISOString().slice(0, 10);
+        setTermDateRange({ start: termRow?.term_start_date ?? null, end: todayStr });
+      }
       let scheduleQuery = supabase
         .from('class_schedule')
-        .select('class_id, subject, period_no, classes(grade_level, class_name)')
+        .select('class_id, subject, weekday, period_no, classes(grade_level, class_name)')
         .eq('teacher_id', teacherRow.id);
       if (currentTerm) scheduleQuery = scheduleQuery.eq('academic_year', currentTerm.academic_year).eq('term', currentTerm.term);
       const { data: scheduleRows, error } = await scheduleQuery;
@@ -68,6 +91,7 @@ export default function SubjectAttendanceViewPage() {
             subject: r.subject,
             label: `${r.classes?.grade_level ?? ''}${r.classes?.class_name ?? ''}－${r.subject}`,
             periodNos: [],
+            slots: [],
           });
         }
         // 【本輪修正】反映事項「任課教師無法看到自己授課的班級學生出缺席狀況，
@@ -79,9 +103,23 @@ export default function SubjectAttendanceViewPage() {
         // 觸發這個 PostgREST 錯誤。period_no 是 null 代表這筆任課紀錄根本還沒有
         // 對應到任何實際節次，本來就不可能有出缺勤資料（attendance.period_no 是
         // not null），直接跳過、不算進 periodNos 即可。
-        if (r.period_no == null) return;
+        //
+        // 【本輪修正，另一個更嚴重的問題】反映事項「【任課班級出席查詢】出席的
+        // 結束看起來異常，一星期才一堂課，卻累計出26筆、比例明顯不對」——根因：
+        // period_no 只代表「一天裡的第幾節」（例如「第3節」），同一個 period_no
+        // 在不同星期幾會是完全不同的課（星期一第3節可能是數學、星期三第3節可能
+        // 是這裡的作文）。下面查 attendance 原本只用 period_no 篩選、完全沒篩選
+        // 星期幾，等於把「所有星期在第3節上課的紀錄」都算進來，不管是不是真的
+        // 「作文」這堂課——這就是為什麼「一星期一堂課」的科目，總筆數跟其他状态
+        // 分佈會遠超過實際上課次數。這裡額外記錄每個 (星期幾, 第幾節) 的正確
+        // 組合（slots），下面查完 attendance 之後改用「日期換算出的星期幾」+
+        // period_no 兩者都對得上，才算是這堂課的紀錄。
+        if (r.period_no == null || r.weekday == null) return;
         const entry = grouped.get(key)!;
         if (!entry.periodNos.includes(r.period_no)) entry.periodNos.push(r.period_no);
+        if (!entry.slots.some((s) => s.weekday === r.weekday && s.period_no === r.period_no)) {
+          entry.slots.push({ weekday: r.weekday, period_no: r.period_no });
+        }
       });
       const opts = Array.from(grouped.values());
       setOptions(opts);
@@ -119,11 +157,23 @@ export default function SubjectAttendanceViewPage() {
 
       // 只查詢這個科目對應節次的出缺勤——RLS 本來就只會回傳任課教師自己教的節次，
       // 這裡再加上 period_no 篩選，是為了同一班若教超過一科時，不同科目的節次不會混在一起。
-      const { data: attRows, error: attErr } = await supabase
+      // 【本輪修正】period_no 篩選只能先縮小 DB 查詢範圍（減少要抓的列數），
+      // 不能只靠這個判斷「是不是這堂課的紀錄」——同一個 period_no 在不同星期幾
+      // 可能是別科老師的課，所以多抓 record_date 回來，下面再用「日期換算出的
+      // 星期幾」+ period_no 兩者都符合 opt.slots 裡的組合，才算數。
+      let attQuery = supabase
         .from('attendance')
-        .select('student_no, status')
+        .select('student_no, status, record_date, period_no')
         .in('student_no', studentNos.length > 0 ? studentNos : ['__none__'])
         .in('period_no', opt.periodNos.length > 0 ? opt.periodNos : [-1]);
+      // 【本輪修正】限制在「這學期開學日 ~ 今天」的範圍內，理由見上面課表查詢
+      // 那段的說明——不限制日期的話，會把其他學年學期、課表配置完全不同時期的
+      // 出缺勤紀錄也混進來比對，多算或少算都有可能。開學日如果還沒在「學年學期
+      // 設定」頁填，termDateRange.start 會是 null，這種情況沒辦法安全限縮日期，
+      // 寧可維持「不限制」也不要用錯的日期範圍篩掉真正該算的紀錄。
+      if (termDateRange.start) attQuery = attQuery.gte('record_date', termDateRange.start);
+      if (termDateRange.end) attQuery = attQuery.lte('record_date', termDateRange.end);
+      const { data: attRows, error: attErr } = await attQuery;
       if (attErr) {
         setLoadError('讀取出缺勤紀錄失敗：' + attErr.message);
         setLoading(false);
@@ -131,13 +181,23 @@ export default function SubjectAttendanceViewPage() {
       }
       const map: Record<string, Record<string, number>> = {};
       (attRows ?? []).forEach((r: any) => {
+        // record_date 是 'YYYY-MM-DD' 字串，直接 new Date(...) 在某些瀏覽器時區下
+        // 會被當成 UTC 午夜、換算回本地時間可能跳到前一天，算出來的星期幾就錯了；
+        // 這裡補上 'T00:00:00' 讓它明確用本地時區解析，跟其他頁面算星期幾的方式一致。
+        const d = new Date(`${r.record_date}T00:00:00`);
+        const weekday = d.getDay() || 7; // 0(週日)->7，跟 weekly/mobile 兩頁算法一致
+        // 一定要「星期幾」跟「第幾節」兩者都對到 opt.slots 裡同一組，才算是這堂課
+        // 的紀錄——只比對其中一項都不夠精準（同一星期幾裡，別節可能是別的課；
+        // 同一節次裡，別的星期幾也可能是別的課）。
+        const isThisClass = opt.slots.some((s) => s.weekday === weekday && s.period_no === r.period_no);
+        if (!isThisClass) return;
         map[r.student_no] = map[r.student_no] ?? {};
         map[r.student_no][r.status] = (map[r.student_no][r.status] ?? 0) + 1;
       });
       setSummary(map);
       setLoading(false);
     })();
-  }, [selectedKey, options]);
+  }, [selectedKey, options, termDateRange]);
 
   if (noAssignment) {
     return (
