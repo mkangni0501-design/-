@@ -220,11 +220,13 @@ async function buildTermBlock(enrollmentId: string): Promise<TermBlock | null> {
     });
   }
 
-  const { count: classSize } = await supabaseAdmin
-    .from('enrollments')
-    .select('id', { count: 'exact', head: true })
-    .eq('class_id', enrollment.class_id)
-    .eq('term', enrollment.term);
+  // 【本輪修正】反映事項「已休學的學生，成績單上還是看得到、班排名還算進去」：
+  // 原本這裡直接數 enrollments 筆數，會把休學/轉學/退學/畢業/肄業的學生也算
+  // 進班級人數（這個查詢用 supabaseAdmin，不受 RLS 隱藏名單限制）。改成呼叫
+  // report_card_class_size()，這個函式內部會排除這些學生，理由詳見
+  // sql/88fix_report_card_ranking_hidden_students.sql 的說明。
+  const { data: classSizeValue } = await supabaseAdmin.rpc('report_card_class_size', { p_enrollment_id: enrollmentId });
+  const classSize = classSizeValue ?? null;
 
   const { data: classRankValue } = await supabaseAdmin.rpc('report_card_class_rank', { p_enrollment_id: enrollmentId });
   // 出缺席分數：改用 sql/48fix_attendance_score_formula.sql 新增的 attendance_score()，
