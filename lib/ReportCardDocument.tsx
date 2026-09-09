@@ -1048,23 +1048,37 @@ function AttendanceDisciplinePanel({
             內容最小寬度卡住，右邊界永遠精準對齊。同時把裡面每一層 View 都加上
             minHeight:0（含最裡面「上學期/下學期」兩個子列以及各自的
             標籤/數值格），避免任何一層文字內容的預設高度蓋過 flex 分配到的
-            高度，累積誤差導致整列比左表對應高度多出幾個像素。 */}
+            高度，累積誤差導致整列比左表對應高度多出幾個像素。
+
+            【本輪修正】反映事項「全班人數/全班名次「上學期」右側的垂直線請對齊
+            上方「下學期」的左右格線」：這裡「上學期/下學期」下面各自的
+            [標籤(上學期)｜數值(32)] 這兩欄，原本 label:value 的 flex 比例是
+            1.2:1，用 pdftoppm 實際渲染量出來，label/value 中間那條分隔線落在
+            比「上方「曠課」等項目列的『下學期』欄右邊界」還要再往右一點的地方
+            （量出來對不齊，偏了大約15px）。這裡用同一份渲染結果反推：要讓這條
+            線剛好落在「上方『下學期』欄右邊界」（也就是『下學期／合計』的分隔線）
+            上，label:value 的 flex 比例要改成大約 0.89:1（而不是原本的 1.2:1）。
+            改完之後再次用 pdftoppm 渲染量測，確認這條分隔線已經精準對齊上方
+            「下學期」欄的右邊界。 */}
         <View style={{ flex: layout.classSizeFlex, flexDirection: 'row', minHeight: 0 }}>
           <View style={[styles.sectionTitle, { flex: 47.45, minHeight: 0 }]}>
             <Text style={{ fontSize: styles.sectionTitle.fontSize }}>{labels.classSize}</Text>
           </View>
           <View style={{ flex: 52.56, borderLeft: BORDER, minHeight: 0 }}>
             <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.springTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
-                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>上學期</Text>
+              <View style={{ flex: 0.89, padding: 1, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
+                {/* 【本輪修正】把 label:value 比例改窄（見上面的說明）之後，「上學期」
+                    三個字用原本的字級會被欄寬截斷，這裡跟著把這個標籤的字級縮小一些
+                    （0.82倍），實測縮小後三個字能完整顯示、不會被截斷或換行。 */}
+                <Text style={{ fontSize: styles.cell.fontSize * 0.82, textAlign: 'center' }}>上學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{spring?.classSize ?? ''}</Text>
               </View>
             </View>
             <View style={{ flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.fallTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
-                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>下學期</Text>
+              <View style={{ flex: 0.89, padding: 1, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
+                <Text style={{ fontSize: styles.cell.fontSize * 0.82, textAlign: 'center' }}>下學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{fall?.classSize ?? ''}</Text>
@@ -1076,16 +1090,19 @@ function AttendanceDisciplinePanel({
           </View>
           <View style={{ flex: 52.56, borderLeft: BORDER, minHeight: 0 }}>
             <View style={{ borderBottom: BORDER, flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.springTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
-                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>上學期</Text>
+              <View style={{ flex: 0.89, padding: 1, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
+                {/* 【本輪修正】把 label:value 比例改窄（見上面的說明）之後，「上學期」
+                    三個字用原本的字級會被欄寬截斷，這裡跟著把這個標籤的字級縮小一些
+                    （0.82倍），實測縮小後三個字能完整顯示、不會被截斷或換行。 */}
+                <Text style={{ fontSize: styles.cell.fontSize * 0.82, textAlign: 'center' }}>上學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{spring?.classRank ?? ''}</Text>
               </View>
             </View>
             <View style={{ flexDirection: 'row', flex: 1, minHeight: 0, backgroundColor: config.colors.fallTermBg }}>
-              <View style={{ flex: 1.2, padding: 2, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
-                <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>下學期</Text>
+              <View style={{ flex: 0.89, padding: 1, justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
+                <Text style={{ fontSize: styles.cell.fontSize * 0.82, textAlign: 'center' }}>下學期</Text>
               </View>
               <View style={{ flex: 1, padding: 2, justifyContent: 'center', alignItems: 'center', borderLeft: BORDER, minHeight: 0 }}>
                 <Text style={{ fontSize: styles.cell.fontSize, textAlign: 'center' }}>{fall?.classRank ?? ''}</Text>
@@ -1247,14 +1264,17 @@ function CoverPage({
             <Text style={{ fontSize: 23, fontWeight: 700, textAlign: 'center' }}>學生成績通知書</Text>
           </View>
           <View style={{ height: '46%', alignItems: 'center' }}>
+            {/* 【本輪修正】反映事項「敦品勵學　崇德養志請放到照片上方」：原本這行字
+                排在照片下面，改成先放這行字、照片放下面，其餘（照片本身、色塊佔位）
+                完全不動，只是調換兩者的上下順序。 */}
+            <Text style={{ fontSize: 15, fontWeight: 700, textAlign: 'center', marginBottom: 4 }}>敦品勵學　崇德養志</Text>
             {photoSrc ? (
-              <Image src={photoSrc} style={{ width: '100%', height: '82%', objectFit: 'cover', marginBottom: 4 }} />
+              <Image src={photoSrc} style={{ width: '100%', height: '82%', objectFit: 'cover' }} />
             ) : (
-              <View style={{ width: '100%', height: '82%', backgroundColor: '#BFD7EA', alignItems: 'center', justifyContent: 'center', marginBottom: 4 }}>
+              <View style={{ width: '100%', height: '82%', backgroundColor: '#BFD7EA', alignItems: 'center', justifyContent: 'center' }}>
                 <Text style={{ fontSize: 7, color: '#556' }}>（校園照片）</Text>
               </View>
             )}
-            <Text style={{ fontSize: 15, fontWeight: 700, textAlign: 'center' }}>敦品勵學　崇德養志</Text>
           </View>
           <View style={{ height: '36%', alignItems: 'center' }}>
             <Text style={{ fontSize: 13, lineHeight: 2.4, textAlign: 'center' }}>
@@ -1363,14 +1383,22 @@ function CoverPage({
               </View>
             )}
           </View>
-          <View style={{ height: '46%', alignItems: 'center' }}>
-            <Text style={{ fontSize: 14, fontWeight: 700, textAlign: 'center', fontFamily: 'NotoSansThai' }}>โรงเรียนหัวหยุน</Text>
-            <Text style={{ fontSize: 10, textAlign: 'center', marginBottom: 2, fontFamily: 'NotoSansThai' }}>โดย</Text>
-            <Text style={{ fontSize: 10, textAlign: 'center', marginBottom: 8, fontFamily: 'NotoSansThai' }}>สมาคมยูนนาน จังหวัดเชียงราย</Text>
-            <Text style={{ fontSize: 17, fontWeight: 700, textAlign: 'center' }}>清萊雲南會館附屬</Text>
-            <Text style={{ fontSize: 17, fontWeight: 700, textAlign: 'center' }}>華雲學校</Text>
+          {/* 【本輪修正】反映事項「泰文/中文校名請在文字不換行的情況下放大，並全部
+              下移一行」：這裡把原本的 46%／36%（下面留白）改成 55%／27%，勻一些
+              高度給校名這段用——多出來的高度分兩個用途：頂端加一小段空白，讓整段
+              文字往下移大約一行的位置；字級本身也放大（泰文 14/10/10 →
+              17/12/12，中文 17 → 20）。放大後的字級用同一份 pdftoppm 渲染流程
+              實測過，最長的一行（สมาคมยูนนาน จังหวัดเชียงราย）在這個欄寬底下
+              仍然是一行，沒有被截斷或換行。 */}
+          <View style={{ height: '55%', alignItems: 'center', justifyContent: 'flex-start' }}>
+            <View style={{ height: 16 }} />
+            <Text style={{ fontSize: 17, fontWeight: 700, textAlign: 'center', fontFamily: 'NotoSansThai' }}>โรงเรียนหัวหยุน</Text>
+            <Text style={{ fontSize: 12, textAlign: 'center', marginBottom: 2, fontFamily: 'NotoSansThai' }}>โดย</Text>
+            <Text style={{ fontSize: 12, textAlign: 'center', marginBottom: 8, fontFamily: 'NotoSansThai' }}>สมาคมยูนนาน จังหวัดเชียงราย</Text>
+            <Text style={{ fontSize: 20, fontWeight: 700, textAlign: 'center' }}>清萊雲南會館附屬</Text>
+            <Text style={{ fontSize: 20, fontWeight: 700, textAlign: 'center' }}>華雲學校</Text>
           </View>
-          <View style={{ height: '36%' }} />
+          <View style={{ height: '27%' }} />
         </View>
       </View>
 
