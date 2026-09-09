@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { supabase, getCurrentAppUser, getCurrentTeacherId, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
 import { showPdfInWindow } from '@/lib/pdfPreview';
@@ -367,11 +368,14 @@ export default function ScoreEntryPage() {
       return;
     }
     (async () => {
-      const { data: enrollRows } = await supabase
+      const { data: enrollRowsRaw } = await supabase
         .from('enrollments')
         .select('id, seat_no, student_no')
         .eq('class_id', classId)
         .order('seat_no');
+      // 【本輪新增】理由同上方主要名冊查詢，見 lib/hiddenStudents.ts 的說明。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
+      const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
       const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
       const { data: studentRows } = await supabase
         .from('students')
@@ -387,7 +391,7 @@ export default function ScoreEntryPage() {
       );
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [classId, canSeeReportCards]);
+  }, [classId, canSeeReportCards, isAdmin]);
 
   // 個人成績單預覽／列印：跟「班級成績總表」頁共用同一支 API。原本失敗時只會顯示
   // 「產生成績單失敗」，讓人以為這個功能整個壞了；其實最常見的原因是期中/期末/平時分
@@ -444,7 +448,7 @@ export default function ScoreEntryPage() {
     (async () => {
       // 注意：這裡刻意不用 students(name) 這種自動關聯embed查詢——在這個資料庫上這類查詢會不穩定、
       // 整批失敗又不一定會回報明確錯誤，導致學生名單完全出不來。改成分開查、用 Map 手動兜資料。
-      const { data: enrollRows, error: enrollErr } = await supabase
+      const { data: enrollRowsRaw, error: enrollErr } = await supabase
         .from('enrollments')
         .select('id, seat_no, student_no, term')
         .eq('class_id', classId)
@@ -453,6 +457,13 @@ export default function ScoreEntryPage() {
         setLoadError('讀取學生名單失敗：' + enrollErr.message);
         return;
       }
+      // 【本輪新增】反映事項「已休學學生仍可見，現在只有成績登錄表會看到他」：
+      // 詳細原因見 lib/hiddenStudents.ts 的說明——管理員切換成「教師視角」預覽
+      // 時，資料庫查詢仍然是用管理員的真實身分執行，RLS 不會把隱藏名單的學生
+      // 擋掉，這裡在前端再補一層過濾（真教師帳號本來就已經被 RLS 擋掉，這裡
+      // 是安全但多餘的二次確認，不影響）。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
+      const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
 
       const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
       const { data: studentRows, error: studentErr } = await supabase
