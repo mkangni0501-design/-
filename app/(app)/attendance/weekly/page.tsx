@@ -1184,8 +1184,22 @@ export default function WeeklyAttendancePage() {
                 borderRadius: 6,
               }}
             >
+              {/* 【本輪修正】反映事項「請改成目前填寫的學生各修正的節數有幾節，明確
+                  讓導師知道他填了哪位學生多少節假」：原本只顯示一個總格數，看不出來
+                  是哪些學生、各改了幾節。改成依學生分組列出「姓名：N節」，一次掃過去
+                  就知道這次要儲存的內容涵蓋哪些學生、各自改了多少節，送出前能確認
+                  有沒有選錯人或選漏。 */}
               <span style={{ fontSize: 13, color: '#5A4400' }}>
-                尚有 {Object.keys(pendingChanges).length} 格已選擇但還沒儲存
+                尚未儲存：
+                {Object.entries(
+                  Object.keys(pendingChanges).reduce<Record<string, number>>((acc, key) => {
+                    const studentNo = key.split('|')[0];
+                    acc[studentNo] = (acc[studentNo] ?? 0) + 1;
+                    return acc;
+                  }, {})
+                )
+                  .map(([studentNo, count]) => `${students.find((s) => s.student_no === studentNo)?.name ?? studentNo} ${count}節`)
+                  .join('、')}
               </span>
               <button
                 onClick={handleSaveIndividualChanges}

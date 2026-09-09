@@ -9,6 +9,16 @@ import { resolveCurrentTerm } from '@/lib/academicTerm';
 type ClassSubjectOption = { class_id: string; subject: string; label: string; periodNos: number[]; slots: { weekday: number; period_no: number }[] };
 type StudentRow = { student_no: string; seat_no: number; name: string };
 
+// 在台灣（UTC+8）午夜到早上8點之間，UTC 日期會是前一天，導致「星期一」卻顯示成上週日的日期。
+// 改用本地時間的年/月/日組字串，才會跟畫面上的「星期幾」對得起來——跟
+// attendance/weekly/page.tsx 的 toDateStr() 是同一套算法。
+function toLocalDateStr(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
 
 // 任課教師出席查詢：只能看到自己授課班級、自己教的那個科目所對應節次的出缺勤狀況，
@@ -180,6 +190,8 @@ export default function SubjectAttendanceViewPage() {
         return;
       }
       const map: Record<string, Record<string, number>> = {};
+      // 現有紀錄先整理成 { "student_no|date|period_no": status } 方便查找。
+      const existingByKey: Record<string, string> = {};
       (attRows ?? []).forEach((r: any) => {
         // record_date 是 'YYYY-MM-DD' 字串，直接 new Date(...) 在某些瀏覽器時區下
         // 會被當成 UTC 午夜、換算回本地時間可能跳到前一天，算出來的星期幾就錯了；
@@ -191,8 +203,39 @@ export default function SubjectAttendanceViewPage() {
         // 同一節次裡，別的星期幾也可能是別的課）。
         const isThisClass = opt.slots.some((s) => s.weekday === weekday && s.period_no === r.period_no);
         if (!isThisClass) return;
-        map[r.student_no] = map[r.student_no] ?? {};
-        map[r.student_no][r.status] = (map[r.student_no][r.status] ?? 0) + 1;
+        existingByKey[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
+      });
+
+      // 【本輪修正】反映事項「所有人的出席、曠課、遲到、病假、事假、公假總和節數
+      // 應該要一樣，但是並沒有」——根因：attendance 這張表只有老師「實際點過」的
+      // 節次才會有一筆紀錄，畫面上顯示的預設「出席」只是前端沒存檔的預設值，不是
+      // 真的寫進資料庫的一筆——如果某節課老師剛好沒點開那一格、直接跳過（畫面上
+      // 看起來還是出席，但資料庫根本沒有那一列），這裡原本用「資料庫實際有幾列」
+      // 去加總，這位學生那一節就完全不會被算進任何統計，導致每個人的總筆數
+      // 不一樣多。改成不是去數「資料庫裡有幾列」，是先把這堂課「從開學到今天」
+      // 應該要上的每一次課（依 opt.slots 的星期幾＋第幾節，逐日推算實際日期）
+      // 都列出來，每一次×每個學生都算一格，資料庫有紀錄就用那筆的狀態，沒有
+      // 紀錄就當作「出席」——這樣不管老師有沒有每次都手動存檔，全班/同一科目
+      // 所有學生的總節數保證一樣多（都等於這學期到今天為止實際上了幾次課）。
+      const scheduledDates: { dateStr: string; period_no: number }[] = [];
+      if (termDateRange.start && termDateRange.end) {
+        const cursor = new Date(`${termDateRange.start}T00:00:00`);
+        const end = new Date(`${termDateRange.end}T00:00:00`);
+        while (cursor <= end) {
+          const weekday = cursor.getDay() || 7;
+          const dateStr = toLocalDateStr(cursor);
+          opt.slots.forEach((s) => {
+            if (s.weekday === weekday) scheduledDates.push({ dateStr, period_no: s.period_no });
+          });
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      }
+      rows.forEach((s) => {
+        map[s.student_no] = {};
+        scheduledDates.forEach(({ dateStr, period_no }) => {
+          const status = existingByKey[`${s.student_no}|${dateStr}|${period_no}`] ?? '出席';
+          map[s.student_no][status] = (map[s.student_no][status] ?? 0) + 1;
+        });
       });
       setSummary(map);
       setLoading(false);
