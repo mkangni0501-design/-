@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useIsMobile } from '@/lib/useIsMobile';
 
 // 操行成績「禮貌／衣著／服務／紀律」四個分項評分——依你的確認新增的評分介面
@@ -95,11 +96,15 @@ export default function ConductScoresTab() {
     }
     (async () => {
       setLoading(true);
-      const { data: enrollRows } = await supabase
+      const { data: enrollRowsRaw } = await supabase
         .from('enrollments')
         .select('id, seat_no, student_no')
         .eq('class_id', classId)
         .order('seat_no');
+      // 【本輪新增】理由見 lib/hiddenStudents.ts 的說明（管理員切換教師視角
+      // 預覽時，RLS 不會過濾隱藏名單，這裡在前端補一層過濾）。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
+      const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
       const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
       const { data: studentRows } = await supabase
         .from('students')
@@ -130,7 +135,7 @@ export default function ConductScoresTab() {
       );
       setLoading(false);
     })();
-  }, [classId]);
+  }, [classId, isAdmin]);
 
   function updateField(enrollmentId: string, field: 'politeness' | 'dress' | 'service' | 'discipline', value: string) {
     setRows((prev) => prev.map((r) => (r.enrollment_id === enrollmentId ? { ...r, [field]: value } : r)));

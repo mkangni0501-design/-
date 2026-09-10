@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { isDepartmentLead } from '@/lib/departments';
 import { downloadClassScoreExcel } from '@/lib/excelTemplates';
@@ -200,12 +201,19 @@ export default function ClassSummaryPage() {
       if (clsRow?.academic_year) setAcademicYear(clsRow.academic_year);
       if (clsRow?.grade_level) setGradeLevel(clsRow.grade_level);
 
-      const { data: enrollRows } = await supabase
+      const { data: enrollRowsRaw } = await supabase
         .from('enrollments')
-        .select('id, seat_no, term, students(name)')
+        .select('id, seat_no, term, student_no, students(name)')
         .eq('class_id', classId)
         .eq('is_current', true)
         .order('seat_no');
+      // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到，
+      // 其他視角皆無法顯示」——管理員切換成「教師視角」預覽時，資料庫查詢仍然
+      // 用管理員的真實身分執行，RLS 不會把隱藏名單的學生擋掉，這裡在前端再補
+      // 一層過濾，詳見 lib/hiddenStudents.ts 的說明（真教師帳號本來就已經被
+      // RLS 擋掉，這裡是安全但多餘的二次確認）。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
+      const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
       const enrolls: EnrollRow[] = (enrollRows ?? []).map((r: any) => ({ id: r.id, seat_no: r.seat_no, name: r.students.name }));
       setEnrollments(enrolls);
       const enrollIds = enrolls.map((e) => e.id);

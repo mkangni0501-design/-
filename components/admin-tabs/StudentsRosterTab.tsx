@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, getCurrentTeacherId, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import ErrorBanner from '@/components/ErrorBanner';
 
 type ClassOption = {
@@ -121,10 +122,15 @@ export default function StudentsRosterTab() {
         .eq('is_current', true)
         .order('seat_no');
       setLoadError(error ? '讀取學生名冊失敗：' + error.message : null);
-      setRows((data ?? []) as unknown as RosterRow[]);
+      // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到，
+      // 其他視角皆無法顯示」——理由見 lib/hiddenStudents.ts 的說明（管理員切換
+      // 成「教師視角」預覽時，RLS 不會過濾隱藏名單，這裡在前端補一層過濾）。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((data ?? []).map((r: any) => r.student_no));
+      const visibleRows = (data ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
+      setRows(visibleRows as unknown as RosterRow[]);
       setLoading(false);
     })();
-  }, [classId]);
+  }, [classId, isAdmin]);
 
   async function toggleOpen(studentNo: string) {
     if (openStudentNo === studentNo) {
