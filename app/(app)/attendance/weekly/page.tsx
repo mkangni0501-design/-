@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView, getCurrentTeacherId } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { departmentForGrade } from '@/lib/gradeMapping';
 import { getEffectivePeriodCount, WEEKDAY_LABELS } from '@/lib/periodConfig';
@@ -359,7 +360,13 @@ export default function WeeklyAttendancePage() {
         .order('seat_no');
       if (enrollErr) setLoadError('讀取學生名單失敗：' + enrollErr.message);
 
-      const studentNos0 = (enrollRows ?? []).map((r: any) => r.student_no);
+      // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到，
+      // 其他視角皆無法顯示」——理由見 lib/hiddenStudents.ts 的說明（管理員切換
+      // 成「教師視角」預覽時，RLS 不會過濾隱藏名單，這裡在前端補一層過濾）。
+      const hiddenNos0 = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRows ?? []).map((r: any) => r.student_no));
+      const visibleEnrollRows = (enrollRows ?? []).filter((r: any) => !hiddenNos0.has(r.student_no));
+
+      const studentNos0 = visibleEnrollRows.map((r: any) => r.student_no);
       const { data: studentRows0, error: studentErr0 } = await supabase
         .from('students')
         .select('student_no, name')
@@ -367,7 +374,7 @@ export default function WeeklyAttendancePage() {
       if (studentErr0) setLoadError('讀取學生姓名失敗：' + studentErr0.message);
       const nameByStudentNo0 = new Map((studentRows0 ?? []).map((s: any) => [s.student_no, s.name]));
 
-      const rows: StudentRow[] = (enrollRows ?? []).map((r: any) => ({
+      const rows: StudentRow[] = (visibleEnrollRows ?? []).map((r: any) => ({
         student_no: r.student_no,
         seat_no: r.seat_no,
         name: nameByStudentNo0.get(r.student_no) ?? '（找不到姓名）',

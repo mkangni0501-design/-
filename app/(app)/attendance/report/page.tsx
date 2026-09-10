@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import ErrorBanner from '@/components/ErrorBanner';
 
 type ClassOption = { id: string; label: string };
@@ -95,7 +96,7 @@ function AttendanceReportPageInner() {
         if (opt) setClassName(opt.label);
       }
 
-      const { data: enrollRows, error: enrollErr } = await supabase
+      const { data: enrollRowsRaw, error: enrollErr } = await supabase
         .from('enrollments')
         .select('seat_no, student_no')
         .eq('class_id', classId)
@@ -105,6 +106,10 @@ function AttendanceReportPageInner() {
         setLoading(false);
         return;
       }
+      // 【本輪新增】理由見 lib/hiddenStudents.ts 的說明（管理員切換教師視角
+      // 預覽時，RLS 不會過濾隱藏名單，這裡在前端補一層過濾）。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
+      const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
       const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
       const { data: studentRows } = await supabase
         .from('students')

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { getSiteContentMap } from '@/lib/siteContent';
 import { departmentForGrade } from '@/lib/gradeMapping';
 import { getEffectivePeriodCount } from '@/lib/periodConfig';
@@ -308,12 +309,17 @@ export default function MobileAttendancePage() {
       // 那筆紀錄（is_current=false）仍然掛在原本的 class_id 底下，會讓已經離開這個班的
       // 學生繼續出現在每日出缺勤名單裡。改成只抓 is_current=true，跟其他頁面
       // （任課班級出席查詢、班級帳號設定…）用同一套「目前現行班級」判斷方式一致。
-      const { data: enrollRows } = await supabase
+      const { data: enrollRowsRaw } = await supabase
         .from('enrollments')
         .select('seat_no, student_no')
         .eq('class_id', targetClassId)
         .eq('is_current', true)
         .order('seat_no');
+
+      // 【本輪新增】理由見 lib/hiddenStudents.ts 的說明（管理員切換教師視角
+      // 預覽時，RLS 不會過濾隱藏名單，這裡在前端補一層過濾）。
+      const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
+      const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
 
       const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
       const { data: studentRows } = await supabase
