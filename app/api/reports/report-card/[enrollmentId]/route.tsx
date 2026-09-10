@@ -28,6 +28,23 @@ export async function GET(req: NextRequest, { params }: { params: { enrollmentId
   const allowed = await canAccessClass(callerAuth.user.id, classId);
   if (!allowed) return NextResponse.json({ error: '沒有權限產出此成績單' }, { status: 403 });
 
+  // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到，
+  // 其他視角皆無法顯示」——canAccessClass() 檢查的是「有沒有權限管這個班」
+  // （導師／教務／管理員），沒有另外檢查「這位學生本人是不是已經是隱藏名單」。
+  // 已休學/轉學/退學的學生，enrollments 紀錄本身會保留（座號不釋放，見
+  // sql/61 的說明），所以他最後所屬班級的導師，理論上還是能透過這支 API
+  // 印出他個人的成績單——這裡另外擋一次：非真管理員身分時，如果這位學生已經
+  // 是隱藏名單，直接回絕。
+  const { data: callerProfile } = await supabaseAdmin.from('app_users').select('role').eq('id', callerAuth.user.id).maybeSingle();
+  const isTrueAdmin = !!callerProfile && ['admin_a', 'admin_b', 'system_admin_s'].includes(callerProfile.role);
+  if (!isTrueAdmin) {
+    const { data: studentNoRow } = await supabaseAdmin.from('enrollments').select('student_no').eq('id', enrollmentId).maybeSingle();
+    if (studentNoRow) {
+      const { data: hiddenCheck } = await supabaseAdmin.rpc('student_is_hidden', { p_student_no: studentNoRow.student_no });
+      if (hiddenCheck) return NextResponse.json({ error: '這位學生的學籍狀態已異動，只有管理員能產出其成績單' }, { status: 403 });
+    }
+  }
+
   // ---- 2. 組資料（跟批次列印共用同一份邏輯，規則異動只要改 lib/reportCard.ts 一處） ----
   const result = await getReportCardResult(enrollmentId);
   // 用 'reason' in result 判斷、不要用 !result.ready：這個專案 tsconfig 的 strict:false

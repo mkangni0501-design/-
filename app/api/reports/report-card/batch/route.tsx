@@ -44,14 +44,31 @@ export async function POST(req: NextRequest) {
   }
 
   // ---- 3. 撈出這些班級、依班級→座號排序的所有學生 ----
-  const { data: enrollments } = await supabaseAdmin
+  const { data: enrollmentsRaw } = await supabaseAdmin
     .from('enrollments')
-    .select('id, seat_no, class_id')
+    .select('id, seat_no, class_id, student_no')
     .in('class_id', classIds)
     .order('class_id', { ascending: true })
     .order('seat_no', { ascending: true });
 
-  if (!enrollments || enrollments.length === 0) {
+  if (!enrollmentsRaw || enrollmentsRaw.length === 0) {
+    return NextResponse.json({ error: '這些班級目前沒有在籍學生' }, { status: 404 });
+  }
+
+  // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到，
+  // 其他視角皆無法顯示」——理由見 [enrollmentId]/route.tsx 單筆列印那邊的說明，
+  // 批次列印同樣要擋：非真管理員身分時，已經是隱藏名單的學生直接從這次要
+  // 產出的名單裡拿掉，不會連他的成績單也一起批次印出來。
+  const { data: callerProfile } = await supabaseAdmin.from('app_users').select('role').eq('id', callerAuth.user.id).maybeSingle();
+  const isTrueAdmin = !!callerProfile && ['admin_a', 'admin_b', 'system_admin_s'].includes(callerProfile.role);
+  let enrollments = enrollmentsRaw;
+  if (!isTrueAdmin) {
+    const hiddenFlags = await Promise.all(
+      enrollmentsRaw.map((en: any) => supabaseAdmin.rpc('student_is_hidden', { p_student_no: en.student_no }))
+    );
+    enrollments = enrollmentsRaw.filter((_: any, i: number) => !hiddenFlags[i].data);
+  }
+  if (enrollments.length === 0) {
     return NextResponse.json({ error: '這些班級目前沒有在籍學生' }, { status: 404 });
   }
 
