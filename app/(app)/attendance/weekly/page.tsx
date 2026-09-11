@@ -8,6 +8,7 @@ import { useIsMobile } from '@/lib/useIsMobile';
 import { departmentForGrade } from '@/lib/gradeMapping';
 import { getEffectivePeriodCount, WEEKDAY_LABELS } from '@/lib/periodConfig';
 import { resolveCurrentTerm } from '@/lib/academicTerm';
+import { fetchAllPaged } from '@/lib/schoolWideDataQueries';
 import {
   readWorkbook,
   readAllClassSheets,
@@ -137,6 +138,65 @@ function attMapToCurrentAttendance(attMap: Record<string, string>): CurrentAtten
     result[studentNo][`${dateStr}_${periodStr}`] = status;
   });
   return result;
+}
+
+// 【本輪新增】反映事項「下載日期要包含開學起到目前檢視的那一週」：查這個學年度/
+// 學期「開學」的日期（academic_terms.term_start_date），下載範本的日期範圍要從
+// 這一天開始，而不是只有「目前正在檢視的這一週」。查不到（例如還沒有人到
+// 「學年學期設定」頁填過起訖日）就傳回 null，呼叫端會退回原本「只有這一週」的
+// 行為，不會讓下載功能整個掛掉。
+async function resolveTermStartDate(academicYear: number, term: string): Promise<Date | null> {
+  const { data } = await supabase
+    .from('academic_terms')
+    .select('term_start_date')
+    .eq('academic_year', academicYear)
+    .eq('term', term)
+    .maybeSingle();
+  if (!data?.term_start_date) return null;
+  return parseLocalDateStr(String(data.term_start_date));
+}
+
+// 組出「從 start 到 end（含頭尾）」之間所有週一~週六的日期，跳過週日——
+// 跟現有「一週」畫面的日期規則一致（WEEKDAY_LABELS 只有一~六）。
+function buildMonToSatDateRange(start: Date, end: Date): Date[] {
+  const dates: Date[] = [];
+  const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const endTime = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  while (cur.getTime() <= endTime) {
+    if (cur.getDay() !== 0) dates.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return dates;
+}
+
+// 查這些學生「開學起～目前這一週」整段期間已經存在的出缺勤紀錄，組成
+// attMapToCurrentAttendance() 要的格式。期間可能橫跨一整個學期，筆數容易超過
+// PostgREST 單次回傳上限，改用 fetchAllPaged() 分頁撈到底（見
+// lib/schoolWideDataQueries.ts 開頭的說明），避免資料被靜默截斷。
+async function fetchCurrentAttendanceForRange(
+  studentNos: string[],
+  startStr: string,
+  endStr: string
+): Promise<CurrentAttendanceByStudent> {
+  if (studentNos.length === 0) return {};
+  const CHUNK = 200; // .in('student_no', [...]) 的陣列大小，避免單一請求網址過長
+  const attMapFlat: Record<string, string> = {};
+  for (let i = 0; i < studentNos.length; i += CHUNK) {
+    const chunk = studentNos.slice(i, i + CHUNK);
+    const { data } = await fetchAllPaged((from, to) =>
+      supabase
+        .from('attendance')
+        .select('student_no, record_date, period_no, status')
+        .in('student_no', chunk)
+        .gte('record_date', startStr)
+        .lte('record_date', endStr)
+        .range(from, to)
+    );
+    (data ?? []).forEach((r: any) => {
+      attMapFlat[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
+    });
+  }
+  return attMapToCurrentAttendance(attMapFlat);
 }
 
 // 查這個班「目前實際教的科目」（任課教師設定 class_schedule ∪ 科目與比重設定
@@ -835,17 +895,25 @@ export default function WeeklyAttendancePage() {
       downloadScoreAttendanceTemplate();
       return;
     }
-    // 【本輪新增】反映事項「下載全校/單一班級資料時，同時匯出目前的紀錄（包含成績），
-    // 確保上傳後的資料是最新最正確的版本」：日期改用「目前正在檢視的這一週」
-    // （weekDates，畫面上「上一週／下一週」切換的同一份資料）取代原本寫死的示範日期；
-    // 出缺勤帶入 attMap（本來就是限定這一週查回來的資料，見上面主要的 useEffect）；
-    // 分數則另外查這個班目前的科目與已登錄分數，一併帶出方便老師對照。
-    const { subjects, currentScores } = await fetchSubjectsAndScoresForClass(
-      classId,
-      cls.academic_year,
-      cls.grade_level,
-      students.map((s) => s.student_no)
-    );
+    // 【本輪新增】反映事項「下載日期要包含開學起到目前檢視的那一週」「每天的節數要
+    // 符合該班級課表設定節數」「下載全校/單一班級資料時，同時匯出目前的紀錄（包含
+    // 成績），確保上傳後的資料是最新最正確的版本」：
+    // - 日期範圍改成「開學（academic_terms.term_start_date）～目前正在檢視的這一週」
+    //   （查不到開學日期就退回原本「只有這一週」的範圍，不讓下載功能掛掉）；
+    // - 每天節數改用 periodCounts（本來就是畫面上這個班依課表設定算出來的堂數，
+    //   見上面主要的 useEffect，跟星期幾有關、不會因為換週次而不同）；
+    // - 出缺勤紀錄改成查整個日期範圍（attMap 只有目前這一週，範圍擴大後不能只用它）；
+    // - 分數則另外查這個班目前的科目與已登錄分數，一併帶出方便老師對照。
+    const termStart = await resolveTermStartDate(cls.academic_year, currentTerm?.term ?? '上學期');
+    const attendanceDates = buildMonToSatDateRange(termStart ?? weekDates[0], weekDates[5]);
+    const [{ subjects, currentScores }, currentAttendance] = await Promise.all([
+      fetchSubjectsAndScoresForClass(classId, cls.academic_year, cls.grade_level, students.map((s) => s.student_no)),
+      fetchCurrentAttendanceForRange(
+        students.map((s) => s.student_no),
+        toDateStr(attendanceDates[0]),
+        toDateStr(attendanceDates[attendanceDates.length - 1])
+      ),
+    ]);
     downloadScoreAttendanceTemplateForClass({
       academicYear: cls.academic_year,
       term: currentTerm?.term ?? '上學期',
@@ -857,8 +925,9 @@ export default function WeeklyAttendancePage() {
       // ClassRosterStudent（seatNo/studentNo）欄位名稱對不起來，是個既有的型別
       // 不吻合問題（順手一併修正，這次改動本來就會動到這個呼叫）。
       students: students.map((s) => ({ seatNo: s.seat_no, studentNo: s.student_no, name: s.name })),
-      weekDates,
-      currentAttendance: attMapToCurrentAttendance(attMap),
+      attendanceDates,
+      periodCountsByWeekday: periodCounts,
+      currentAttendance,
       currentScores,
     });
   }
@@ -883,12 +952,17 @@ export default function WeeklyAttendancePage() {
       alert('讀取全校班級清單失敗：' + (clsErr?.message ?? '目前學年度沒有任何班級'));
       return;
     }
-    // 【本輪新增】反映事項「下載全校/單一班級資料時，同時匯出目前的紀錄（包含成績），
-    // 確保上傳後的資料是最新最正確的版本」：全校下載一樣用「目前正在檢視的這一週」
-    // （weekDates）當作日期，並逐班查這一週已存在的出缺勤紀錄＋目前科目與已登錄分數，
-    // 帶入下載下來的檔案，理由同單班下載（見 handleDownloadTemplate 的說明）。
-    const startStr = toDateStr(weekDates[0]);
-    const endStr = toDateStr(weekDates[5]);
+    // 【本輪新增】反映事項「下載日期要包含開學起到目前檢視的那一週」「每天的節數要
+    // 符合該班級課表設定節數」「下載全校/單一班級資料時，同時匯出目前的紀錄（包含
+    // 成績），確保上傳後的資料是最新最正確的版本」：全校下載一樣改成「開學～目前
+    // 正在檢視的這一週」的日期範圍、每天節數依各班課表設定，並逐班查這段期間已存在
+    // 的出缺勤紀錄＋目前科目與已登錄分數，帶入下載下來的檔案，理由同單班下載
+    // （見 handleDownloadTemplate 的說明）。全校所有班級同學年度/學期，開學日期只需
+    // 查一次、所有班級共用。
+    const termStart = await resolveTermStartDate(currentTerm.academic_year, currentTerm.term);
+    const attendanceDates = buildMonToSatDateRange(termStart ?? weekDates[0], weekDates[5]);
+    const startStr = toDateStr(attendanceDates[0]);
+    const endStr = toDateStr(attendanceDates[attendanceDates.length - 1]);
     const classesData = await Promise.all(
       allClasses.map(async (c: any) => {
         const { data: enrollRows } = await supabase
@@ -898,25 +972,16 @@ export default function WeeklyAttendancePage() {
           .eq('is_current', true)
           .order('seat_no');
         const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
-        const [{ data: studentRows }, { data: attRows }, { subjects, currentScores }] = await Promise.all([
+        const dept = departmentForGrade(c.grade_level);
+        const [{ data: studentRows }, currentAttendance, { subjects, currentScores }, periodCountsByWeekday] = await Promise.all([
           studentNos.length === 0
             ? Promise.resolve({ data: [] as any[] })
             : supabase.from('students').select('student_no, name').in('student_no', studentNos),
-          studentNos.length === 0
-            ? Promise.resolve({ data: [] as any[] })
-            : supabase
-                .from('attendance')
-                .select('student_no, record_date, period_no, status')
-                .in('student_no', studentNos)
-                .gte('record_date', startStr)
-                .lte('record_date', endStr),
+          fetchCurrentAttendanceForRange(studentNos, startStr, endStr),
           fetchSubjectsAndScoresForClass(c.id, currentTerm.academic_year, c.grade_level, studentNos),
+          Promise.all([1, 2, 3, 4, 5, 6].map((weekday) => getEffectivePeriodCount(weekday, dept, c.id))),
         ]);
         const nameByStudentNo = new Map((studentRows ?? []).map((s: any) => [s.student_no, s.name]));
-        const attMapForClass: Record<string, string> = {};
-        (attRows ?? []).forEach((r: any) => {
-          attMapForClass[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
-        });
         return {
           academicYear: currentTerm.academic_year,
           term: currentTerm.term,
@@ -928,8 +993,9 @@ export default function WeeklyAttendancePage() {
             studentNo: r.student_no,
             name: nameByStudentNo.get(r.student_no) ?? '（找不到姓名）',
           })),
-          weekDates,
-          currentAttendance: attMapToCurrentAttendance(attMapForClass),
+          attendanceDates,
+          periodCountsByWeekday,
+          currentAttendance,
           currentScores,
         };
       })
@@ -1000,7 +1066,7 @@ export default function WeeklyAttendancePage() {
               skippedFutureCount++;
               continue;
             }
-            for (let period = 1; period <= 5; period++) {
+            for (let period = 1; period <= dc.periodCount; period++) {
               const colIdx = dc.colIndex + (period - 1);
               const code = row[colIdx];
               // 【本輪新增】系統管理員的檔案可以直接覆蓋原有出缺席資料：空白儲存格
@@ -1057,7 +1123,7 @@ export default function WeeklyAttendancePage() {
     if (dateColumns.length === 0) {
       return {
         successCount: 0,
-        errors: ['讀不到任何日期欄位（第5列），請確認日期格式是「5月10日」這種文字、或是Excel日期格式，且從第4欄開始每個日期固定間隔5欄'],
+        errors: ['讀不到任何日期欄位（第5列），請確認日期格式是「5月10日」這種文字、或是Excel日期格式'],
       };
     }
     if (studentsFromFile.length === 0) {
@@ -1079,7 +1145,7 @@ export default function WeeklyAttendancePage() {
           skippedFutureSingleClass++;
           continue;
         }
-        for (let period = 1; period <= 5; period++) {
+        for (let period = 1; period <= dc.periodCount; period++) {
           const colIdx = dc.colIndex + (period - 1);
           const code = row[colIdx];
           if (code == null || code === '') continue;

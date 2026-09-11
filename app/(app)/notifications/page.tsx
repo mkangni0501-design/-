@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser, getCurrentTeacherId } from '@/lib/supabaseClient';
 
@@ -10,6 +11,7 @@ type NotificationRow = {
   student_no: string | null;
   created_at: string;
   read_at: string | null;
+  link_url: string | null;
 };
 
 // 導師的站內通知：家長送出基本資料/監護人修改申請、以及出缺勤示警相關訊息會出現在這裡。
@@ -46,7 +48,7 @@ export default function NotificationsPage() {
     setHasTeacherProfile(true);
     const { data, error } = await supabase
       .from('staff_notifications')
-      .select('id, category, message, student_no, created_at, read_at')
+      .select('id, category, message, student_no, created_at, read_at, link_url')
       .eq('teacher_id', teacherId)
       .order('created_at', { ascending: false });
     if (error) {
@@ -101,11 +103,28 @@ export default function NotificationsPage() {
               {n.category}｜{new Date(n.created_at).toLocaleString('zh-TW')}
             </p>
             <p style={{ fontSize: 13, marginBottom: n.read_at ? 0 : 8 }}>{n.message}</p>
-            {!n.read_at && (
-              <button onClick={() => markRead(n.id)} style={{ fontSize: 12, padding: '2px 10px' }}>
-                標記已讀
-              </button>
-            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              {/* 【本輪新增】反映事項「導師收到通知後,可從通知連接到【輸入考場名單】」——
+                  原本這裡所有通知都只是純文字，第一次有通知需要「點了直接跳頁」的需求
+                  （見 sql/90exam_seating.sql 對 link_url 欄位的說明），有帶 link_url
+                  的通知才顯示這顆按鈕，點下去同時標記已讀，不用另外再點一次「標記已讀」。 */}
+              {n.link_url && (
+                <Link
+                  href={n.link_url}
+                  onClick={() => {
+                    if (!n.read_at) markRead(n.id);
+                  }}
+                  style={{ fontSize: 12, padding: '2px 10px', border: '1px solid #333', borderRadius: 4, textDecoration: 'none', color: '#333' }}
+                >
+                  前往處理 →
+                </Link>
+              )}
+              {!n.read_at && (
+                <button onClick={() => markRead(n.id)} style={{ fontSize: 12, padding: '2px 10px' }}>
+                  標記已讀
+                </button>
+              )}
+            </div>
           </div>
         ))
       )}
