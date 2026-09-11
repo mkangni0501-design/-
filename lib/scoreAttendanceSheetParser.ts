@@ -126,15 +126,33 @@ function resolveTextDateYear(month: number, academicYear: number, lastMonth: num
 
 export async function findAttendanceDateColumns(rowsRaw: any[][], academicYear?: number) {
   const dateRow = rowsRaw[4] ?? []; // 第5列(index4)：日期
-  const columns: { colIndex: number; date: Date }[] = [];
+  // 【本輪新增】反映事項「每天的節數要符合該班級課表設定節數」：下載範本那一側
+  // 現在每一天的堂數會依課表設定不同（不再固定5節），這裡改成從第6列(index5)
+  // 「第1節/第2節/...」的節次標題往右數，數到不是「第N節」格式或空白為止，
+  // 藉此還原出這個日期實際佔了幾欄，供呼叫端用 `dc.colIndex` 到
+  // `dc.colIndex + dc.periodCount - 1` 讀取這一天的所有節次，取代原本寫死
+  // `period <= 5` 的迴圈。
+  const periodHeaderRow = rowsRaw[5] ?? [];
+  const PERIOD_HEADER_RE = /^第\d+節$/;
+  const columns: { colIndex: number; date: Date; periodCount: number }[] = [];
   const numericCodes = dateRow.some((v, idx) => idx >= 3 && typeof v === 'number' && v > 40000);
   const XLSX = numericCodes ? await loadXLSX() : null;
   let lastMonth: number | null = null;
   let yearOffset = 0;
+  const countPeriodsAt = (colIndex: number) => {
+    let count = 0;
+    while (
+      periodHeaderRow[colIndex + count] != null &&
+      PERIOD_HEADER_RE.test(String(periodHeaderRow[colIndex + count]).trim())
+    ) {
+      count++;
+    }
+    return count || 5; // 讀不到節次標題（例如舊版檔案）時退回原本固定5節的行為
+  };
   dateRow.forEach((v, idx) => {
     if (idx < 3) return; // 前3欄是座號/學號/姓名
     if (v instanceof Date) {
-      columns.push({ colIndex: idx, date: v });
+      columns.push({ colIndex: idx, date: v, periodCount: countPeriodsAt(idx) });
     } else if (typeof v === 'number' && v > 40000 && XLSX) {
       // Excel 日期序號（極少數情況 sheet_to_json 不會自動轉成 Date）。
       // 【本輪修正】根因：XLSX.SSF.parse_date_code(v) 回傳的不是 JS 的 Date
@@ -145,7 +163,7 @@ export async function findAttendanceDateColumns(rowsRaw: any[][], academicYear?:
       // 修法：手動把這個日期代碼物件轉成真正的 `new Date(y, m-1, d)`，日期格式
       // 不對、轉不出來（回傳 undefined）的儲存格則直接跳過，不要讓整批中斷。
       const code = XLSX.SSF.parse_date_code(v);
-      if (code) columns.push({ colIndex: idx, date: new Date(code.y, code.m - 1, code.d) });
+      if (code) columns.push({ colIndex: idx, date: new Date(code.y, code.m - 1, code.d), periodCount: countPeriodsAt(idx) });
     } else if (typeof v === 'string' && academicYear) {
       const m = v.trim().match(TEXT_DATE_RE);
       if (m) {
@@ -154,7 +172,7 @@ export async function findAttendanceDateColumns(rowsRaw: any[][], academicYear?:
         const resolved = resolveTextDateYear(month, academicYear, lastMonth, yearOffset);
         lastMonth = month;
         yearOffset = resolved.yearOffset;
-        columns.push({ colIndex: idx, date: new Date(resolved.year, month - 1, day) });
+        columns.push({ colIndex: idx, date: new Date(resolved.year, month - 1, day), periodCount: countPeriodsAt(idx) });
       }
     }
   });

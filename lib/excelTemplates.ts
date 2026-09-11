@@ -368,19 +368,26 @@ export async function downloadScoreAttendanceTemplate() {
 /*     （給「成績登錄」頁「下載範本」用單機版操作的老師，不再是完全空白、    */
 /*     跟自己班級無關的示範資料，且只帶出這位老師實際能教的科目）          */
 /* ------------------------------------------------------------------ */
+// 【本輪新增】反映事項「下載日期要包含開學起到目前檢視的那一週」「每天的節數要符合
+// 該班級課表設定節數」：
+// - attendanceDates：這次要下載、涵蓋「開學起～目前檢視的那一週」的所有日期（週一~
+//   週六，已經排除週日），取代原本只有「這一週」6個日期的做法。沒有帶的話（成績登錄
+//   頁沿用這支共用函式下載範本時，沒有「週次」概念）就退回原本寫死的6天示範日期。
+// - periodCountsByWeekday：長度6的陣列，依序對應週一~週六「這個班級課表設定的堂數」
+//   （見 lib/periodConfig.ts 的 getEffectivePeriodCount，依「班級 > 部別 > 全校」優先
+//   序取得）。同一個星期幾在不同週次的堂數設定是一樣的（period_config 本來就只依
+//   「星期幾」設定、沒有分週次），所以整個下載範圍內同一個星期幾統一用同一個堂數，
+//   不用每週分別查一次。沒有帶的話一樣退回原本每天固定5節的版面。
+const DEFAULT_PERIOD_COUNTS_BY_WEEKDAY = [5, 5, 5, 5, 5, 5];
+
+// 星期一~六在 JS Date.getDay() 的對照（週日固定排除，不出現在 attendanceDates 裡）：
+// getDay() 1~6 分別對應週一~週六，直接減1就是 periodCountsByWeekday 的索引。
+function weekdayIndex0to5(d: Date): number {
+  return (d.getDay() || 7) - 1;
+}
+
 export type ClassRosterStudent = { seatNo: number; studentNo: string; name: string };
 
-// 【本輪新增】反映事項「導師修正學生一週出缺席（電腦）頁下載全校/單一班級資料時，
-// 同時匯出目前的紀錄（包含成績），確保上傳後的資料是最新最正確的版本」：
-// - weekDates：這次要下載的「這一週」實際6個日期（週一~週六），沒有帶的話（例如
-//   「成績登錄」頁沿用這支共用函式下載範本時）就退回原本寫死的示範日期，行為不變。
-// - currentAttendance：學號 -> `${YYYY-MM-DD}_${節次}` -> 出缺勤狀態文字（'曠課'/
-//   '遲到'/...），把資料庫裡「這一週」已經存在的紀錄直接帶入下載下來的儲存格
-//   （狀態是'出席'或查無紀錄一律維持空白，跟原本「空白=出席」的填法一致），這樣
-//   老師/管理員不用每次下載都是一片空白重填，也不會因為漏填而被「空白=出席」
-//   的上傳邏輯誤蓋掉原本已經存在、正確的紀錄。
-// - currentScores：學號 -> 考別（期中考/期末考/平時分）-> 科目 -> 分數，把資料庫裡
-//   目前已經登錄的分數一併帶入下載下來的檔案，讓下載的檔案完整反映「目前的紀錄」。
 export type CurrentAttendanceByStudent = Record<string, Record<string, string>>;
 export type CurrentScoresByStudent = Record<string, Record<string, Record<string, number>>>;
 
@@ -391,21 +398,35 @@ export async function buildScoreAttendanceSheetForClass(params: {
   className: string;
   subjects: string[];
   students: ClassRosterStudent[];
-  weekDates?: Date[];
+  attendanceDates?: Date[];
+  periodCountsByWeekday?: number[];
   currentAttendance?: CurrentAttendanceByStudent;
   currentScores?: CurrentScoresByStudent;
 }): Promise<XLSXNS.WorkSheet> {
   const XLSX = await loadXLSX();
-  const width = ATTENDANCE_WEEKDAY_START + ATTENDANCE_WEEKDAYS.length * 5;
   // 各區塊實際能放的欄數（見上面 EXAM_BLOCK_START 的間距），超過的科目會被截掉，
   // 並非本次需求範圍能解決的版面限制——如果真的超過，畫面上會另外提醒老師改用線上輸入。
   const blockWidth = ATTENDANCE_WEEKDAY_START - EXAM_BLOCK_START['平時分'];
   const subjectsForBlock = params.subjects.slice(0, blockWidth);
-  // 沒有帶真實這一週日期時，維持原本寫死的示範日期（成績登錄頁沒有「週次」概念，
+  // 沒有帶真實日期範圍時，維持原本寫死的6天示範日期（成績登錄頁沒有「週次」概念，
   // 只單純需要科目/名冊帶入，不受這次修改影響）。
-  const weekDates = params.weekDates ?? ATTENDANCE_WEEKDAYS.map((_, i) => new Date(params.academicYear, 6, 20 + i));
+  const attendanceDates =
+    params.attendanceDates ?? ATTENDANCE_WEEKDAYS.map((_, i) => new Date(params.academicYear, 6, 20 + i));
+  const periodCountsByWeekday = params.periodCountsByWeekday ?? DEFAULT_PERIOD_COUNTS_BY_WEEKDAY;
   const toDateStrLocal = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  // 每個日期各自要佔幾欄（依那一天是星期幾對應的堂數而定），欄位是依日期先後
+  // 「連續」排列、中間不留空欄——這樣上傳那一側（findAttendanceDateColumns）
+  // 才能單純用「這一欄到下一個日期欄之間的距離」還原回堂數，不用另外存一份對照表。
+  const dateColStarts: number[] = [];
+  let cursor = ATTENDANCE_WEEKDAY_START;
+  const periodCountForDate = (d: Date) => Math.max(periodCountsByWeekday[weekdayIndex0to5(d)] ?? 5, 1);
+  attendanceDates.forEach((d) => {
+    dateColStarts.push(cursor);
+    cursor += periodCountForDate(d);
+  });
+  const width = cursor;
 
   const row1 = makeRow(width, (r) => {
     r[0] = `${params.academicYear}學年度`;
@@ -421,14 +442,15 @@ export async function buildScoreAttendanceSheetForClass(params: {
     Object.entries(EXAM_BLOCK_START).forEach(([name, start]) => {
       r[start] = name;
     });
-    ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
-      r[ATTENDANCE_WEEKDAY_START + i * 5] = weekDates[i] ?? new Date(params.academicYear, 6, 20 + i);
+    attendanceDates.forEach((d, i) => {
+      r[dateColStarts[i]] = d;
     });
   });
   const row6 = makeRow(width, (r) => {
-    ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
-      for (let p = 0; p < 5; p++) {
-        r[ATTENDANCE_WEEKDAY_START + i * 5 + p] = `第${p + 1}節`;
+    attendanceDates.forEach((d, i) => {
+      const count = periodCountForDate(d);
+      for (let p = 0; p < count; p++) {
+        r[dateColStarts[i] + p] = `第${p + 1}節`;
       }
     });
   });
@@ -444,16 +466,18 @@ export async function buildScoreAttendanceSheetForClass(params: {
       r[0] = seatNo;
       r[1] = studentNo;
       r[2] = name;
-      // 帶入這個學生「這一週」目前已存在的出缺勤紀錄（見上方 currentAttendance 說明）。
+      // 帶入這個學生「開學起～目前這一週」目前已存在的出缺勤紀錄（見上方
+      // currentAttendance 說明）。
       const attForStudent = params.currentAttendance?.[studentNo];
       if (attForStudent) {
-        ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
-          const dateStr = toDateStrLocal(weekDates[i] ?? new Date());
-          for (let p = 1; p <= 5; p++) {
+        attendanceDates.forEach((d, i) => {
+          const dateStr = toDateStrLocal(d);
+          const count = periodCountForDate(d);
+          for (let p = 1; p <= count; p++) {
             const status = attForStudent[`${dateStr}_${p}`];
             if (status && status !== '出席') {
               const code = STATUS_TO_ATTENDANCE_CODE[status];
-              if (code != null) r[ATTENDANCE_WEEKDAY_START + i * 5 + (p - 1)] = code;
+              if (code != null) r[dateColStarts[i] + (p - 1)] = code;
             }
           }
         });
@@ -488,7 +512,8 @@ export async function downloadScoreAttendanceTemplateForClass(params: {
   className: string;
   subjects: string[];
   students: ClassRosterStudent[];
-  weekDates?: Date[];
+  attendanceDates?: Date[];
+  periodCountsByWeekday?: number[];
   currentAttendance?: CurrentAttendanceByStudent;
   currentScores?: CurrentScoresByStudent;
 }) {
@@ -513,7 +538,8 @@ export async function downloadScoreAttendanceTemplateForClasses(
     className: string;
     subjects: string[];
     students: ClassRosterStudent[];
-    weekDates?: Date[];
+    attendanceDates?: Date[];
+    periodCountsByWeekday?: number[];
     currentAttendance?: CurrentAttendanceByStudent;
     currentScores?: CurrentScoresByStudent;
   }[]
