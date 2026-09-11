@@ -1,5 +1,6 @@
 import type * as XLSXNS from 'xlsx';
 import { SPECIFIC_GRADE_LEVELS } from './gradeMapping';
+import { STATUS_TO_ATTENDANCE_CODE } from './scoreAttendanceSheetParser';
 
 // ⚠️ 這裡刻意不在檔案最上層直接 `import * as XLSX from 'xlsx'`。
 // 'xlsx' 這個套件在 Node.js 環境（Next.js 產生靜態頁面/伺服器端渲染時）執行到它的模組載入程式碼
@@ -369,6 +370,20 @@ export async function downloadScoreAttendanceTemplate() {
 /* ------------------------------------------------------------------ */
 export type ClassRosterStudent = { seatNo: number; studentNo: string; name: string };
 
+// 【本輪新增】反映事項「導師修正學生一週出缺席（電腦）頁下載全校/單一班級資料時，
+// 同時匯出目前的紀錄（包含成績），確保上傳後的資料是最新最正確的版本」：
+// - weekDates：這次要下載的「這一週」實際6個日期（週一~週六），沒有帶的話（例如
+//   「成績登錄」頁沿用這支共用函式下載範本時）就退回原本寫死的示範日期，行為不變。
+// - currentAttendance：學號 -> `${YYYY-MM-DD}_${節次}` -> 出缺勤狀態文字（'曠課'/
+//   '遲到'/...），把資料庫裡「這一週」已經存在的紀錄直接帶入下載下來的儲存格
+//   （狀態是'出席'或查無紀錄一律維持空白，跟原本「空白=出席」的填法一致），這樣
+//   老師/管理員不用每次下載都是一片空白重填，也不會因為漏填而被「空白=出席」
+//   的上傳邏輯誤蓋掉原本已經存在、正確的紀錄。
+// - currentScores：學號 -> 考別（期中考/期末考/平時分）-> 科目 -> 分數，把資料庫裡
+//   目前已經登錄的分數一併帶入下載下來的檔案，讓下載的檔案完整反映「目前的紀錄」。
+export type CurrentAttendanceByStudent = Record<string, Record<string, string>>;
+export type CurrentScoresByStudent = Record<string, Record<string, Record<string, number>>>;
+
 export async function buildScoreAttendanceSheetForClass(params: {
   academicYear: number;
   term: string;
@@ -376,6 +391,9 @@ export async function buildScoreAttendanceSheetForClass(params: {
   className: string;
   subjects: string[];
   students: ClassRosterStudent[];
+  weekDates?: Date[];
+  currentAttendance?: CurrentAttendanceByStudent;
+  currentScores?: CurrentScoresByStudent;
 }): Promise<XLSXNS.WorkSheet> {
   const XLSX = await loadXLSX();
   const width = ATTENDANCE_WEEKDAY_START + ATTENDANCE_WEEKDAYS.length * 5;
@@ -383,6 +401,11 @@ export async function buildScoreAttendanceSheetForClass(params: {
   // 並非本次需求範圍能解決的版面限制——如果真的超過，畫面上會另外提醒老師改用線上輸入。
   const blockWidth = ATTENDANCE_WEEKDAY_START - EXAM_BLOCK_START['平時分'];
   const subjectsForBlock = params.subjects.slice(0, blockWidth);
+  // 沒有帶真實這一週日期時，維持原本寫死的示範日期（成績登錄頁沒有「週次」概念，
+  // 只單純需要科目/名冊帶入，不受這次修改影響）。
+  const weekDates = params.weekDates ?? ATTENDANCE_WEEKDAYS.map((_, i) => new Date(params.academicYear, 6, 20 + i));
+  const toDateStrLocal = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
   const row1 = makeRow(width, (r) => {
     r[0] = `${params.academicYear}學年度`;
@@ -399,7 +422,7 @@ export async function buildScoreAttendanceSheetForClass(params: {
       r[start] = name;
     });
     ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
-      r[ATTENDANCE_WEEKDAY_START + i * 5] = new Date(params.academicYear, 6, 20 + i);
+      r[ATTENDANCE_WEEKDAY_START + i * 5] = weekDates[i] ?? new Date(params.academicYear, 6, 20 + i);
     });
   });
   const row6 = makeRow(width, (r) => {
@@ -421,6 +444,32 @@ export async function buildScoreAttendanceSheetForClass(params: {
       r[0] = seatNo;
       r[1] = studentNo;
       r[2] = name;
+      // 帶入這個學生「這一週」目前已存在的出缺勤紀錄（見上方 currentAttendance 說明）。
+      const attForStudent = params.currentAttendance?.[studentNo];
+      if (attForStudent) {
+        ATTENDANCE_WEEKDAYS.forEach((wd, i) => {
+          const dateStr = toDateStrLocal(weekDates[i] ?? new Date());
+          for (let p = 1; p <= 5; p++) {
+            const status = attForStudent[`${dateStr}_${p}`];
+            if (status && status !== '出席') {
+              const code = STATUS_TO_ATTENDANCE_CODE[status];
+              if (code != null) r[ATTENDANCE_WEEKDAY_START + i * 5 + (p - 1)] = code;
+            }
+          }
+        });
+      }
+      // 帶入這個學生目前已登錄的分數（見上方 currentScores 說明）。
+      const scoresForStudent = params.currentScores?.[studentNo];
+      if (scoresForStudent) {
+        Object.entries(EXAM_BLOCK_START).forEach(([examType, start]) => {
+          const scoresForExamType = scoresForStudent[examType];
+          if (!scoresForExamType) return;
+          subjectsForBlock.forEach((subj, i) => {
+            const score = scoresForExamType[subj];
+            if (score != null) r[start + i] = score;
+          });
+        });
+      }
     });
 
   const rows = [row1, row2, row3, row4, row5, row6, row7];
@@ -439,6 +488,9 @@ export async function downloadScoreAttendanceTemplateForClass(params: {
   className: string;
   subjects: string[];
   students: ClassRosterStudent[];
+  weekDates?: Date[];
+  currentAttendance?: CurrentAttendanceByStudent;
+  currentScores?: CurrentScoresByStudent;
 }) {
   const XLSX = await loadXLSX();
   const wb = XLSX.utils.book_new();
@@ -461,6 +513,9 @@ export async function downloadScoreAttendanceTemplateForClasses(
     className: string;
     subjects: string[];
     students: ClassRosterStudent[];
+    weekDates?: Date[];
+    currentAttendance?: CurrentAttendanceByStudent;
+    currentScores?: CurrentScoresByStudent;
   }[]
 ) {
   const XLSX = await loadXLSX();

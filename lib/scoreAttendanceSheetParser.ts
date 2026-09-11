@@ -168,3 +168,12 @@ export const ATTENDANCE_CODE_TO_STATUS: Record<number, string> = {
   3: '事假',
   4: '公假',
 };
+
+// 【本輪新增】反映事項「下載全校/單一班級資料時，同時匯出目前的紀錄（包含成績），
+// 確保上傳後的資料是最新最正確的版本」——ATTENDANCE_CODE_TO_STATUS 的反向對照表，
+// 讓「下載範本」那一側可以把資料庫裡已經存在的出缺勤狀態文字（'曠課'/'遲到'/...）
+// 換回範本欄位裡要填的數字代碼，藉此把「目前的紀錄」直接帶入下載下來的檔案，而不是
+// 每次下載都是一片空白。'出席'（正常出席）跟查無紀錄一樣，維持空白儲存格，不佔代碼。
+export const STATUS_TO_ATTENDANCE_CODE: Record<string, number> = Object.fromEntries(
+  Object.entries(ATTENDANCE_CODE_TO_STATUS).map(([code, status]) => [status, Number(code)])
+);
