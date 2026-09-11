@@ -22,6 +22,8 @@ import {
   downloadScoreAttendanceTemplate,
   downloadScoreAttendanceTemplateForClass,
   downloadScoreAttendanceTemplateForClasses,
+  type CurrentAttendanceByStudent,
+  type CurrentScoresByStudent,
 } from '@/lib/excelTemplates';
 import ErrorBanner from '@/components/ErrorBanner';
 
@@ -118,6 +120,72 @@ function addDays(d: Date, n: number) {
 function parseLocalDateStr(s: string): Date {
   const [y, m, d] = s.split('-').map(Number);
   return new Date(y, m - 1, d);
+}
+
+// 【本輪新增】反映事項「導師修正學生一週出缺席（電腦）頁下載全校/單一班級資料時，
+// 同時匯出目前的紀錄（包含成績），確保上傳後的資料是最新最正確的版本」：
+// 把資料庫裡已經存在的「這一週」出缺勤紀錄，轉成 lib/excelTemplates.ts 下載範本
+// 需要的格式（學號 -> `${日期}_${節次}` -> 狀態文字），供 buildScoreAttendanceSheetForClass
+// 直接帶入下載的儲存格。attMap 本身已經是「限定這一週」查回來的資料（見上面主要的
+// useEffect），這裡只是重新組 key，不再另外查一次資料庫。
+function attMapToCurrentAttendance(attMap: Record<string, string>): CurrentAttendanceByStudent {
+  const result: CurrentAttendanceByStudent = {};
+  Object.entries(attMap).forEach(([key, status]) => {
+    const [studentNo, dateStr, periodStr] = key.split('|');
+    if (!studentNo || !dateStr || !periodStr) return;
+    if (!result[studentNo]) result[studentNo] = {};
+    result[studentNo][`${dateStr}_${periodStr}`] = status;
+  });
+  return result;
+}
+
+// 查這個班「目前實際教的科目」（任課教師設定 class_schedule ∪ 科目與比重設定
+// curriculum，比照「成績登錄」頁管理員視角的做法，見 ScoresEntryTab.tsx），
+// 以及這些學生目前已經登錄的分數，組成 downloadScoreAttendanceTemplateForClass
+// 需要的 subjects／currentScores。下載範本本來就是給老師/管理員離線編輯出缺勤用，
+// 分數欄位只是順便把「目前的紀錄」一併帶出來給老師對照，不是這頁能編輯上傳分數
+// （這頁上傳只會解析出缺勤欄位，分數欄位維持唯讀參考用途）。
+async function fetchSubjectsAndScoresForClass(
+  classId: string,
+  academicYear: number,
+  gradeLevel: string,
+  studentNos: string[]
+): Promise<{ subjects: string[]; currentScores: CurrentScoresByStudent }> {
+  const [{ data: schedData }, { data: curriData }] = await Promise.all([
+    supabase.from('class_schedule').select('subject').eq('class_id', classId),
+    supabase.from('curriculum').select('subject').eq('academic_year', academicYear).eq('grade_level', gradeLevel),
+  ]);
+  const fromSchedule = (schedData ?? []).map((r: any) => r.subject).filter(Boolean);
+  const fromCurriculum = (curriData ?? []).map((r: any) => r.subject).filter(Boolean);
+  const subjects = Array.from(new Set([...fromSchedule, ...fromCurriculum]));
+
+  if (studentNos.length === 0) return { subjects, currentScores: {} };
+
+  const { data: enrollRows } = await supabase
+    .from('enrollments')
+    .select('id, student_no')
+    .eq('class_id', classId)
+    .eq('is_current', true)
+    .in('student_no', studentNos);
+  const studentNoByEnrollmentId = new Map((enrollRows ?? []).map((r: any) => [r.id, r.student_no]));
+  const enrollmentIds = (enrollRows ?? []).map((r: any) => r.id);
+  if (enrollmentIds.length === 0) return { subjects, currentScores: {} };
+
+  const { data: scoreRows } = await supabase
+    .from('scores')
+    .select('enrollment_id, exam_type, subject, score')
+    .in('enrollment_id', enrollmentIds);
+
+  const currentScores: CurrentScoresByStudent = {};
+  (scoreRows ?? []).forEach((r: any) => {
+    const studentNo = studentNoByEnrollmentId.get(r.enrollment_id);
+    if (!studentNo || r.score == null) return;
+    if (!currentScores[studentNo]) currentScores[studentNo] = {};
+    if (!currentScores[studentNo][r.exam_type]) currentScores[studentNo][r.exam_type] = {};
+    currentScores[studentNo][r.exam_type][r.subject] = Number(r.score);
+  });
+
+  return { subjects, currentScores };
 }
 
 export default function WeeklyAttendancePage() {
@@ -767,13 +835,31 @@ export default function WeeklyAttendancePage() {
       downloadScoreAttendanceTemplate();
       return;
     }
+    // 【本輪新增】反映事項「下載全校/單一班級資料時，同時匯出目前的紀錄（包含成績），
+    // 確保上傳後的資料是最新最正確的版本」：日期改用「目前正在檢視的這一週」
+    // （weekDates，畫面上「上一週／下一週」切換的同一份資料）取代原本寫死的示範日期；
+    // 出缺勤帶入 attMap（本來就是限定這一週查回來的資料，見上面主要的 useEffect）；
+    // 分數則另外查這個班目前的科目與已登錄分數，一併帶出方便老師對照。
+    const { subjects, currentScores } = await fetchSubjectsAndScoresForClass(
+      classId,
+      cls.academic_year,
+      cls.grade_level,
+      students.map((s) => s.student_no)
+    );
     downloadScoreAttendanceTemplateForClass({
       academicYear: cls.academic_year,
       term: currentTerm?.term ?? '上學期',
       gradeLevel: cls.grade_level,
       className: cls.class_name,
-      subjects: [],
-      students,
+      subjects,
+      // 【本輪修正】原本這裡直接傳整頁的 students（StudentRow[]，欄位是
+      // student_no/seat_no），跟 downloadScoreAttendanceTemplateForClass 要的
+      // ClassRosterStudent（seatNo/studentNo）欄位名稱對不起來，是個既有的型別
+      // 不吻合問題（順手一併修正，這次改動本來就會動到這個呼叫）。
+      students: students.map((s) => ({ seatNo: s.seat_no, studentNo: s.student_no, name: s.name })),
+      weekDates,
+      currentAttendance: attMapToCurrentAttendance(attMap),
+      currentScores,
     });
   }
 
@@ -797,6 +883,12 @@ export default function WeeklyAttendancePage() {
       alert('讀取全校班級清單失敗：' + (clsErr?.message ?? '目前學年度沒有任何班級'));
       return;
     }
+    // 【本輪新增】反映事項「下載全校/單一班級資料時，同時匯出目前的紀錄（包含成績），
+    // 確保上傳後的資料是最新最正確的版本」：全校下載一樣用「目前正在檢視的這一週」
+    // （weekDates）當作日期，並逐班查這一週已存在的出缺勤紀錄＋目前科目與已登錄分數，
+    // 帶入下載下來的檔案，理由同單班下載（見 handleDownloadTemplate 的說明）。
+    const startStr = toDateStr(weekDates[0]);
+    const endStr = toDateStr(weekDates[5]);
     const classesData = await Promise.all(
       allClasses.map(async (c: any) => {
         const { data: enrollRows } = await supabase
@@ -806,22 +898,39 @@ export default function WeeklyAttendancePage() {
           .eq('is_current', true)
           .order('seat_no');
         const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
-        const { data: studentRows } =
+        const [{ data: studentRows }, { data: attRows }, { subjects, currentScores }] = await Promise.all([
           studentNos.length === 0
-            ? { data: [] as any[] }
-            : await supabase.from('students').select('student_no, name').in('student_no', studentNos);
+            ? Promise.resolve({ data: [] as any[] })
+            : supabase.from('students').select('student_no, name').in('student_no', studentNos),
+          studentNos.length === 0
+            ? Promise.resolve({ data: [] as any[] })
+            : supabase
+                .from('attendance')
+                .select('student_no, record_date, period_no, status')
+                .in('student_no', studentNos)
+                .gte('record_date', startStr)
+                .lte('record_date', endStr),
+          fetchSubjectsAndScoresForClass(c.id, currentTerm.academic_year, c.grade_level, studentNos),
+        ]);
         const nameByStudentNo = new Map((studentRows ?? []).map((s: any) => [s.student_no, s.name]));
+        const attMapForClass: Record<string, string> = {};
+        (attRows ?? []).forEach((r: any) => {
+          attMapForClass[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
+        });
         return {
           academicYear: currentTerm.academic_year,
           term: currentTerm.term,
           gradeLevel: c.grade_level,
           className: c.class_name,
-          subjects: [],
+          subjects,
           students: (enrollRows ?? []).map((r: any) => ({
             seatNo: r.seat_no,
             studentNo: r.student_no,
             name: nameByStudentNo.get(r.student_no) ?? '（找不到姓名）',
           })),
+          weekDates,
+          currentAttendance: attMapToCurrentAttendance(attMapForClass),
+          currentScores,
         };
       })
     );
