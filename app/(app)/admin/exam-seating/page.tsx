@@ -1,872 +1,910 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { supabase, getCurrentAppUser } from '@/lib/supabaseClient';
-import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
-import { hasDepartment } from '@/lib/departments';
-import { resolveCurrentTerm } from '@/lib/academicTerm';
+import { getCurrentAppUser } from '@/lib/supabaseClient';
+import ErrorBanner from '@/components/ErrorBanner';
 import {
-  ExamPeriod,
+  ExamSession,
   ExamRoom,
-  ExamRoomAllocation,
-  ExamSeat,
-  SEAT_GRID_SIZE,
-  generateExamSeatLayout,
-  averageAllocate,
-  fetchCurrentClassHeadcount,
+  ExamRoomClass,
+  ClassOption,
+  SeatCell,
+  ExamRoomSeatRow,
+  RosterStatus,
+  listExamSessions,
+  createExamSession,
+  deleteExamSession,
+  listExamRooms,
+  createExamRoom,
+  deleteExamRoom,
+  listClassOptionsWithHeadcount,
+  listExamRoomClasses,
+  saveExamRoomClassAssignment,
+  saveAllocatedCounts,
+  computeAllocatedCounts,
+  validateAllocation,
+  ValidationResult,
+  generateSeatLayout,
+  confirmRoomSeatLayout,
+  sendExamSession,
+  listRoomSeats,
+  listRosterStatus,
+  gridSizeForCapacity,
 } from '@/lib/examSeating';
 
-// 教務處【考試分班】頁。對應附件「考場.txt」的教務處步驟1~7：
-//   1. 進【考試分班】頁
-//   2. 點選考場（為目前有開設的所有班級，人數上限為此班級目前人數）
-//   3. 選擇在該考場考試的班級數與班級（下拉式選單）
-//   4. 輸入該班級在此考場的人數（依目前的班級數自動提供平均人數，可手動更改）
-//   5. 用梅花座讓同班考生盡可能不相鄰（7*7）
-//   6. 點選【確認】後儲存回到選擇考場的頁面
-//   7. 所有考場都完成設定後點選【發送考場表】通知各班導師
-// 步驟8「各班導師輸入完考試學生名單後，始可點選列印座位表及簽到表」在下方
-// 「已發送」狀態區塊處理。
-//
-// 資料表設計與 RLS 見 sql/90exam_seating.sql；梅花座演算法與平均分配見 lib/examSeating.ts。
-// 導師端對應頁面：app/(app)/attendance/exam-seating-roster/page.tsx。
+// ============================================================
+// 教務處【考試分班】頁
+// 流程：新增/刪除考試 → 新增考場 → 各考場設定應試班級 → 試算＋雙驗證（可手動修改）→
+//      儲存 → 各考場產生梅花座位表 → 確認 → 全部考場完成後【發送考場表】通知導師 →
+//      發送後可預覽各考場名單/座位並列印座位表、簽到表。
+// ============================================================
 
-type ClassOption = { id: string; label: string; homeroom_teacher_id: string | null };
-
-type DraftAllocation = { key: string; classId: string; count: number };
-
-let draftKeySeq = 0;
-function newDraftKey() {
-  draftKeySeq += 1;
-  return `draft-${draftKeySeq}`;
-}
+type ClassRow = { classId: string; label: string; headcount: number };
 
 export default function ExamSeatingPage() {
-  const perms = useDepartmentPermissions();
-  const canView = perms.isSystemAdmin || hasDepartment(perms.myDepartments, 'academic');
-
-  const [currentTerm, setCurrentTerm] = useState<{ academic_year: number; term: string } | null>(null);
-  const [classOptions, setClassOptions] = useState<ClassOption[]>([]);
-  const [periods, setPeriods] = useState<ExamPeriod[]>([]);
-  const [periodId, setPeriodId] = useState('');
-  const [newPeriodName, setNewPeriodName] = useState('');
-
-  const [rooms, setRooms] = useState<ExamRoom[]>([]);
-  const [allocationsByRoom, setAllocationsByRoom] = useState<Record<string, ExamRoomAllocation[]>>({});
-  const [seatsByRoom, setSeatsByRoom] = useState<Record<string, ExamSeat[]>>({});
-  const [submittedClassIds, setSubmittedClassIds] = useState<Set<string>>(new Set());
-  const [studentNames, setStudentNames] = useState<Record<string, string>>({});
-
-  const [newRoomClassId, setNewRoomClassId] = useState('');
-  const [openRoomId, setOpenRoomId] = useState<string | null>(null);
-  const [draftAllocations, setDraftAllocations] = useState<DraftAllocation[]>([]);
-  const [printRoomId, setPrintRoomId] = useState<string | null>(null);
-  const [printMode, setPrintMode] = useState<'seats' | 'signin' | null>(null);
-
+  const [myUserId, setMyUserId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ExamSession[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
-  const classById = useMemo(() => new Map(classOptions.map((c) => [c.id, c])), [classOptions]);
-  const selectedPeriod = useMemo(() => periods.find((p) => p.id === periodId) ?? null, [periods, periodId]);
-  const isPeriodSent = selectedPeriod?.status === '已發送';
+  // 新增考試表單
+  const [newName, setNewName] = useState('');
+  const [newYear, setNewYear] = useState<number>(new Date().getFullYear());
+  const [newTerm, setNewTerm] = useState('上學期');
+
+  async function reloadSessions(keepSelected?: string | null) {
+    setLoading(true);
+    try {
+      const rows = await listExamSessions();
+      setSessions(rows);
+      if (keepSelected !== undefined) {
+        setSelectedSessionId(keepSelected);
+      } else if (rows.length > 0 && !selectedSessionId) {
+        setSelectedSessionId(rows[0].id);
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     (async () => {
-      const term = await resolveCurrentTerm();
-      if (!term) {
-        setError('讀不到目前生效的學年度／學期，請先在「學年學期設定」確認。');
-        setLoading(false);
-        return;
-      }
-      setCurrentTerm(term);
-      const { data: clsRows, error: clsErr } = await supabase
-        .from('classes')
-        .select('id, grade_level, class_name, homeroom_teacher_id')
-        .eq('academic_year', term.academic_year)
-        .order('grade_level')
-        .order('class_name');
-      if (clsErr) {
-        setError('讀取班級清單失敗：' + clsErr.message);
-        setLoading(false);
-        return;
-      }
-      setClassOptions((clsRows ?? []).map((c: any) => ({ id: c.id, label: `${c.grade_level}${c.class_name}`, homeroom_teacher_id: c.homeroom_teacher_id })));
-
-      const { data: periodRows, error: periodErr } = await supabase
-        .from('exam_periods')
-        .select('id, academic_year, term, name, status, created_at')
-        .eq('academic_year', term.academic_year)
-        .eq('term', term.term)
-        .order('created_at', { ascending: false });
-      if (periodErr) {
-        setError('讀取考試場次失敗：' + periodErr.message);
-        setLoading(false);
-        return;
-      }
-      setPeriods((periodRows ?? []) as ExamPeriod[]);
-      if (periodRows && periodRows.length > 0) setPeriodId(periodRows[0].id);
-      setLoading(false);
+      const me = await getCurrentAppUser();
+      setMyUserId(me?.id ?? null);
+      await reloadSessions();
     })();
-  }, []);
-
-  async function loadPeriodData(pid: string) {
-    if (!pid) {
-      setRooms([]);
-      setAllocationsByRoom({});
-      setSeatsByRoom({});
-      setSubmittedClassIds(new Set());
-      return;
-    }
-    const { data: roomRows, error: roomErr } = await supabase
-      .from('exam_rooms')
-      .select('id, exam_period_id, room_class_id, capacity, seats_confirmed')
-      .eq('exam_period_id', pid)
-      .order('created_at');
-    if (roomErr) {
-      setError('讀取考場清單失敗：' + roomErr.message);
-      return;
-    }
-    const roomList = (roomRows ?? []) as ExamRoom[];
-    setRooms(roomList);
-    const roomIds = roomList.map((r) => r.id);
-
-    const [{ data: allocRows }, { data: seatRows }, { data: subRows }] = await Promise.all([
-      roomIds.length === 0
-        ? Promise.resolve({ data: [] as any[] })
-        : supabase.from('exam_room_class_allocations').select('id, exam_room_id, class_id, student_count').in('exam_room_id', roomIds),
-      roomIds.length === 0
-        ? Promise.resolve({ data: [] as any[] })
-        : supabase.from('exam_room_seats').select('id, exam_room_id, seat_row, seat_col, class_id, student_no').in('exam_room_id', roomIds),
-      supabase.from('exam_class_submissions').select('class_id').eq('exam_period_id', pid),
-    ]);
-
-    const allocGrouped: Record<string, ExamRoomAllocation[]> = {};
-    (allocRows ?? []).forEach((a: any) => {
-      allocGrouped[a.exam_room_id] = allocGrouped[a.exam_room_id] ?? [];
-      allocGrouped[a.exam_room_id].push(a);
-    });
-    setAllocationsByRoom(allocGrouped);
-
-    const seatGrouped: Record<string, ExamSeat[]> = {};
-    (seatRows ?? []).forEach((s: any) => {
-      seatGrouped[s.exam_room_id] = seatGrouped[s.exam_room_id] ?? [];
-      seatGrouped[s.exam_room_id].push(s);
-    });
-    setSeatsByRoom(seatGrouped);
-
-    setSubmittedClassIds(new Set((subRows ?? []).map((s: any) => s.class_id)));
-
-    const studentNos = Array.from(new Set((seatRows ?? []).map((s: any) => s.student_no).filter(Boolean)));
-    if (studentNos.length > 0) {
-      const { data: nameRows } = await supabase.from('students').select('student_no, name').in('student_no', studentNos);
-      const map: Record<string, string> = {};
-      (nameRows ?? []).forEach((s: any) => {
-        map[s.student_no] = s.name;
-      });
-      setStudentNames(map);
-    } else {
-      setStudentNames({});
-    }
-  }
-
-  useEffect(() => {
-    setOpenRoomId(null);
-    loadPeriodData(periodId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [periodId]);
-
-  useEffect(() => {
-    if (printMode && printRoomId) {
-      const t = setTimeout(() => window.print(), 100);
-      return () => clearTimeout(t);
-    }
-  }, [printMode, printRoomId]);
-
-  useEffect(() => {
-    function afterPrint() {
-      setPrintMode(null);
-      setPrintRoomId(null);
-    }
-    window.addEventListener('afterprint', afterPrint);
-    return () => window.removeEventListener('afterprint', afterPrint);
   }, []);
 
-  async function handleCreatePeriod() {
-    if (!currentTerm || !newPeriodName.trim()) return;
-    setBusy(true);
+  async function handleCreateSession() {
+    if (!newName.trim()) {
+      setError('請輸入考試名稱');
+      return;
+    }
     setError(null);
-    const me = await getCurrentAppUser();
-    const { data, error: insErr } = await supabase
-      .from('exam_periods')
-      .insert({ academic_year: currentTerm.academic_year, term: currentTerm.term, name: newPeriodName.trim(), created_by: me?.id ?? null })
-      .select('id, academic_year, term, name, status, created_at')
-      .single();
-    setBusy(false);
-    if (insErr) {
-      setError('新增考試場次失敗：' + insErr.message);
-      return;
+    try {
+      await createExamSession({ name: newName.trim(), academic_year: newYear, term: newTerm, created_by: myUserId });
+      setNewName('');
+      setNotice('已新增考試');
+      await reloadSessions(undefined);
+    } catch (e: any) {
+      setError(e.message);
     }
-    setPeriods((prev) => [data as ExamPeriod, ...prev]);
-    setPeriodId(data.id);
-    setNewPeriodName('');
   }
 
-  async function handleAddRoom() {
-    if (!newRoomClassId || !periodId) return;
-    setBusy(true);
+  async function handleDeleteSession(id: string) {
+    if (!confirm('確定要刪除這個考試嗎？相關考場與座位表設定將一併刪除。')) return;
     setError(null);
-    const headcount = await fetchCurrentClassHeadcount(newRoomClassId);
-    const me = await getCurrentAppUser();
-    const { data, error: insErr } = await supabase
-      .from('exam_rooms')
-      .insert({ exam_period_id: periodId, room_class_id: newRoomClassId, capacity: headcount, created_by: me?.id ?? null })
-      .select('id, exam_period_id, room_class_id, capacity, seats_confirmed')
-      .single();
-    setBusy(false);
-    if (insErr) {
-      setError('新增考場失敗：' + (insErr.message.includes('duplicate') ? '這個班級教室已經是這個場次的考場' : insErr.message));
-      return;
+    try {
+      await deleteExamSession(id);
+      setNotice('已刪除考試');
+      if (selectedSessionId === id) setSelectedSessionId(null);
+      await reloadSessions(selectedSessionId === id ? null : selectedSessionId);
+    } catch (e: any) {
+      setError(e.message);
     }
-    setRooms((prev) => [...prev, data as ExamRoom]);
-    setNewRoomClassId('');
   }
 
-  async function handleDeleteRoom(roomId: string) {
-    if (!confirm('確定要刪除這個考場嗎？裡面已設定的班級分配與座位也會一併刪除。')) return;
-    setBusy(true);
-    const { error: delErr } = await supabase.from('exam_rooms').delete().eq('id', roomId);
-    setBusy(false);
-    if (delErr) {
-      setError('刪除考場失敗：' + delErr.message);
-      return;
-    }
-    setRooms((prev) => prev.filter((r) => r.id !== roomId));
-    if (openRoomId === roomId) setOpenRoomId(null);
-  }
-
-  function openEditor(room: ExamRoom) {
-    const existing = allocationsByRoom[room.id] ?? [];
-    setDraftAllocations(
-      existing.length > 0
-        ? existing.map((a) => ({ key: newDraftKey(), classId: a.class_id, count: a.student_count }))
-        : [{ key: newDraftKey(), classId: '', count: 0 }]
-    );
-    setOpenRoomId(room.id);
-  }
-
-  function addDraftRow() {
-    setDraftAllocations((prev) => [...prev, { key: newDraftKey(), classId: '', count: 0 }]);
-  }
-  function removeDraftRow(key: string) {
-    setDraftAllocations((prev) => prev.filter((r) => r.key !== key));
-  }
-  function updateDraftRow(key: string, patch: Partial<DraftAllocation>) {
-    setDraftAllocations((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  }
-  function applyAverage(room: ExamRoom) {
-    const chosen = draftAllocations.filter((r) => r.classId);
-    if (chosen.length === 0) return;
-    const counts = averageAllocate(room.capacity, chosen.length);
-    let i = 0;
-    setDraftAllocations((prev) =>
-      prev.map((r) => {
-        if (!r.classId) return r;
-        const c = counts[i];
-        i += 1;
-        return { ...r, count: c };
-      })
-    );
-  }
-
-  const draftTotal = draftAllocations.reduce((sum, r) => sum + (r.classId ? r.count : 0), 0);
-  const draftPreviewLayout = useMemo(() => {
-    const allocs = draftAllocations.filter((r) => r.classId && r.count > 0).map((r) => ({ classId: r.classId, count: r.count }));
-    if (allocs.length === 0) return null;
-    return generateExamSeatLayout(allocs);
-  }, [draftAllocations]);
-
-  async function handleConfirmRoom(room: ExamRoom) {
-    const chosen = draftAllocations.filter((r) => r.classId && r.count > 0);
-    if (chosen.length === 0) {
-      setError('請至少選擇一個應試班級並輸入人數');
-      return;
-    }
-    const classIdSet = new Set(chosen.map((r) => r.classId));
-    if (classIdSet.size !== chosen.length) {
-      setError('同一個考場裡，同一個應試班級不能重複選擇');
-      return;
-    }
-    if (draftTotal > room.capacity) {
-      setError(`分配人數總和（${draftTotal}）超過考場人數上限（${room.capacity}）`);
-      return;
-    }
-    if (draftTotal > SEAT_GRID_SIZE * SEAT_GRID_SIZE) {
-      setError(`分配人數總和（${draftTotal}）超過梅花座座位數上限（${SEAT_GRID_SIZE * SEAT_GRID_SIZE}）`);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-
-    const existing = allocationsByRoom[room.id] ?? [];
-    const toDelete = existing.filter((a) => !classIdSet.has(a.class_id));
-    if (toDelete.length > 0) {
-      await supabase.from('exam_room_class_allocations').delete().in('id', toDelete.map((a) => a.id));
-    }
-    const { error: upsertAllocErr } = await supabase
-      .from('exam_room_class_allocations')
-      .upsert(
-        chosen.map((r) => ({ exam_room_id: room.id, class_id: r.classId, student_count: r.count })),
-        { onConflict: 'exam_room_id,class_id' }
-      );
-    if (upsertAllocErr) {
-      setBusy(false);
-      setError('儲存班級人數分配失敗：' + upsertAllocErr.message);
-      return;
-    }
-
-    const layout = generateExamSeatLayout(chosen.map((r) => ({ classId: r.classId, count: r.count })));
-    const { error: upsertSeatErr } = await supabase.from('exam_room_seats').upsert(
-      layout.map((cell) => ({
-        exam_room_id: room.id,
-        seat_row: cell.row,
-        seat_col: cell.col,
-        class_id: cell.classId,
-        student_no: null,
-      })),
-      { onConflict: 'exam_room_id,seat_row,seat_col' }
-    );
-    if (upsertSeatErr) {
-      setBusy(false);
-      setError('儲存梅花座座位失敗：' + upsertSeatErr.message);
-      return;
-    }
-
-    const { error: updRoomErr } = await supabase.from('exam_rooms').update({ seats_confirmed: true }).eq('id', room.id);
-    setBusy(false);
-    if (updRoomErr) {
-      setError('更新考場狀態失敗：' + updRoomErr.message);
-      return;
-    }
-    setOpenRoomId(null);
-    setNotice('已儲存這個考場的梅花座座位');
-    await loadPeriodData(periodId);
-  }
-
-  const allRoomsConfirmed = rooms.length > 0 && rooms.every((r) => r.seats_confirmed);
-
-  async function handleSendRoster() {
-    if (!selectedPeriod || !allRoomsConfirmed) return;
-    if (!confirm('確定要發送考場表嗎？發送後這個考試場次的考場設定將不能再修改。')) return;
-    setBusy(true);
-    setError(null);
-
-    // 統整每個應試班級被分配到哪些考場（可能不只一個），組成一則通知訊息，
-    // 而不是同一個班有好幾個考場就發好幾則各自獨立的通知（見 sql/90exam_seating.sql
-    // 檔尾「刻意不用 trigger」的說明：這裡是前端手動、一次性發送）。
-    const classRoomCounts = new Map<string, { roomLabel: string; count: number }[]>();
-    rooms.forEach((room) => {
-      const roomLabel = classById.get(room.room_class_id)?.label ?? '（找不到教室）';
-      (allocationsByRoom[room.id] ?? []).forEach((a) => {
-        const list = classRoomCounts.get(a.class_id) ?? [];
-        list.push({ roomLabel, count: a.student_count });
-        classRoomCounts.set(a.class_id, list);
-      });
-    });
-
-    const notifyRows: { teacher_id: string; category: string; message: string; link_url: string }[] = [];
-    classRoomCounts.forEach((rooms_, classId) => {
-      const teacherId = classById.get(classId)?.homeroom_teacher_id;
-      if (!teacherId) return;
-      const classLabel = classById.get(classId)?.label ?? '';
-      const detail = rooms_.map((r) => `${r.roomLabel}（${r.count}人）`).join('、');
-      notifyRows.push({
-        teacher_id: teacherId,
-        category: '考場通知',
-        message: `「${selectedPeriod.name}」考場表已發送：${classLabel}被分配到 ${detail}，請至「輸入考場名單」填入本班考生名單。`,
-        link_url: '/attendance/exam-seating-roster',
-      });
-    });
-
-    if (notifyRows.length > 0) {
-      const { error: notifyErr } = await supabase.from('staff_notifications').insert(notifyRows);
-      if (notifyErr) {
-        setBusy(false);
-        setError('發送通知失敗：' + notifyErr.message);
-        return;
-      }
-    }
-    const { error: updErr } = await supabase.from('exam_periods').update({ status: '已發送' }).eq('id', periodId);
-    setBusy(false);
-    if (updErr) {
-      setError('更新考試場次狀態失敗：' + updErr.message);
-      return;
-    }
-    setNotice(`已發送考場表，共通知 ${notifyRows.length} 個班級的導師`);
-    setPeriods((prev) => prev.map((p) => (p.id === periodId ? { ...p, status: '已發送' } : p)));
-  }
-
-  function roomClassesSubmitted(room: ExamRoom): { classId: string; label: string; submitted: boolean }[] {
-    const classIds = Array.from(new Set((seatsByRoom[room.id] ?? []).filter((s) => s.class_id).map((s) => s.class_id as string)));
-    return classIds.map((cid) => ({ classId: cid, label: classById.get(cid)?.label ?? '（不明班級）', submitted: submittedClassIds.has(cid) }));
-  }
-
-  function canPrintRoom(room: ExamRoom): boolean {
-    const statuses = roomClassesSubmitted(room);
-    return statuses.length > 0 && statuses.every((s) => s.submitted);
-  }
-
-  if (loading) {
-    return (
-      <main style={{ maxWidth: 900, margin: '0 auto', padding: 24 }}>
-        <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
-      </main>
-    );
-  }
-
-  if (!canView) {
-    return (
-      <main style={{ maxWidth: 900, margin: '0 auto', padding: 24 }}>
-        <h1 style={{ fontSize: 16, marginBottom: 4 }}>考試分班</h1>
-        <p style={{ fontSize: 13, color: '#999' }}>這個功能僅開放教務處人員使用。</p>
-      </main>
-    );
-  }
-
-  const printRoom = printRoomId ? rooms.find((r) => r.id === printRoomId) ?? null : null;
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 
   return (
-    <main style={{ maxWidth: 900, margin: '0 auto', padding: 24 }}>
-      <style>{`@media print { .no-print { display: none !important; } .print-only { display: block !important; } }
-        .print-only { display: none; }`}</style>
-
-      <div className="no-print">
-        <h1 style={{ fontSize: 16, marginBottom: 4 }}>考試分班</h1>
-        <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-          設定考場（借用某個班級的教室）、分配應試班級人數、用梅花座（7×7）安排座位，全部考場都設定完成後發送考場表通知各班導師。
+    <main style={{ maxWidth: 980, margin: '0 auto', padding: 24 }}>
+      <h1 style={{ fontSize: 18, marginBottom: 4 }}>考試分班</h1>
+      <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
+        新增考試 → 新增考場並設定應試班級 → 試算各考場人數（雙驗證後儲存）→ 產生梅花座位表並確認 → 全部考場完成後發送通知各班導師。
+      </p>
+      <ErrorBanner message={error} />
+      {notice && (
+        <p style={{ fontSize: 13, color: '#2D6A2D', background: '#EEF7EE', border: '1px solid #CFE8CF', borderRadius: 6, padding: '8px 12px', marginBottom: 12 }}>
+          {notice}
         </p>
-
-        {error && <p style={{ fontSize: 13, color: '#A32D2D', marginBottom: 12 }}>{error}</p>}
-        {notice && (
-          <p style={{ fontSize: 13, color: '#2D6A32', marginBottom: 12 }}>
-            {notice}{' '}
-            <button onClick={() => setNotice(null)} style={{ fontSize: 11 }}>
-              關閉
-            </button>
-          </p>
-        )}
-
-        <section style={{ marginBottom: 20, padding: 12, border: '1px solid #eee', borderRadius: 8 }}>
-          <h2 style={{ fontSize: 14, marginBottom: 8 }}>考試場次</h2>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 }}>
-            <select value={periodId} onChange={(e) => setPeriodId(e.target.value)} style={{ fontSize: 13, padding: 4 }}>
-              <option value="">（尚未選擇）</option>
-              {periods.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}（{p.status}）
-                </option>
-              ))}
-            </select>
-          </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input
-              value={newPeriodName}
-              onChange={(e) => setNewPeriodName(e.target.value)}
-              placeholder="新增考試場次名稱，例如「期中考」"
-              style={{ fontSize: 13, padding: 4, flex: 1 }}
-            />
-            <button disabled={busy || !newPeriodName.trim()} onClick={handleCreatePeriod} style={{ fontSize: 13, padding: '4px 10px' }}>
-              新增
-            </button>
-          </div>
-        </section>
-
-        {selectedPeriod && (
-          <>
-            {!isPeriodSent && (
-              <section style={{ marginBottom: 20, padding: 12, border: '1px solid #eee', borderRadius: 8 }}>
-                <h2 style={{ fontSize: 14, marginBottom: 8 }}>新增考場</h2>
-                <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
-                  考場借用目前有開設的某個班級的教室，人數上限＝該班目前人數。
-                </p>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <select value={newRoomClassId} onChange={(e) => setNewRoomClassId(e.target.value)} style={{ fontSize: 13, padding: 4 }}>
-                    <option value="">（選擇班級教室）</option>
-                    {classOptions
-                      .filter((c) => !rooms.some((r) => r.room_class_id === c.id))
-                      .map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.label}
-                        </option>
-                      ))}
-                  </select>
-                  <button disabled={busy || !newRoomClassId} onClick={handleAddRoom} style={{ fontSize: 13, padding: '4px 10px' }}>
-                    加入為考場
-                  </button>
-                </div>
-              </section>
-            )}
-
-            <section style={{ marginBottom: 20 }}>
-              <h2 style={{ fontSize: 14, marginBottom: 8 }}>
-                考場清單（{rooms.length} 個）
-                {!isPeriodSent && rooms.length > 0 && (
-                  <span style={{ fontSize: 12, color: allRoomsConfirmed ? '#2D6A32' : '#A32D2D', marginLeft: 8 }}>
-                    {allRoomsConfirmed ? '全部考場已完成梅花座設定' : '尚有考場還沒完成梅花座設定'}
-                  </span>
-                )}
-              </h2>
-              {rooms.length === 0 && <p style={{ fontSize: 13, color: '#999' }}>這個考試場次還沒有任何考場。</p>}
-              {rooms.map((room) => {
-                const roomLabel = classById.get(room.room_class_id)?.label ?? '（找不到教室）';
-                const allocs = allocationsByRoom[room.id] ?? [];
-                const assigned = allocs.reduce((s, a) => s + a.student_count, 0);
-                const subs = roomClassesSubmitted(room);
-                return (
-                  <div key={room.id} style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 10 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                      <div>
-                        <strong style={{ fontSize: 13 }}>{roomLabel} 教室</strong>
-                        <span style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
-                          容量上限 {room.capacity} 人，已分配 {assigned} 人（{allocs.length} 班）
-                          {room.seats_confirmed ? '｜已排定座位' : '｜尚未排定座位'}
-                        </span>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        {!isPeriodSent && (
-                          <>
-                            <button onClick={() => openEditor(room)} style={{ fontSize: 12, padding: '2px 8px' }}>
-                              {room.seats_confirmed ? '重新設定' : '設定'}
-                            </button>
-                            <button onClick={() => handleDeleteRoom(room.id)} style={{ fontSize: 12, padding: '2px 8px', color: '#A32D2D' }}>
-                              刪除
-                            </button>
-                          </>
-                        )}
-                        {isPeriodSent && room.seats_confirmed && (
-                          <>
-                            <button
-                              disabled={!canPrintRoom(room)}
-                              title={canPrintRoom(room) ? '' : '需所有應試班級導師都完成名單後才能列印'}
-                              onClick={() => {
-                                setPrintRoomId(room.id);
-                                setPrintMode('seats');
-                              }}
-                              style={{ fontSize: 12, padding: '2px 8px' }}
-                            >
-                              列印座位表
-                            </button>
-                            <button
-                              disabled={!canPrintRoom(room)}
-                              title={canPrintRoom(room) ? '' : '需所有應試班級導師都完成名單後才能列印'}
-                              onClick={() => {
-                                setPrintRoomId(room.id);
-                                setPrintMode('signin');
-                              }}
-                              style={{ fontSize: 12, padding: '2px 8px' }}
-                            >
-                              列印簽到表
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {isPeriodSent && subs.length > 0 && (
-                      <div style={{ marginTop: 8, fontSize: 12 }}>
-                        {subs.map((s) => (
-                          <span
-                            key={s.classId}
-                            style={{
-                              display: 'inline-block',
-                              marginRight: 8,
-                              marginTop: 4,
-                              padding: '2px 8px',
-                              borderRadius: 10,
-                              background: s.submitted ? '#E7F3E8' : '#FBEFE9',
-                              color: s.submitted ? '#2D6A32' : '#A32D2D',
-                            }}
-                          >
-                            {s.label}：{s.submitted ? '已送出' : '未送出'}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-
-                    {isPeriodSent && room.seats_confirmed && <RoomSeatPreview seats={seatsByRoom[room.id] ?? []} classById={classById} studentNames={studentNames} />}
-
-                    {openRoomId === room.id && (
-                      <div style={{ marginTop: 12, borderTop: '1px dashed #ccc', paddingTop: 12 }}>
-                        <table style={{ width: '100%', fontSize: 12, marginBottom: 8, borderCollapse: 'collapse' }}>
-                          <thead>
-                            <tr>
-                              <th style={{ textAlign: 'left', padding: 4 }}>應試班級</th>
-                              <th style={{ textAlign: 'left', padding: 4 }}>人數</th>
-                              <th />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {draftAllocations.map((row) => (
-                              <tr key={row.key}>
-                                <td style={{ padding: 4 }}>
-                                  <select value={row.classId} onChange={(e) => updateDraftRow(row.key, { classId: e.target.value })} style={{ fontSize: 12, padding: 3 }}>
-                                    <option value="">（選擇班級）</option>
-                                    {classOptions
-                                      .filter((c) => c.id === row.classId || !draftAllocations.some((r) => r.key !== row.key && r.classId === c.id))
-                                      .map((c) => (
-                                        <option key={c.id} value={c.id}>
-                                          {c.label}
-                                        </option>
-                                      ))}
-                                  </select>
-                                </td>
-                                <td style={{ padding: 4 }}>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={row.count}
-                                    onChange={(e) => updateDraftRow(row.key, { count: Math.max(0, Number(e.target.value) || 0) })}
-                                    style={{ fontSize: 12, padding: 3, width: 70 }}
-                                  />
-                                </td>
-                                <td style={{ padding: 4 }}>
-                                  <button onClick={() => removeDraftRow(row.key)} style={{ fontSize: 11 }}>
-                                    移除
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                        <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                          <button onClick={addDraftRow} style={{ fontSize: 12, padding: '3px 8px' }}>
-                            ＋新增應試班級
-                          </button>
-                          <button onClick={() => applyAverage(room)} style={{ fontSize: 12, padding: '3px 8px' }}>
-                            自動平均人數
-                          </button>
-                          <span style={{ fontSize: 12, color: draftTotal > room.capacity ? '#A32D2D' : '#666' }}>
-                            合計 {draftTotal} / {room.capacity} 人
-                          </span>
-                        </div>
-
-                        {draftPreviewLayout && (
-                          <div style={{ marginBottom: 8 }}>
-                            <p style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>梅花座預覽（7×7）：</p>
-                            <SeatGridPreview layout={draftPreviewLayout} classById={classById} />
-                          </div>
-                        )}
-
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <button disabled={busy} onClick={() => handleConfirmRoom(room)} style={{ fontSize: 12, padding: '4px 10px', fontWeight: 'bold' }}>
-                            確認
-                          </button>
-                          <button onClick={() => setOpenRoomId(null)} style={{ fontSize: 12, padding: '4px 10px' }}>
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </section>
-
-            {!isPeriodSent && (
-              <section>
-                <button
-                  disabled={busy || !allRoomsConfirmed}
-                  title={allRoomsConfirmed ? '' : '所有考場都完成梅花座設定後才能發送'}
-                  onClick={handleSendRoster}
-                  style={{ fontSize: 14, padding: '8px 16px', fontWeight: 'bold' }}
-                >
-                  發送考場表
-                </button>
-              </section>
-            )}
-          </>
-        )}
-      </div>
-
-      {printRoom && printMode && (
-        <div className="print-only">
-          {printMode === 'seats' ? (
-            <PrintSeatChart room={printRoom} seats={seatsByRoom[printRoom.id] ?? []} classById={classById} studentNames={studentNames} periodName={selectedPeriod?.name ?? ''} />
-          ) : (
-            <PrintSignInSheet room={printRoom} seats={seatsByRoom[printRoom.id] ?? []} classById={classById} studentNames={studentNames} periodName={selectedPeriod?.name ?? ''} />
-          )}
-        </div>
       )}
+
+      {/* ---------- 新增考試 ---------- */}
+      <section style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <h2 style={{ fontSize: 14, marginBottom: 8 }}>新增考試</h2>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input placeholder="考試名稱，例如：期中考" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ fontSize: 13, padding: '4px 8px', width: 220 }} />
+          <input
+            type="number"
+            value={newYear}
+            onChange={(e) => setNewYear(Number(e.target.value))}
+            style={{ fontSize: 13, padding: '4px 8px', width: 90 }}
+          />
+          <select value={newTerm} onChange={(e) => setNewTerm(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
+            <option value="上學期">上學期</option>
+            <option value="下學期">下學期</option>
+          </select>
+          <button onClick={handleCreateSession} style={{ fontSize: 13, padding: '4px 12px' }}>
+            新增考試
+          </button>
+        </div>
+      </section>
+
+      {/* ---------- 考試清單 ---------- */}
+      <section style={{ marginBottom: 16 }}>
+        {loading ? (
+          <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
+        ) : sessions.length === 0 ? (
+          <p style={{ fontSize: 13, color: '#999' }}>尚未建立任何考試。</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {sessions.map((s) => (
+              <div
+                key={s.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '8px 12px',
+                  border: '1px solid ' + (s.id === selectedSessionId ? '#B08968' : '#eee'),
+                  borderRadius: 6,
+                  background: s.id === selectedSessionId ? '#FBF3EC' : '#fff',
+                }}
+              >
+                <button
+                  onClick={() => setSelectedSessionId(s.id)}
+                  style={{ fontSize: 13, background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', flex: 1 }}
+                >
+                  {s.name}（{s.academic_year} {s.term}）－
+                  <span style={{ color: s.status === '已發送' ? '#2D6A2D' : '#999' }}> {s.status}</span>
+                </button>
+                <button onClick={() => handleDeleteSession(s.id)} style={{ fontSize: 12, padding: '2px 10px', color: '#A32D2D' }}>
+                  刪除考試
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {selectedSession && <ExamSessionEditor key={selectedSession.id} session={selectedSession} onSent={() => reloadSessions(selectedSession.id)} setNotice={setNotice} setError={setError} />}
     </main>
   );
 }
 
-function seatLabel(classId: string | null, classById: Map<string, ClassOption>): string {
-  if (!classId) return '';
-  return classById.get(classId)?.label ?? '?';
+// ============================================================
+// 單一考試的編排畫面：考場清單 → 各考場設定應試班級 → 試算/儲存人數 → 各考場梅花座位表 → 確認 → 發送
+// ============================================================
+function ExamSessionEditor({
+  session,
+  onSent,
+  setNotice,
+  setError,
+}: {
+  session: ExamSession;
+  onSent: () => void;
+  setNotice: (m: string | null) => void;
+  setError: (m: string | null) => void;
+}) {
+  const [rooms, setRooms] = useState<ExamRoom[]>([]);
+  const [roomClasses, setRoomClasses] = useState<ExamRoomClass[]>([]);
+  const [classOptions, setClassOptions] = useState<ClassOption[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [newRoomName, setNewRoomName] = useState('');
+  const [newRoomCapacity, setNewRoomCapacity] = useState<number>(30);
+
+  const [assigningRoomId, setAssigningRoomId] = useState<string | null>(null);
+  const [seatPreviewRoomId, setSeatPreviewRoomId] = useState<string | null>(null);
+  const [detailRoomId, setDetailRoomId] = useState<string | null>(null);
+
+  const [matrix, setMatrix] = useState<Record<string, Record<string, number>> | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
+
+  async function reload() {
+    setLoading(true);
+    try {
+      const [roomRows, classRows] = await Promise.all([listExamRooms(session.id), listClassOptionsWithHeadcount(session.academic_year)]);
+      setRooms(roomRows);
+      setClassOptions(classRows);
+      const rcRows = await listExamRoomClasses(roomRows.map((r) => r.id));
+      setRoomClasses(rcRows);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id]);
+
+  const classLabelMap = useMemo(() => Object.fromEntries(classOptions.map((c) => [c.id, c.label])), [classOptions]);
+  const roomLabelMap = useMemo(() => Object.fromEntries(rooms.map((r) => [r.id, r.room_name])), [rooms]);
+
+  async function handleAddRoom() {
+    if (!newRoomName.trim()) {
+      setError('請輸入考場名稱');
+      return;
+    }
+    setError(null);
+    try {
+      await createExamRoom(session.id, newRoomName.trim(), newRoomCapacity);
+      setNewRoomName('');
+      setNotice('已新增考場');
+      await reload();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  async function handleDeleteRoom(id: string) {
+    if (!confirm('確定要刪除這個考場嗎？')) return;
+    try {
+      await deleteExamRoom(id);
+      await reload();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  // ---- 試算各班在各考場的人數（步驟3）----
+  function runComputation() {
+    setError(null);
+    const classRoomMap: Record<string, string[]> = {};
+    for (const rc of roomClasses) {
+      classRoomMap[rc.class_id] = classRoomMap[rc.class_id] ?? [];
+      classRoomMap[rc.class_id].push(rc.exam_room_id);
+    }
+    const inputs = Object.entries(classRoomMap).map(([classId, roomIds]) => ({
+      classId,
+      headcount: classOptions.find((c) => c.id === classId)?.headcount ?? 0,
+      rooms: roomIds.map((roomId) => ({ examRoomId: roomId, capacity: rooms.find((r) => r.id === roomId)?.seat_capacity ?? 0 })),
+    }));
+    const result = computeAllocatedCounts(inputs);
+    setMatrix(result);
+    runValidation(result, classRoomMap);
+  }
+
+  function runValidation(m: Record<string, Record<string, number>>, classRoomMap: Record<string, string[]>) {
+    const v = validateAllocation({
+      classHeadcounts: Object.fromEntries(classOptions.map((c) => [c.id, c.headcount])),
+      classLabels: classLabelMap,
+      roomCapacities: Object.fromEntries(rooms.map((r) => [r.id, r.seat_capacity])),
+      roomLabels: roomLabelMap,
+      matrix: m,
+      classRoomMap,
+    });
+    setValidation(v);
+  }
+
+  function editMatrixCell(roomId: string, classId: string, value: number) {
+    if (!matrix) return;
+    const next = { ...matrix, [roomId]: { ...matrix[roomId], [classId]: value } };
+    setMatrix(next);
+    const classRoomMap: Record<string, string[]> = {};
+    for (const rc of roomClasses) {
+      classRoomMap[rc.class_id] = classRoomMap[rc.class_id] ?? [];
+      classRoomMap[rc.class_id].push(rc.exam_room_id);
+    }
+    runValidation(next, classRoomMap);
+  }
+
+  async function handleSaveMatrix() {
+    if (!matrix || !validation || !validation.horizontalOk || !validation.verticalOk) {
+      setError('人數加總尚未一致，請先修正橫向／縱向加總後再儲存。');
+      return;
+    }
+    setError(null);
+    try {
+      const rows = roomClasses.map((rc) => ({ id: rc.id, allocated_count: matrix[rc.exam_room_id]?.[rc.class_id] ?? 0 }));
+      await saveAllocatedCounts(rows);
+      setNotice('已儲存各考場分配人數');
+      await reload();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  const allConfirmed = rooms.length > 0 && rooms.every((r) => r.confirmed);
+  const [rosterStatus, setRosterStatus] = useState<RosterStatus[]>([]);
+  useEffect(() => {
+    if (session.status !== '已發送' && session.status !== '已完成') return;
+    listRosterStatus(session.id).then(setRosterStatus).catch(() => {});
+  }, [session.id, session.status]);
+
+  async function handleSend() {
+    if (!allConfirmed) {
+      setError('尚有考場座位表未確認，需全部考場都按過【確認】才能發送。');
+      return;
+    }
+    if (!confirm('確定要發送考場表通知各班導師嗎？')) return;
+    setError(null);
+    try {
+      await sendExamSession(session.id);
+      setNotice('已發送考場表，各班導師將收到通知。');
+      onSent();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  if (loading) return <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>;
+
+  return (
+    <section style={{ borderTop: '2px solid #eee', paddingTop: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <h2 style={{ fontSize: 15 }}>
+          {session.name}（{session.academic_year} {session.term}）
+        </h2>
+        {session.status !== '已發送' && session.status !== '已完成' && (
+          <button onClick={handleSend} disabled={!allConfirmed} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
+            發送考場表
+          </button>
+        )}
+      </div>
+      {!allConfirmed && session.status === '編排中' && (
+        <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：所有考場都需完成座位表【確認】後，才能發送考場表。</p>
+      )}
+
+      {/* ---- 新增考場 ---- */}
+      {session.status === '編排中' && (
+        <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+          <h3 style={{ fontSize: 13, marginBottom: 8 }}>新增考場</h3>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input placeholder="考場名稱，例如：101教室" value={newRoomName} onChange={(e) => setNewRoomName(e.target.value)} style={{ fontSize: 13, padding: '4px 8px', width: 180 }} />
+            <label style={{ fontSize: 12, color: '#666' }}>座位數（最多49，最大7*7）</label>
+            <input
+              type="number"
+              min={1}
+              max={49}
+              value={newRoomCapacity}
+              onChange={(e) => setNewRoomCapacity(Number(e.target.value))}
+              style={{ fontSize: 13, padding: '4px 8px', width: 80 }}
+            />
+            <span style={{ fontSize: 12, color: '#999' }}>方形座位：{gridSizeForCapacity(newRoomCapacity)}×{gridSizeForCapacity(newRoomCapacity)}</span>
+            <button onClick={handleAddRoom} style={{ fontSize: 13, padding: '4px 12px' }}>
+              新增考場
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---- 考場清單 ---- */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+        {rooms.length === 0 && <p style={{ fontSize: 13, color: '#999' }}>尚未新增考場。</p>}
+        {rooms.map((room) => {
+          const myClasses = roomClasses.filter((rc) => rc.exam_room_id === room.id);
+          const submittedCount = rosterStatus.filter((rs) => myClasses.some((mc) => mc.class_id === rs.class_id) && rs.submitted).length;
+          return (
+            <div key={room.id} style={{ border: '1px solid #eee', borderRadius: 6, padding: '8px 12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                <div style={{ fontSize: 13 }}>
+                  <strong>{room.room_name}</strong>（座位數 {room.seat_capacity}，{room.grid_size}×{room.grid_size}方形）
+                  {room.confirmed ? <span style={{ color: '#2D6A2D', marginLeft: 8 }}>已確認座位表</span> : <span style={{ color: '#999', marginLeft: 8 }}>尚未確認</span>}
+                  {(session.status === '已發送' || session.status === '已完成') && myClasses.length > 0 && (
+                    <span style={{ color: '#666', marginLeft: 8 }}>
+                      名單提交：{submittedCount}/{myClasses.length} 班
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {session.status === '編排中' && (
+                    <>
+                      <button onClick={() => setAssigningRoomId(room.id)} style={{ fontSize: 12, padding: '3px 10px' }}>
+                        設定應試班級
+                      </button>
+                      <button onClick={() => setSeatPreviewRoomId(room.id)} style={{ fontSize: 12, padding: '3px 10px' }}>
+                        梅花座位表
+                      </button>
+                      <button onClick={() => handleDeleteRoom(room.id)} style={{ fontSize: 12, padding: '3px 10px', color: '#A32D2D' }}>
+                        刪除考場
+                      </button>
+                    </>
+                  )}
+                  {(session.status === '已發送' || session.status === '已完成') && (
+                    <button onClick={() => setDetailRoomId(room.id)} style={{ fontSize: 12, padding: '3px 10px' }}>
+                      預覽／列印
+                    </button>
+                  )}
+                </div>
+              </div>
+              {myClasses.length > 0 && (
+                <p style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                  應試班級：{myClasses.map((mc) => `${classLabelMap[mc.class_id] ?? mc.class_id}(${mc.allocated_count}人)`).join('、')}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ---- 步驟2：設定應試班級（哪些班分配到這個考場）---- */}
+      {assigningRoomId && (
+        <AssignClassesModal
+          room={rooms.find((r) => r.id === assigningRoomId)!}
+          classOptions={classOptions}
+          currentClassIds={roomClasses.filter((rc) => rc.exam_room_id === assigningRoomId).map((rc) => rc.class_id)}
+          onClose={() => setAssigningRoomId(null)}
+          onSaved={async () => {
+            setAssigningRoomId(null);
+            setNotice('已儲存應試班級分配');
+            await reload();
+          }}
+        />
+      )}
+
+      {/* ---- 步驟3-4：試算各考場人數＋雙驗證 ---- */}
+      {session.status === '編排中' && roomClasses.length > 0 && (
+        <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <h3 style={{ fontSize: 13 }}>試算各考場人數（可手動修改，橫向／縱向加總一致才能儲存）</h3>
+            <button onClick={runComputation} style={{ fontSize: 12, padding: '4px 12px' }}>
+              依座位數比例試算
+            </button>
+          </div>
+          {matrix && (
+            <AllocationMatrix
+              matrix={matrix}
+              rooms={rooms.filter((r) => roomClasses.some((rc) => rc.exam_room_id === r.id))}
+              classOptions={classOptions.filter((c) => roomClasses.some((rc) => rc.class_id === c.id))}
+              validation={validation}
+              onEditCell={editMatrixCell}
+            />
+          )}
+          {matrix && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={handleSaveMatrix} disabled={!validation || !validation.horizontalOk || !validation.verticalOk} style={{ fontSize: 13, padding: '5px 14px' }}>
+                儲存分配人數
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---- 步驟5-6：梅花座位表 ---- */}
+      {seatPreviewRoomId && (
+        <SeatLayoutModal
+          room={rooms.find((r) => r.id === seatPreviewRoomId)!}
+          roomClasses={roomClasses.filter((rc) => rc.exam_room_id === seatPreviewRoomId)}
+          classLabelMap={classLabelMap}
+          onClose={() => setSeatPreviewRoomId(null)}
+          onConfirmed={async () => {
+            setSeatPreviewRoomId(null);
+            setNotice('已確認座位表');
+            await reload();
+          }}
+        />
+      )}
+
+      {/* ---- 步驟8：發送後預覽／列印 ---- */}
+      {detailRoomId && (
+        <RoomDetailModal
+          room={rooms.find((r) => r.id === detailRoomId)!}
+          examSessionName={session.name}
+          classLabelMap={classLabelMap}
+          roomClasses={roomClasses.filter((rc) => rc.exam_room_id === detailRoomId)}
+          rosterStatus={rosterStatus}
+          examSessionId={session.id}
+          onClose={() => setDetailRoomId(null)}
+        />
+      )}
+    </section>
+  );
 }
 
-// 小張的座位格子預覽（設定畫面用，只顯示班級縮寫，不含姓名——姓名要等導師填完才有）
-function SeatGridPreview({ layout, classById }: { layout: { row: number; col: number; classId: string | null }[]; classById: Map<string, ClassOption> }) {
-  const rows = Array.from({ length: SEAT_GRID_SIZE }, (_, r) => layout.filter((c) => c.row === r + 1).sort((a, b) => a.col - b.col));
+// ============================================================
+// 設定應試班級（多選）
+// ============================================================
+function AssignClassesModal({
+  room,
+  classOptions,
+  currentClassIds,
+  onClose,
+  onSaved,
+}: {
+  room: ExamRoom;
+  classOptions: ClassOption[];
+  currentClassIds: string[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set(currentClassIds));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function toggle(id: string) {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next);
+  }
+
+  async function save() {
+    setSaving(true);
+    setErr(null);
+    try {
+      await saveExamRoomClassAssignment(room.id, Array.from(selected));
+      onSaved();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <table style={{ borderCollapse: 'collapse' }}>
-      <tbody>
-        {rows.map((row, ri) => (
-          <tr key={ri}>
-            {row.map((cell, ci) => (
-              <td
-                key={ci}
-                style={{
-                  width: 42,
-                  height: 32,
-                  border: '1px solid #ddd',
-                  textAlign: 'center',
-                  fontSize: 11,
-                  background: cell.classId ? '#EFF4FB' : '#fafafa',
-                }}
-              >
-                {seatLabel(cell.classId, classById)}
-              </td>
-            ))}
-          </tr>
+    <ModalShell title={`${room.room_name}－設定應試班級`} onClose={onClose}>
+      <ErrorBanner message={err} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 6, maxHeight: 320, overflowY: 'auto', marginBottom: 12 }}>
+        {classOptions.map((c) => (
+          <label key={c.id} style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+            {c.label}（{c.headcount}人）
+          </label>
         ))}
-      </tbody>
-    </table>
+      </div>
+      <button onClick={save} disabled={saving} style={{ fontSize: 13, padding: '5px 14px' }}>
+        {saving ? '儲存中…' : '儲存'}
+      </button>
+    </ModalShell>
   );
 }
 
-// 已發送狀態下，考場清單裡的座位小預覽（含已填入的學生姓名，方便教務處確認進度）
-function RoomSeatPreview({ seats, classById, studentNames }: { seats: ExamSeat[]; classById: Map<string, ClassOption>; studentNames: Record<string, string> }) {
-  const rows = Array.from({ length: SEAT_GRID_SIZE }, (_, r) => seats.filter((s) => s.seat_row === r + 1).sort((a, b) => a.seat_col - b.seat_col));
-  return (
-    <div style={{ marginTop: 10 }}>
-      <table style={{ borderCollapse: 'collapse' }}>
-        <tbody>
-          {rows.map((row, ri) => (
-            <tr key={ri}>
-              {row.map((cell, ci) => (
-                <td
-                  key={ci}
-                  style={{
-                    width: 64,
-                    height: 40,
-                    border: '1px solid #ddd',
-                    textAlign: 'center',
-                    fontSize: 10,
-                    background: cell.class_id ? '#EFF4FB' : '#fafafa',
-                    verticalAlign: 'middle',
-                  }}
-                >
-                  {cell.class_id ? (
-                    <>
-                      <div style={{ color: '#666' }}>{seatLabel(cell.class_id, classById)}</div>
-                      <div>{cell.student_no ? studentNames[cell.student_no] ?? cell.student_no : '－'}</div>
-                    </>
-                  ) : (
-                    ''
-                  )}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function PrintSeatChart({
-  room,
-  seats,
-  classById,
-  studentNames,
-  periodName,
+// ============================================================
+// 分配人數矩陣（班級 x 考場）
+// ============================================================
+function AllocationMatrix({
+  matrix,
+  rooms,
+  classOptions,
+  validation,
+  onEditCell,
 }: {
-  room: ExamRoom;
-  seats: ExamSeat[];
-  classById: Map<string, ClassOption>;
-  studentNames: Record<string, string>;
-  periodName: string;
+  matrix: Record<string, Record<string, number>>;
+  rooms: ExamRoom[];
+  classOptions: ClassOption[];
+  validation: ValidationResult | null;
+  onEditCell: (roomId: string, classId: string, value: number) => void;
 }) {
-  const rows = Array.from({ length: SEAT_GRID_SIZE }, (_, r) => seats.filter((s) => s.seat_row === r + 1).sort((a, b) => a.seat_col - b.seat_col));
-  const roomLabel = classById.get(room.room_class_id)?.label ?? '';
   return (
-    <div style={{ padding: 24 }}>
-      <h1 style={{ fontSize: 18, marginBottom: 4 }}>
-        {periodName}座位表－{roomLabel} 教室
-      </h1>
-      <table style={{ borderCollapse: 'collapse', marginTop: 12 }}>
-        <tbody>
-          {rows.map((row, ri) => (
-            <tr key={ri}>
-              {row.map((cell, ci) => (
-                <td key={ci} style={{ width: 90, height: 60, border: '1px solid #333', textAlign: 'center', fontSize: 12, verticalAlign: 'middle' }}>
-                  {cell.class_id ? (
-                    <>
-                      <div style={{ fontSize: 11, color: '#555' }}>{seatLabel(cell.class_id, classById)}</div>
-                      <div style={{ fontSize: 14 }}>{cell.student_no ? studentNames[cell.student_no] ?? cell.student_no : ''}</div>
-                    </>
-                  ) : (
-                    ''
-                  )}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function PrintSignInSheet({
-  room,
-  seats,
-  classById,
-  studentNames,
-  periodName,
-}: {
-  room: ExamRoom;
-  seats: ExamSeat[];
-  classById: Map<string, ClassOption>;
-  studentNames: Record<string, string>;
-  periodName: string;
-}) {
-  const roomLabel = classById.get(room.room_class_id)?.label ?? '';
-  const list = seats
-    .filter((s) => s.class_id && s.student_no)
-    .slice()
-    .sort((a, b) => a.seat_row - b.seat_row || a.seat_col - b.seat_col);
-  return (
-    <div style={{ padding: 24 }}>
-      <h1 style={{ fontSize: 18, marginBottom: 4 }}>
-        {periodName}簽到表－{roomLabel} 教室
-      </h1>
-      <table style={{ borderCollapse: 'collapse', marginTop: 12, width: '100%' }}>
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 12, minWidth: 400 }}>
         <thead>
           <tr>
-            <th style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>座位</th>
-            <th style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>班級</th>
-            <th style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>學號</th>
-            <th style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>姓名</th>
-            <th style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>簽到</th>
+            <th style={cellStyle}>班級</th>
+            {rooms.map((r) => (
+              <th key={r.id} style={cellStyle}>
+                {r.room_name}
+                <br />
+                <span style={{ color: '#999', fontWeight: 400 }}>座位{r.seat_capacity}</span>
+              </th>
+            ))}
+            <th style={cellStyle}>總人數</th>
           </tr>
         </thead>
         <tbody>
-          {list.map((s) => (
-            <tr key={s.id}>
-              <td style={{ border: '1px solid #333', padding: 6, fontSize: 12, textAlign: 'center' }}>
-                {s.seat_row}-{s.seat_col}
-              </td>
-              <td style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>{seatLabel(s.class_id, classById)}</td>
-              <td style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>{s.student_no}</td>
-              <td style={{ border: '1px solid #333', padding: 6, fontSize: 12 }}>{s.student_no ? studentNames[s.student_no] ?? '' : ''}</td>
-              <td style={{ border: '1px solid #333', padding: 6, fontSize: 12 }} />
-            </tr>
-          ))}
+          {classOptions.map((c) => {
+            const rowSum = rooms.reduce((s, r) => s + (matrix[r.id]?.[c.id] ?? 0), 0);
+            const rowOk = rowSum === c.headcount;
+            return (
+              <tr key={c.id}>
+                <td style={cellStyle}>{c.label}</td>
+                {rooms.map((r) => (
+                  <td key={r.id} style={cellStyle}>
+                    <input
+                      type="number"
+                      value={matrix[r.id]?.[c.id] ?? 0}
+                      onChange={(e) => onEditCell(r.id, c.id, Number(e.target.value))}
+                      style={{ width: 48, fontSize: 12, textAlign: 'center' }}
+                    />
+                  </td>
+                ))}
+                <td style={{ ...cellStyle, color: rowOk ? '#2D6A2D' : '#A32D2D', fontWeight: 600 }}>
+                  {rowSum} / {c.headcount}
+                </td>
+              </tr>
+            );
+          })}
+          <tr>
+            <td style={{ ...cellStyle, fontWeight: 600 }}>座位加總</td>
+            {rooms.map((r) => {
+              const colSum = classOptions.reduce((s, c) => s + (matrix[r.id]?.[c.id] ?? 0), 0);
+              const colOk = colSum <= r.seat_capacity;
+              return (
+                <td key={r.id} style={{ ...cellStyle, color: colOk ? '#2D6A2D' : '#A32D2D', fontWeight: 600 }}>
+                  {colSum} / {r.seat_capacity}
+                </td>
+              );
+            })}
+            <td style={cellStyle} />
+          </tr>
         </tbody>
       </table>
+      {validation && !validation.horizontalOk && (
+        <ul style={{ fontSize: 12, color: '#A32D2D', marginTop: 6 }}>
+          {validation.horizontalErrors.map((e, i) => (
+            <li key={i}>{e}</li>
+          ))}
+        </ul>
+      )}
+      {validation && !validation.verticalOk && (
+        <ul style={{ fontSize: 12, color: '#A32D2D', marginTop: 6 }}>
+          {validation.verticalErrors.map((e, i) => (
+            <li key={i}>{e}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const cellStyle: React.CSSProperties = { border: '1px solid #eee', padding: '4px 8px', textAlign: 'center' };
+
+// ============================================================
+// 梅花座位表產生／確認
+// ============================================================
+function SeatLayoutModal({
+  room,
+  roomClasses,
+  classLabelMap,
+  onClose,
+  onConfirmed,
+}: {
+  room: ExamRoom;
+  roomClasses: ExamRoomClass[];
+  classLabelMap: Record<string, string>;
+  onClose: () => void;
+  onConfirmed: () => void;
+}) {
+  const [seats, setSeats] = useState<SeatCell[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function generate() {
+    const layout = generateSeatLayout({
+      gridSize: room.grid_size,
+      capacity: room.seat_capacity,
+      classCounts: roomClasses.map((rc) => ({ classId: rc.class_id, count: rc.allocated_count })),
+    });
+    setSeats(layout);
+  }
+
+  useEffect(() => {
+    generate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const totalAllocated = roomClasses.reduce((s, rc) => s + rc.allocated_count, 0);
+
+  async function confirm() {
+    setSaving(true);
+    setErr(null);
+    try {
+      await confirmRoomSeatLayout(room.id, seats);
+      onConfirmed();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const colorFor = useMemo(() => {
+    const palette = ['#F4D7C3', '#CDE7D8', '#CFE0F4', '#F4EBC3', '#E3D3F4', '#F4C3D7', '#C3F4E9', '#DDE0E3'];
+    const map: Record<string, string> = {};
+    roomClasses.forEach((rc, i) => (map[rc.class_id] = palette[i % palette.length]));
+    return map;
+  }, [roomClasses]);
+
+  if (totalAllocated === 0) {
+    return (
+      <ModalShell title={`${room.room_name}－梅花座位表`} onClose={onClose}>
+        <p style={{ fontSize: 13, color: '#A32D2D' }}>尚未儲存本考場的分配人數，請先完成「試算各考場人數」並儲存。</p>
+      </ModalShell>
+    );
+  }
+
+  return (
+    <ModalShell title={`${room.room_name}－梅花座位表（${room.grid_size}×${room.grid_size}）`} onClose={onClose}>
+      <ErrorBanner message={err} />
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 8, fontSize: 12 }}>
+        {roomClasses.map((rc) => (
+          <span key={rc.class_id} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 12, height: 12, background: colorFor[rc.class_id], display: 'inline-block', borderRadius: 2 }} />
+            {classLabelMap[rc.class_id] ?? rc.class_id}（{rc.allocated_count}人）
+          </span>
+        ))}
+      </div>
+      <SeatGrid gridSize={room.grid_size} seats={seats} colorFor={colorFor} labelFor={(classId) => (classId ? (classLabelMap[classId] ?? '') : '')} />
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button onClick={generate} style={{ fontSize: 13, padding: '5px 14px' }}>
+          重新排列
+        </button>
+        <button onClick={confirm} disabled={saving} style={{ fontSize: 13, padding: '5px 14px', fontWeight: 600 }}>
+          {saving ? '儲存中…' : '確認'}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function SeatGrid({
+  gridSize,
+  seats,
+  colorFor,
+  labelFor,
+  seatContent,
+}: {
+  gridSize: number;
+  seats: { row: number; col: number; seatNo: number; classId: string | null }[];
+  colorFor: Record<string, string>;
+  labelFor: (classId: string | null) => string;
+  seatContent?: (seatNo: number) => React.ReactNode;
+}) {
+  const bySeat = new Map<string, (typeof seats)[number]>();
+  seats.forEach((s) => bySeat.set(`${s.row}-${s.col}`, s));
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${gridSize}, 56px)`, gap: 4 }}>
+      {Array.from({ length: gridSize }).map((_, row) =>
+        Array.from({ length: gridSize }).map((__, col) => {
+          const seat = bySeat.get(`${row}-${col}`);
+          if (!seat) return <div key={`${row}-${col}`} style={{ width: 56, height: 44 }} />;
+          return (
+            <div
+              key={`${row}-${col}`}
+              style={{
+                width: 56,
+                height: 44,
+                border: '1px solid #ccc',
+                borderRadius: 4,
+                background: seat.classId ? colorFor[seat.classId] ?? '#eee' : '#f7f7f7',
+                fontSize: 10,
+                padding: 2,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ color: '#666' }}>#{seat.seatNo}</div>
+              <div>{seatContent ? seatContent(seat.seatNo) : labelFor(seat.classId)}</div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// 發送後：預覽名單／座位＋列印座位表／簽到表
+// ============================================================
+function RoomDetailModal({
+  room,
+  examSessionName,
+  classLabelMap,
+  roomClasses,
+  rosterStatus,
+  examSessionId,
+  onClose,
+}: {
+  room: ExamRoom;
+  examSessionName: string;
+  classLabelMap: Record<string, string>;
+  roomClasses: ExamRoomClass[];
+  rosterStatus: RosterStatus[];
+  examSessionId: string;
+  onClose: () => void;
+}) {
+  const [seats, setSeats] = useState<ExamRoomSeatRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    listRoomSeats(room.id)
+      .then(setSeats)
+      .finally(() => setLoading(false));
+  }, [room.id]);
+
+  const allSubmitted = roomClasses.every((rc) => rosterStatus.find((rs) => rs.class_id === rc.class_id)?.submitted);
+
+  const colorFor = useMemo(() => {
+    const palette = ['#F4D7C3', '#CDE7D8', '#CFE0F4', '#F4EBC3', '#E3D3F4', '#F4C3D7', '#C3F4E9', '#DDE0E3'];
+    const map: Record<string, string> = {};
+    roomClasses.forEach((rc, i) => (map[rc.class_id] = palette[i % palette.length]));
+    return map;
+  }, [roomClasses]);
+
+  function handlePrint() {
+    const w = window.open('', '_blank');
+    if (!w) return;
+    const rows = seats
+      .filter((s) => s.class_id)
+      .map(
+        (s) =>
+          `<tr><td>${s.seat_no}</td><td>${classLabelMap[s.class_id!] ?? ''}</td><td>${s.exam_seat_students?.class_seat_no ?? ''}</td><td>${s.exam_seat_students?.student_no ?? ''}</td></tr>`
+      )
+      .join('');
+    w.document.write(`
+      <html><head><title>${examSessionName}－${room.room_name}</title>
+      <style>
+        body{font-family:sans-serif;padding:24px;}
+        h1{font-size:18px;} h2{font-size:14px;color:#666;}
+        table{border-collapse:collapse;width:100%;margin-top:16px;}
+        td,th{border:1px solid #999;padding:6px 10px;font-size:13px;text-align:center;}
+      </style></head><body>
+      <h1>${examSessionName}</h1>
+      <h2>考場：${room.room_name}（座位數 ${room.seat_capacity}）</h2>
+      <table><thead><tr><th>考場座位號</th><th>班級</th><th>原班座號</th><th>學號</th><th>簽名</th></tr></thead>
+      <tbody>${rows.replace(/<\/tr>/g, '<td style="width:120px"></td></tr>')}</tbody></table>
+      </body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
+  return (
+    <ModalShell title={`${room.room_name}－名單與座位預覽`} onClose={onClose}>
+      {loading ? (
+        <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
+      ) : (
+        <>
+          <SeatGrid
+            gridSize={room.grid_size}
+            seats={seats.map((s) => ({ row: s.row_no, col: s.col_no, seatNo: s.seat_no, classId: s.class_id }))}
+            colorFor={colorFor}
+            labelFor={() => ''}
+            seatContent={(seatNo) => {
+              const seat = seats.find((s) => s.seat_no === seatNo);
+              const stu = seat?.exam_seat_students;
+              return stu?.class_seat_no != null ? `座號${stu.class_seat_no}` : seat?.class_id ? classLabelMap[seat.class_id] : '';
+            }}
+          />
+          <p style={{ fontSize: 12, color: allSubmitted ? '#2D6A2D' : '#B08968', marginTop: 10 }}>
+            {allSubmitted ? '各班名單皆已送出，可以列印座位表／簽到表。' : '尚有班級未完成名單輸入，暫時無法列印完整簽到表。'}
+          </p>
+          <button onClick={handlePrint} disabled={!allSubmitted} style={{ fontSize: 13, padding: '5px 14px', marginTop: 6 }}>
+            列印座位表／簽到表
+          </button>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+// ============================================================
+// 共用 Modal 外框
+// ============================================================
+function ModalShell({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 16 }}>
+      <div style={{ background: '#fff', borderRadius: 10, padding: 20, maxWidth: 720, width: '100%', maxHeight: '86vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h3 style={{ fontSize: 14 }}>{title}</h3>
+          <button onClick={onClose} style={{ fontSize: 12, padding: '3px 10px' }}>
+            關閉
+          </button>
+        </div>
+        {children}
+      </div>
     </div>
   );
 }
