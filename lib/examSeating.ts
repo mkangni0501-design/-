@@ -37,6 +37,28 @@ export type ClassOption = {
 };
 
 const MAX_SEATS_PER_ROOM = 49; // 最大 7*7
+export const MAX_CLASSES_PER_ROOM = 4; // 每個考場最多安排 4 個應試班級
+const PAGE_SIZE = 1000; // Supabase/PostgREST 單次查詢預設上限，超過需要分頁抓取，否則班級人數會被截斷變成 0 或少算
+
+/**
+ * 分頁抓取所有符合條件的資料列，避免資料筆數超過 Supabase 單次查詢上限（預設1000筆）
+ * 時被截斷，導致像是「班級人數變成0或算錯」這種問題。呼叫端需自行加上足以保證穩定
+ * 排序的 .order(...)（例如用主鍵排序），否則分頁之間可能重複或漏掉資料列。
+ */
+async function fetchAllRows<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>): Promise<T[]> {
+  const all: T[] = [];
+  let from = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await build(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    all.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}
 
 /** 依座位數換算方形邊長（最大7），供新增考場時使用 */
 export function gridSizeForCapacity(capacity: number): number {
@@ -99,23 +121,111 @@ export async function deleteExamRoom(id: string) {
   if (error) throw new Error('刪除考場失敗：' + error.message);
 }
 
-/** 目前所有現在在讀的班級（供選擇應試班級用），附上目前在讀人數 */
+export type RoomSyncResult = { createdCount: number; skippedTooBig: string[]; skippedEmpty: string[] };
+
+/**
+ * 讓「所有班級」自動成為考場，教務處不用再一個個手動新增：
+ * 針對這個學年度、目前還沒被建立成考場的班級，自動新增考場
+ * （考場名稱＝班級名稱，座位數＝該班目前真正在校人數）。
+ * 人數為0（沒有在校學生）或超過49人（超出方形座位7*7上限）的班級會被跳過，回傳名單供畫面提示。
+ */
+export async function autoSyncRoomsForSession(examSessionId: string, academicYear: number): Promise<RoomSyncResult> {
+  const [existingRooms, classOptions] = await Promise.all([listExamRooms(examSessionId), listClassOptionsWithHeadcount(academicYear)]);
+  const existingNames = new Set(existingRooms.map((r) => r.room_name));
+  const toCreate = classOptions.filter((c) => !existingNames.has(c.label));
+  const skippedTooBig: string[] = [];
+  const skippedEmpty: string[] = [];
+  const rows: { exam_session_id: string; room_name: string; seat_capacity: number; grid_size: number }[] = [];
+  for (const c of toCreate) {
+    if (c.headcount <= 0) {
+      skippedEmpty.push(c.label);
+      continue;
+    }
+    if (c.headcount > MAX_SEATS_PER_ROOM) {
+      skippedTooBig.push(c.label);
+      continue;
+    }
+    rows.push({ exam_session_id: examSessionId, room_name: c.label, seat_capacity: c.headcount, grid_size: gridSizeForCapacity(c.headcount) });
+  }
+  if (rows.length > 0) {
+    const { error } = await supabase.from('exam_rooms').insert(rows);
+    if (error) throw new Error('自動建立考場失敗：' + error.message);
+  }
+  return { createdCount: rows.length, skippedTooBig, skippedEmpty };
+}
+
+const HIDDEN_STUDENT_STATUSES = ['休學', '轉學', '退學', '畢業', '肄業'];
+
+export type EnrollmentRow = { student_no: string; seat_no: number | null; name: string };
+
+/** 某班目前「真正在校」的學生名冊（排除休學/轉學/退學/畢業/肄業），供導師輸入考場名單使用 */
+export async function listCurrentEnrollments(classId: string): Promise<EnrollmentRow[]> {
+  const rows = await fetchAllRows<any>((from, to) =>
+    supabase
+      .from('enrollments')
+      .select('id, student_no, seat_no, students(name)')
+      .eq('class_id', classId)
+      .eq('is_current', true)
+      .order('id')
+      .range(from, to)
+  );
+  const hiddenStudentNos = await findHiddenStudentNos(rows.map((r) => r.student_no));
+  return rows.filter((r) => !hiddenStudentNos.has(r.student_no)).map((r) => ({ student_no: r.student_no, seat_no: r.seat_no, name: r.students?.name ?? '' }));
+}
+
+/** 給一批學號，回傳其中「目前學籍狀態已離校」（休學/轉學/退學/畢業/肄業）的學號集合 */
+async function findHiddenStudentNos(studentNos: string[]): Promise<Set<string>> {
+  const uniq = Array.from(new Set(studentNos));
+  const hidden = new Set<string>();
+  if (uniq.length === 0) return hidden;
+  // 依 student_no 分組、每組內依日期新到舊排序，並用 id 當最終排序依據，
+  // 確保分頁抓取（.range）時每一頁的排序都是穩定、不會重複或漏抓。
+  const statusRows = await fetchAllRows<{ student_no: string; status: string }>((from, to) =>
+    supabase
+      .from('student_status_changes')
+      .select('student_no, status, effective_date, created_at, id')
+      .in('student_no', uniq)
+      .order('student_no', { ascending: true })
+      .order('effective_date', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(from, to)
+  );
+  const latestSeen = new Set<string>();
+  for (const s of statusRows) {
+    if (latestSeen.has(s.student_no)) continue; // 已依日期排序，第一筆看到的就是該生最新狀態
+    latestSeen.add(s.student_no);
+    if (HIDDEN_STUDENT_STATUSES.includes(s.status)) hidden.add(s.student_no);
+  }
+  return hidden;
+}
+
+/** 目前所有現在在讀的班級（供選擇應試班級用），附上目前「真正在校」的在讀人數 */
 export async function listClassOptionsWithHeadcount(academicYear?: number): Promise<ClassOption[]> {
-  let query = supabase.from('classes').select('id, academic_year, grade_level, class_name').order('grade_level').order('class_name');
-  if (academicYear != null) query = query.eq('academic_year', academicYear);
-  const { data: classes, error } = await query;
-  if (error) throw new Error('讀取班級清單失敗：' + error.message);
-  const ids = (classes ?? []).map((c: any) => c.id);
+  const classes = await fetchAllRows<any>((from, to) => {
+    let query = supabase.from('classes').select('id, academic_year, grade_level, class_name').order('grade_level').order('class_name').order('id').range(from, to);
+    if (academicYear != null) query = query.eq('academic_year', academicYear);
+    return query;
+  });
+  const ids = classes.map((c: any) => c.id);
   if (ids.length === 0) return [];
-  const { data: enrollments, error: enErr } = await supabase
-    .from('enrollments')
-    .select('class_id')
-    .in('class_id', ids)
-    .eq('is_current', true);
-  if (enErr) throw new Error('讀取班級人數失敗：' + enErr.message);
+  const rows = await fetchAllRows<{ class_id: string; student_no: string }>((from, to) =>
+    supabase.from('enrollments').select('class_id, student_no, id').in('class_id', ids).eq('is_current', true).order('id').range(from, to)
+  );
+
+  // enrollments.is_current 不會因為學生休學/轉學/退學/畢業/肄業而自動改回 false
+  // （這是刻意保留、讓管理員之後仍查得到歷史資料的設計，見 sql/61），
+  // 所以這裡要另外排除「目前學籍狀態已離校」的學生，人數才會等於真正在校人數。
+  // 另外，抓取的兩個查詢都改用分頁（fetchAllRows）撈全部資料，避免全校學生數超過
+  // Supabase 單次查詢上限（預設1000筆）時被截斷，造成很多班級人數變成0或算錯。
+  const hiddenStudentNos = await findHiddenStudentNos(rows.map((r) => r.student_no));
+
   const counts: Record<string, number> = {};
-  for (const row of (enrollments ?? []) as any[]) counts[row.class_id] = (counts[row.class_id] ?? 0) + 1;
-  return (classes ?? []).map((c: any) => ({
+  for (const row of rows) {
+    if (hiddenStudentNos.has(row.student_no)) continue;
+    counts[row.class_id] = (counts[row.class_id] ?? 0) + 1;
+  }
+  return classes.map((c: any) => ({
     id: c.id,
     label: `${c.grade_level}${c.class_name}`,
     headcount: counts[c.id] ?? 0,
@@ -134,6 +244,9 @@ export async function listExamRoomClasses(examRoomIds: string[]): Promise<ExamRo
 
 /** 儲存「哪些班級分配到這個考場」（第2步）：整批覆蓋，allocated_count 先填0，之後由試算步驟計算 */
 export async function saveExamRoomClassAssignment(examRoomId: string, classIds: string[]) {
+  if (classIds.length > MAX_CLASSES_PER_ROOM) {
+    throw new Error(`每個考場最多只能安排 ${MAX_CLASSES_PER_ROOM} 個應試班級`);
+  }
   const { error: delErr } = await supabase.from('exam_room_classes').delete().eq('exam_room_id', examRoomId);
   if (delErr) throw new Error('清除舊分配失敗：' + delErr.message);
   if (classIds.length === 0) return;
