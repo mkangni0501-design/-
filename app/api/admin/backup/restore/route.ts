@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
       // 從此變成「這個系統裡有的第一筆備份紀錄」，之後可以直接在清單上看到/下載/
       // 再次還原，不用每次都重新上傳檔案。理由與寫入方式（拉長 statement_timeout）
       // 見 sql/79backup_timeout_and_upload_restore.sql。
-      const { data: inserted, error: insertErr } = await supabaseAdmin
+      const { data: insertedRaw, error: insertErr } = await supabaseAdmin
         .rpc('admin_insert_backup', {
           p_kind: '上傳',
           p_created_by: callerAuth.user.id,
@@ -74,9 +74,12 @@ export async function POST(req: NextRequest) {
           p_table_counts: countsFromSnapshot(snapshot),
         })
         .single();
-      if (insertErr || !inserted) {
+      if (insertErr || !insertedRaw) {
         return NextResponse.json({ error: '上傳檔案已讀取，但存成備份紀錄失敗：' + (insertErr?.message ?? '未知錯誤') }, { status: 500 });
       }
+      // admin_insert_backup() 的回傳型別沒有納入這個專案的 Supabase 型別產生流程，
+      // 所以 .rpc(...).single() 推斷出來的是 unknown，這裡明確標註實際欄位型別。
+      const inserted = insertedRaw as { id: string };
       targetBackupId = inserted.id;
     } else {
       const { data: backupRow, error: backupErr } = await supabaseAdmin.from('backups').select('tables').eq('id', backupId).single();

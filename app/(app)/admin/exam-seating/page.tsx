@@ -25,6 +25,7 @@ import {
   toggleGroupMember,
   saveAllocatedCounts,
   computeAllocatedCounts,
+  autoBalanceAllocation,
   validateAllocation,
   ValidationResult,
   generateSeatLayout,
@@ -287,21 +288,48 @@ function ExamSessionEditor({
   }
 
   // ---- 試算各班在各考場的人數（步驟3）----
-  function runComputation() {
-    setError(null);
+  function buildClassRoomMap(): Record<string, string[]> {
     const classRoomMap: Record<string, string[]> = {};
     for (const rc of roomClasses) {
       classRoomMap[rc.class_id] = classRoomMap[rc.class_id] ?? [];
       classRoomMap[rc.class_id].push(rc.exam_room_id);
     }
+    return classRoomMap;
+  }
+
+  function runComputation() {
+    setError(null);
+    const classRoomMap = buildClassRoomMap();
     const inputs = Object.entries(classRoomMap).map(([classId, roomIds]) => ({
       classId,
       headcount: classOptions.find((c) => c.id === classId)?.headcount ?? 0,
       rooms: roomIds.map((roomId) => ({ examRoomId: roomId, capacity: rooms.find((r) => r.id === roomId)?.seat_capacity ?? 0 })),
     }));
-    const result = computeAllocatedCounts(inputs);
-    setMatrix(result);
-    runValidation(result, classRoomMap);
+    const raw = computeAllocatedCounts(inputs);
+    // 橫向加總 computeAllocatedCounts 已經保證正確；如果縱向（考場座位數）兜不起來
+    // （例如考場座位數是建立當下的快照，之後班級人數又有異動），這裡自動微調到符合兩項驗證。
+    const balanced = autoBalanceAllocation({
+      matrix: raw,
+      roomCapacities: Object.fromEntries(rooms.map((r) => [r.id, r.seat_capacity])),
+      classRoomMap,
+    });
+    setMatrix(balanced);
+    runValidation(balanced, classRoomMap);
+  }
+
+  // 手動調整後如果又不符合兩項驗證，可以再按一次自動調整（不影響已經手動改過的其他部分邏輯，
+  // 只是重新搬動名額讓兩項驗證都符合），仍然保留自由手動調整每一格的功能。
+  function handleAutoBalance() {
+    if (!matrix) return;
+    setError(null);
+    const classRoomMap = buildClassRoomMap();
+    const balanced = autoBalanceAllocation({
+      matrix,
+      roomCapacities: Object.fromEntries(rooms.map((r) => [r.id, r.seat_capacity])),
+      classRoomMap,
+    });
+    setMatrix(balanced);
+    runValidation(balanced, classRoomMap);
   }
 
   function runValidation(m: Record<string, Record<string, number>>, classRoomMap: Record<string, string[]>) {
@@ -320,17 +348,12 @@ function ExamSessionEditor({
     if (!matrix) return;
     const next = { ...matrix, [roomId]: { ...matrix[roomId], [classId]: value } };
     setMatrix(next);
-    const classRoomMap: Record<string, string[]> = {};
-    for (const rc of roomClasses) {
-      classRoomMap[rc.class_id] = classRoomMap[rc.class_id] ?? [];
-      classRoomMap[rc.class_id].push(rc.exam_room_id);
-    }
-    runValidation(next, classRoomMap);
+    runValidation(next, buildClassRoomMap());
   }
 
   async function handleSaveMatrix() {
     if (!matrix || !validation || !validation.horizontalOk || !validation.verticalOk) {
-      setError('人數加總尚未一致，請先修正橫向／縱向加總後再儲存。');
+      setError('人數加總尚未一致，請先按【自動調整】或手動修正橫向／縱向加總後再儲存。');
       return;
     }
     setError(null);
@@ -451,23 +474,52 @@ function ExamSessionEditor({
         </div>
       )}
 
-      {/* ---- 步驟3-4：試算各考場人數＋雙驗證 ---- */}
+      {/* ---- 步驟3-4：試算各考場人數＋雙驗證（依分組簡化，只顯示有共用考場的班級群組） ---- */}
       {session.status === '編排中' && roomClasses.length > 0 && (
         <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
             <h3 style={{ fontSize: 13 }}>試算各考場人數（可手動修改，橫向／縱向加總一致才能儲存）</h3>
-            <button onClick={runComputation} style={{ fontSize: 12, padding: '4px 12px' }}>
-              依座位數比例試算
-            </button>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={runComputation} style={{ fontSize: 12, padding: '4px 12px' }}>
+                依座位數比例試算
+              </button>
+              {matrix && (
+                <button onClick={handleAutoBalance} style={{ fontSize: 12, padding: '4px 12px' }}>
+                  自動調整
+                </button>
+              )}
+            </div>
           </div>
-          {matrix && (
-            <AllocationMatrix
-              matrix={matrix}
-              rooms={rooms.filter((r) => roomClasses.some((rc) => rc.exam_room_id === r.id))}
-              classOptions={classOptions.filter((c) => roomClasses.some((rc) => rc.class_id === c.id))}
-              validation={validation}
-              onEditCell={editMatrixCell}
-            />
+          {matrix &&
+            (() => {
+              const multiGroups = savedGroups.filter((g) => g.length > 1);
+              if (multiGroups.length === 0) {
+                return <p style={{ fontSize: 12, color: '#999' }}>目前沒有共用考場的班級群組（每班都各自使用自己的考場，人數自動等於班級人數，不需要試算）。</p>;
+              }
+              return multiGroups.map((group, i) => {
+                const groupRooms = group.map((cid) => rooms.find((r) => r.room_name === classLabelMap[cid])).filter((r): r is ExamRoom => !!r);
+                const groupClassOptions = classOptions.filter((c) => group.includes(c.id));
+                return (
+                  <div key={i} style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>群組：{groupClassOptions.map((c) => c.label).join('、')}</div>
+                    <AllocationMatrix matrix={matrix} rooms={groupRooms} classOptions={groupClassOptions} onEditCell={editMatrixCell} />
+                  </div>
+                );
+              });
+            })()}
+          {matrix && validation && !validation.horizontalOk && (
+            <ul style={{ fontSize: 12, color: '#A32D2D', marginTop: 6 }}>
+              {validation.horizontalErrors.map((e, i) => (
+                <li key={i}>{e}</li>
+              ))}
+            </ul>
+          )}
+          {matrix && validation && !validation.verticalOk && (
+            <ul style={{ fontSize: 12, color: '#A32D2D', marginTop: 6 }}>
+              {validation.verticalErrors.map((e, i) => (
+                <li key={i}>{e}</li>
+              ))}
+            </ul>
           )}
           {matrix && (
             <div style={{ marginTop: 8 }}>
@@ -567,13 +619,11 @@ function AllocationMatrix({
   matrix,
   rooms,
   classOptions,
-  validation,
   onEditCell,
 }: {
   matrix: Record<string, Record<string, number>>;
   rooms: ExamRoom[];
   classOptions: ClassOption[];
-  validation: ValidationResult | null;
   onEditCell: (roomId: string, classId: string, value: number) => void;
 }) {
   return (
@@ -630,20 +680,6 @@ function AllocationMatrix({
           </tr>
         </tbody>
       </table>
-      {validation && !validation.horizontalOk && (
-        <ul style={{ fontSize: 12, color: '#A32D2D', marginTop: 6 }}>
-          {validation.horizontalErrors.map((e, i) => (
-            <li key={i}>{e}</li>
-          ))}
-        </ul>
-      )}
-      {validation && !validation.verticalOk && (
-        <ul style={{ fontSize: 12, color: '#A32D2D', marginTop: 6 }}>
-          {validation.verticalErrors.map((e, i) => (
-            <li key={i}>{e}</li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
