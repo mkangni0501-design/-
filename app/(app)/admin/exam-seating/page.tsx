@@ -206,8 +206,7 @@ function ExamSessionEditor({
   const [classOptions, setClassOptions] = useState<ClassOption[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [newRoomName, setNewRoomName] = useState('');
-  const [newRoomCapacity, setNewRoomCapacity] = useState<number>(30);
+  const [newRoomClassId, setNewRoomClassId] = useState<string>('');
 
   const [assigningRoomId, setAssigningRoomId] = useState<string | null>(null);
   const [seatPreviewRoomId, setSeatPreviewRoomId] = useState<string | null>(null);
@@ -239,15 +238,23 @@ function ExamSessionEditor({
   const classLabelMap = useMemo(() => Object.fromEntries(classOptions.map((c) => [c.id, c.label])), [classOptions]);
   const roomLabelMap = useMemo(() => Object.fromEntries(rooms.map((r) => [r.id, r.room_name])), [rooms]);
 
+  // 目前尚未被用作考場的班級（考場名稱直接沿用該班教室，座位數＝該班人數）
+  const availableClassesForNewRoom = classOptions.filter((c) => !rooms.some((r) => r.room_name === c.label));
+
   async function handleAddRoom() {
-    if (!newRoomName.trim()) {
-      setError('請輸入考場名稱');
+    if (!newRoomClassId) {
+      setError('請選擇班級');
+      return;
+    }
+    const cls = classOptions.find((c) => c.id === newRoomClassId);
+    if (!cls) {
+      setError('找不到這個班級');
       return;
     }
     setError(null);
     try {
-      await createExamRoom(session.id, newRoomName.trim(), newRoomCapacity);
-      setNewRoomName('');
+      await createExamRoom(session.id, cls.label, cls.headcount);
+      setNewRoomClassId('');
       setNotice('已新增考場');
       await reload();
     } catch (e: any) {
@@ -369,17 +376,25 @@ function ExamSessionEditor({
         <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 12 }}>
           <h3 style={{ fontSize: 13, marginBottom: 8 }}>新增考場</h3>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <input placeholder="考場名稱，例如：101教室" value={newRoomName} onChange={(e) => setNewRoomName(e.target.value)} style={{ fontSize: 13, padding: '4px 8px', width: 180 }} />
-            <label style={{ fontSize: 12, color: '#666' }}>座位數（最多49，最大7*7）</label>
-            <input
-              type="number"
-              min={1}
-              max={49}
-              value={newRoomCapacity}
-              onChange={(e) => setNewRoomCapacity(Number(e.target.value))}
-              style={{ fontSize: 13, padding: '4px 8px', width: 80 }}
-            />
-            <span style={{ fontSize: 12, color: '#999' }}>方形座位：{gridSizeForCapacity(newRoomCapacity)}×{gridSizeForCapacity(newRoomCapacity)}</span>
+            <label style={{ fontSize: 12, color: '#666' }}>選擇班級（考場即該班教室，座位數自動帶入班級人數）</label>
+            <select value={newRoomClassId} onChange={(e) => setNewRoomClassId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px', minWidth: 140 }}>
+              <option value="">請選擇班級</option>
+              {availableClassesForNewRoom.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}（{c.headcount}人）
+                </option>
+              ))}
+            </select>
+            {newRoomClassId &&
+              (() => {
+                const cls = classOptions.find((c) => c.id === newRoomClassId);
+                if (!cls) return null;
+                return (
+                  <span style={{ fontSize: 12, color: '#999' }}>
+                    座位數：{cls.headcount}，方形座位：{gridSizeForCapacity(cls.headcount)}×{gridSizeForCapacity(cls.headcount)}
+                  </span>
+                );
+              })()}
             <button onClick={handleAddRoom} style={{ fontSize: 13, padding: '4px 12px' }}>
               新增考場
             </button>
