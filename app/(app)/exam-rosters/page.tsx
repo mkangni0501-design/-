@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase, getCurrentTeacherId } from '@/lib/supabaseClient';
 import ErrorBanner from '@/components/ErrorBanner';
-import { ExamRoomSeatRow, listRoomSeats, upsertSeatStudent, submitClassRoster, listRosterStatus, RosterStatus } from '@/lib/examSeating';
+import { ExamRoomSeatRow, listRoomSeats, upsertSeatStudent, submitClassRoster, listRosterStatus, RosterStatus, listCurrentEnrollments, EnrollmentRow } from '@/lib/examSeating';
 
 // ============================================================
 // 導師【輸入考場名單】頁
@@ -14,7 +14,6 @@ import { ExamRoomSeatRow, listRoomSeats, upsertSeatStudent, submitClassRoster, l
 
 type MyClass = { id: string; label: string };
 type ExamSessionOption = { id: string; name: string; status: string };
-type EnrollmentRow = { student_no: string; seat_no: number | null; name: string };
 
 export default function ExamRostersPage() {
   const [myTeacherId, setMyTeacherId] = useState<string | null>(null);
@@ -151,14 +150,8 @@ function ClassRosterEditor({ classId, sessionId, teacherId, sessionName }: { cla
       }
       setRoomGroups(groups);
 
-      const { data: enrollRows, error: enrollErr } = await supabase
-        .from('enrollments')
-        .select('student_no, seat_no, students(name)')
-        .eq('class_id', classId)
-        .eq('is_current', true)
-        .order('seat_no');
-      if (enrollErr) throw new Error('讀取學生名冊失敗：' + enrollErr.message);
-      setEnrollments((enrollRows ?? []).map((r: any) => ({ student_no: r.student_no, seat_no: r.seat_no, name: r.students?.name ?? '' })));
+      const enrollRows = await listCurrentEnrollments(classId);
+      setEnrollments(enrollRows);
 
       const statuses = await listRosterStatus(sessionId);
       setSubmitted(!!statuses.find((s: RosterStatus) => s.class_id === classId)?.submitted);
