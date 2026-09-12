@@ -71,7 +71,7 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/admin/period-locks', href: '/admin/period-locks', label: '共同科目時間鎖定', adminOnly: true },
   { key: '/admin/score-submission-windows', href: '/admin/score-submission-windows', label: '成績上傳時間設定表（期中考/期末考/平時分/出缺勤 開放時間與鎖定）', adminOnly: true },
   { key: '/admin/substitute-teaching', href: '/admin/substitute-teaching', label: '代課安排', adminOnly: true },
-  { key: '/admin/exam-seating', href: '/admin/exam-seating', label: '考試分班（考場、座位、梅花座編排、發送考場表）', adminOnly: true },
+  { key: '/admin/exam-seating', href: '/admin/exam-seating', label: '考試分班（考場編排、梅花座位表、發送考場表）', adminOnly: true },
   { key: '/admin/clubs', href: '/admin/clubs', label: '社團／才藝課管理（含開課、成績登錄權限、選社時間設定）', adminOnly: true },
   { key: '/clubs/roster', href: '/clubs/roster', label: '社團點名冊', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/clubs/grading', href: '/clubs/grading', label: '社團成績輸入', adminOnly: false, requiresTeachingAssignment: true },
@@ -93,10 +93,10 @@ export const ALL_MODULES: AdminModule[] = [
 
   // ---- 教師（教學現場日常作業，教師登入即可看到） ----
   { key: '/attendance/weekly', href: '/attendance/weekly', label: '學生出缺席登錄（一週）', adminOnly: false, requiresTeachingAssignment: true },
-  { key: '/attendance/exam-seating-roster', href: '/attendance/exam-seating-roster', label: '輸入考場名單（導師：填入本班學生的考場座位）', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/attendance/mobile', href: '/attendance/mobile', label: '學生出缺席登錄（每日／手機版）', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/attendance/subject-view', href: '/attendance/subject-view', label: '任課班級出席查詢（僅顯示自己任教科目/節次）', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/notifications', href: '/notifications', label: '通知', adminOnly: false },
+  { key: '/exam-rosters', href: '/exam-rosters', label: '輸入考場名單（依考場通知填入本班學生座位）', adminOnly: false, requiresTeachingAssignment: true },
 
   // ---- 家長／學生 ----
   { key: '/admin/students/portal-accounts', href: '/admin/students/portal-accounts', label: '家長/學生登入查詢', adminOnly: true },
@@ -144,10 +144,10 @@ export const DEFAULT_CATEGORIES: Record<string, ModuleCategory[]> = {
   '/admin/general/utilities': ['general'],
 
   '/attendance/weekly': ['teacher'],
-  '/attendance/exam-seating-roster': ['teacher'],
   '/attendance/mobile': ['teacher'],
   '/attendance/subject-view': ['teacher'],
   '/notifications': ['teacher'],
+  '/exam-rosters': ['teacher'],
 
   '/admin/students/portal-accounts': ['parent_student', 'dev'],
   '/admin/students/documents': ['parent_student', 'dev'],
