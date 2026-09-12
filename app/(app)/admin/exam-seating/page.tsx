@@ -19,7 +19,10 @@ import {
   autoSyncRoomsForSession,
   listClassOptionsWithHeadcount,
   listExamRoomClasses,
-  saveExamRoomClassAssignment,
+  saveAllRoomClassGroups,
+  computeGroupsFromRoomClasses,
+  findGroupOf,
+  toggleGroupMember,
   saveAllocatedCounts,
   computeAllocatedCounts,
   validateAllocation,
@@ -34,7 +37,8 @@ import {
 // ============================================================
 // 教務處【考試分班】頁
 // 流程：新增考試 → 系統自動把所有班級設為考場（考場名稱＝班級名稱，座位數＝該班人數，
-//      不需要教務處另行手動新增）→ 各考場旁邊直接展開選擇應試班級（最多4班）並儲存 →
+//      不需要教務處另行手動新增）→ 各考場旁邊直接展開選擇應試班級（最多4班，考場自己班級一定
+//      包含，選了誰對方考場也會自動勾選回來），編輯完用同一個【儲存】鍵一次存檔 →
 //      試算＋雙驗證（可手動修改）→ 儲存 → 各考場產生梅花座位表 → 確認 →
 //      全部考場完成後【發送考場表】通知導師 → 發送後可預覽各考場名單/座位並列印座位表、簽到表。
 // ============================================================
@@ -115,7 +119,7 @@ export default function ExamSeatingPage() {
     <main style={{ maxWidth: 980, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 18, marginBottom: 4 }}>考試分班</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-        新增考試 → 新增考場並設定應試班級 → 試算各考場人數（雙驗證後儲存）→ 產生梅花座位表並確認 → 全部考場完成後發送通知各班導師。
+        新增考試 → 系統自動把所有班級設為考場，勾選需要共用考場的班級（按一次【儲存應試班級】即可）→ 試算各考場人數（雙驗證後儲存）→ 產生梅花座位表並確認 → 全部考場完成後發送通知各班導師。
       </p>
       <ErrorBanner message={error} />
       {notice && (
@@ -188,7 +192,8 @@ export default function ExamSeatingPage() {
 }
 
 // ============================================================
-// 單一考試的編排畫面：考場清單 → 各考場設定應試班級 → 試算/儲存人數 → 各考場梅花座位表 → 確認 → 發送
+// 單一考試的編排畫面：考場清單（＝所有班級自動列出）→ 展開勾選應試班級群組（一個儲存鍵存全部）→
+// 試算/儲存人數 → 各考場梅花座位表 → 確認 → 發送
 // ============================================================
 function ExamSessionEditor({
   session,
@@ -207,6 +212,11 @@ function ExamSessionEditor({
   const [loading, setLoading] = useState(true);
 
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+
+  // 應試班級共用群組：本地暫存的編輯狀態，按下唯一的【儲存應試班級】鍵才會真正寫入資料庫
+  const [groups, setGroups] = useState<string[][]>([]);
+  const [savedGroups, setSavedGroups] = useState<string[][]>([]);
+  const [savingGroups, setSavingGroups] = useState(false);
 
   const [seatPreviewRoomId, setSeatPreviewRoomId] = useState<string | null>(null);
   const [detailRoomId, setDetailRoomId] = useState<string | null>(null);
@@ -231,6 +241,9 @@ function ExamSessionEditor({
       setRooms(roomRows);
       const rcRows = await listExamRoomClasses(roomRows.map((r) => r.id));
       setRoomClasses(rcRows);
+      const g = computeGroupsFromRoomClasses(roomRows, rcRows, classRows);
+      setGroups(g);
+      setSavedGroups(g);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -244,7 +257,34 @@ function ExamSessionEditor({
   }, [session.id]);
 
   const classLabelMap = useMemo(() => Object.fromEntries(classOptions.map((c) => [c.id, c.label])), [classOptions]);
+  const labelToClassId = useMemo(() => Object.fromEntries(classOptions.map((c) => [c.label, c.id])), [classOptions]);
   const roomLabelMap = useMemo(() => Object.fromEntries(rooms.map((r) => [r.id, r.room_name])), [rooms]);
+
+  const groupsDirty = JSON.stringify([...groups].map((g) => [...g].sort())) !== JSON.stringify([...savedGroups].map((g) => [...g].sort()));
+
+  function handleToggleGroup(ownerId: string, targetId: string) {
+    setGroups((prev) => toggleGroupMember(prev, ownerId, targetId));
+  }
+
+  // ---- 步驟2：一次儲存所有考場目前的應試班級分配（只需要這一個儲存鍵） ----
+  async function handleSaveGroups() {
+    setError(null);
+    setSavingGroups(true);
+    try {
+      const assignments = rooms.map((r) => {
+        const ownerId = labelToClassId[r.room_name];
+        const classIds = ownerId ? findGroupOf(groups, ownerId) : [];
+        return { examRoomId: r.id, classIds };
+      });
+      await saveAllRoomClassGroups(assignments);
+      setNotice('已儲存所有考場的應試班級');
+      await reload();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSavingGroups(false);
+    }
+  }
 
   // ---- 試算各班在各考場的人數（步驟3）----
   function runComputation() {
@@ -350,11 +390,12 @@ function ExamSessionEditor({
       )}
 
       {/* ---- 考場清單（所有班級自動設為考場，座位數＝該班目前在校人數） ---- */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10 }}>
         {rooms.length === 0 && <p style={{ fontSize: 13, color: '#999' }}>目前沒有可用的考場（可能是還沒有任何班級有在校學生）。</p>}
         {rooms.map((room) => {
           const myClasses = roomClasses.filter((rc) => rc.exam_room_id === room.id);
           const submittedCount = rosterStatus.filter((rs) => myClasses.some((mc) => mc.class_id === rs.class_id) && rs.submitted).length;
+          const ownerId = labelToClassId[room.room_name];
           return (
             <div key={room.id} style={{ border: '1px solid #eee', borderRadius: 6, padding: '8px 12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
@@ -381,16 +422,14 @@ function ExamSessionEditor({
                 </div>
               </div>
 
-              {/* ---- 步驟2：應試班級選單，直接展開在考場旁邊，最多4班 ---- */}
+              {/* ---- 步驟2：應試班級選單，直接展開在考場旁邊，最多4班；考場自己的班級一定包含，
+                    勾選其他班級後對方的考場也會自動連動勾選回來 ---- */}
               {session.status === '編排中' ? (
-                <InlineClassPicker
-                  room={room}
-                  classOptions={classOptions}
-                  currentClassIds={myClasses.map((mc) => mc.class_id)}
-                  setNotice={setNotice}
-                  setError={setError}
-                  onSaved={reload}
-                />
+                ownerId ? (
+                  <GroupPicker room={room} ownerId={ownerId} classOptions={classOptions} groups={groups} onToggle={handleToggleGroup} />
+                ) : (
+                  <p style={{ fontSize: 12, color: '#A32D2D', marginTop: 4 }}>找不到對應的班級資料（該班可能已異動），請重新整理頁面。</p>
+                )
               ) : (
                 myClasses.length > 0 && (
                   <p style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
@@ -402,6 +441,15 @@ function ExamSessionEditor({
           );
         })}
       </div>
+
+      {session.status === '編排中' && rooms.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <button onClick={handleSaveGroups} disabled={savingGroups || !groupsDirty} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
+            {savingGroups ? '儲存中…' : '儲存應試班級'}
+          </button>
+          {groupsDirty && <span style={{ fontSize: 12, color: '#B08968', marginLeft: 8 }}>有尚未儲存的變更</span>}
+        </div>
+      )}
 
       {/* ---- 步驟3-4：試算各考場人數＋雙驗證 ---- */}
       {session.status === '編排中' && roomClasses.length > 0 && (
@@ -463,83 +511,51 @@ function ExamSessionEditor({
 }
 
 // ============================================================
-// 設定應試班級（多選）
+// 應試班級選單：直接展開顯示在考場旁邊（不用另外開視窗），最多選 4 個班級。
+// 考場自己的班級一定包含（不能取消）；勾選其他班級後，會維持對稱——
+// 對方的考場也會自動連動勾選回來，形成一個互相共用考場的群組。
 // ============================================================
-// ============================================================
-// 應試班級選單：直接展開顯示在考場旁邊（不用另外開視窗），最多選 4 個班級
-// ============================================================
-function InlineClassPicker({
+function GroupPicker({
   room,
+  ownerId,
   classOptions,
-  currentClassIds,
-  setNotice,
-  setError,
-  onSaved,
+  groups,
+  onToggle,
 }: {
   room: ExamRoom;
+  ownerId: string;
   classOptions: ClassOption[];
-  currentClassIds: string[];
-  setNotice: (m: string | null) => void;
-  setError: (m: string | null) => void;
-  onSaved: () => Promise<void> | void;
+  groups: string[][];
+  onToggle: (ownerId: string, targetId: string) => void;
 }) {
-  const [selected, setSelected] = useState<Set<string>>(new Set(currentClassIds));
-  const [saving, setSaving] = useState(false);
-  const dirty = selected.size !== currentClassIds.length || currentClassIds.some((id) => !selected.has(id));
-
-  useEffect(() => {
-    setSelected(new Set(currentClassIds));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.id, currentClassIds.join(',')]);
-
-  function toggle(id: string) {
-    const next = new Set(selected);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      if (next.size >= MAX_CLASSES_PER_ROOM) {
-        setError(`每個考場最多只能選 ${MAX_CLASSES_PER_ROOM} 個應試班級`);
-        return;
-      }
-      next.add(id);
-    }
-    setSelected(next);
-  }
-
-  async function save() {
-    setSaving(true);
-    setError(null);
-    try {
-      await saveExamRoomClassAssignment(room.id, Array.from(selected));
-      setNotice(`已儲存「${room.room_name}」的應試班級`);
-      await onSaved();
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
+  const group = findGroupOf(groups, ownerId);
+  const ownerLabel = classOptions.find((c) => c.id === ownerId)?.label ?? room.room_name;
+  const labelOf = (id: string) => classOptions.find((c) => c.id === id)?.label ?? id;
 
   return (
     <div style={{ marginTop: 8, borderTop: '1px dashed #eee', paddingTop: 8 }}>
       <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>
-        應試班級（最多 {MAX_CLASSES_PER_ROOM} 班，已選 {selected.size}/{MAX_CLASSES_PER_ROOM}）
+        應試班級（最多 {MAX_CLASSES_PER_ROOM} 班，已選 {group.length}/{MAX_CLASSES_PER_ROOM}）
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto', marginBottom: 6 }}>
-        {classOptions.map((c) => {
-          const checked = selected.has(c.id);
-          const disabled = !checked && selected.size >= MAX_CLASSES_PER_ROOM;
-          return (
-            <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: disabled ? '#bbb' : '#333' }}>
-              <input type="checkbox" checked={checked} disabled={disabled} onChange={() => toggle(c.id)} />
-              {c.label}（{c.headcount}人）
-            </label>
-          );
-        })}
+      <div style={{ fontSize: 12, color: '#2D6A2D', marginBottom: 4 }}>✓ {ownerLabel}（本班教室，一定包含）</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+        {classOptions
+          .filter((c) => c.id !== ownerId)
+          .map((c) => {
+            const checked = group.includes(c.id);
+            const elsewhereGroup = findGroupOf(groups, c.id);
+            const takenElsewhere = !checked && elsewhereGroup.length > 1;
+            const full = !checked && group.length >= MAX_CLASSES_PER_ROOM;
+            const disabled = takenElsewhere || full;
+            const title = takenElsewhere ? `已安排在「${elsewhereGroup.map(labelOf).join('、')}」共用考場` : undefined;
+            return (
+              <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: disabled ? '#bbb' : '#333' }} title={title}>
+                <input type="checkbox" checked={checked} disabled={disabled} onChange={() => onToggle(ownerId, c.id)} />
+                {c.label}（{c.headcount}人）
+              </label>
+            );
+          })}
       </div>
-      <button onClick={save} disabled={saving || !dirty} style={{ fontSize: 12, padding: '3px 12px' }}>
-        {saving ? '儲存中…' : '儲存應試班級'}
-      </button>
     </div>
   );
 }
