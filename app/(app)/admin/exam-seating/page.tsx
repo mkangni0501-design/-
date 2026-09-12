@@ -17,6 +17,7 @@ import {
   deleteExamSession,
   listExamRooms,
   autoSyncRoomsForSession,
+  setExcludedClasses,
   listClassOptionsWithHeadcount,
   listExamRoomClasses,
   saveAllRoomClassGroups,
@@ -212,7 +213,11 @@ function ExamSessionEditor({
   const [classOptions, setClassOptions] = useState<ClassOption[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [syncNotices, setSyncNotices] = useState<string[]>([]);
+
+  // 不擔任考場的班級（下面的考場清單會自動排除）；本地狀態即時反映，並同步寫回資料庫
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set(session.excluded_class_ids ?? []));
+  const [savingExcluded, setSavingExcluded] = useState(false);
 
   // 應試班級共用群組：本地暫存的編輯狀態，按下唯一的【儲存應試班級】鍵才會真正寫入資料庫
   const [groups, setGroups] = useState<string[][]>([]);
@@ -225,18 +230,23 @@ function ExamSessionEditor({
   const [matrix, setMatrix] = useState<Record<string, Record<string, number>> | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
 
-  async function reload() {
+  async function reload(excludedOverride?: Set<string>) {
     setLoading(true);
     try {
+      const effectiveExcluded = excludedOverride ?? excludedIds;
       const classRows = await listClassOptionsWithHeadcount(session.academic_year);
       setClassOptions(classRows);
-      // 步驟1：所有班級自動設為考場，不用教務處另行手動新增
+      // 步驟1：所有班級（扣掉勾選「不擔任考場」的班級）自動設為考場，不用教務處另行手動新增，
+      // 也會自動把還沒確認的考場座位數同步成班級目前的真實人數。
       if (session.status === '編排中') {
-        const sync = await autoSyncRoomsForSession(session.id, session.academic_year);
+        const sync = await autoSyncRoomsForSession(session.id, session.academic_year, Array.from(effectiveExcluded));
         const msgs: string[] = [];
         if (sync.skippedEmpty.length > 0) msgs.push(`${sync.skippedEmpty.join('、')} 目前沒有在校學生，未建立考場`);
         if (sync.skippedTooBig.length > 0) msgs.push(`${sync.skippedTooBig.join('、')} 人數超過49人，超出單一考場座位上限，未自動建立考場`);
-        setSyncNotice(msgs.length > 0 ? msgs.join('；') : null);
+        if (sync.removedExcluded.length > 0) msgs.push(`${sync.removedExcluded.join('、')} 已設為不擔任考場，考場已移除`);
+        for (const u of sync.updatedCapacities) msgs.push(`${u.label} 考場座位數已從 ${u.oldCapacity} 自動校正為 ${u.newCapacity}（目前班級人數）`);
+        for (const m of sync.confirmedMismatches) msgs.push(`${m.label} 座位表已確認，但目前班級人數（${m.currentHeadcount}）跟座位數（${m.roomCapacity}）不同，請確認後重新產生座位表`);
+        setSyncNotices(msgs);
       }
       const roomRows = await listExamRooms(session.id);
       setRooms(roomRows);
@@ -256,6 +266,24 @@ function ExamSessionEditor({
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
+
+  async function toggleExcluded(classId: string) {
+    const next = new Set(excludedIds);
+    if (next.has(classId)) next.delete(classId);
+    else next.add(classId);
+    setExcludedIds(next);
+    setSavingExcluded(true);
+    setError(null);
+    try {
+      await setExcludedClasses(session.id, Array.from(next));
+      await reload(next);
+      onSent(); // 順便刷新上層的考試清單，讓 session.excluded_class_ids 保持同步
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSavingExcluded(false);
+    }
+  }
 
   const classLabelMap = useMemo(() => Object.fromEntries(classOptions.map((c) => [c.id, c.label])), [classOptions]);
   const labelToClassId = useMemo(() => Object.fromEntries(classOptions.map((c) => [c.label, c.id])), [classOptions]);
@@ -408,8 +436,31 @@ function ExamSessionEditor({
         <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：所有考場都需完成座位表【確認】後，才能發送考場表。</p>
       )}
 
-      {syncNotice && session.status === '編排中' && (
-        <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：{syncNotice}</p>
+      {syncNotices.length > 0 && session.status === '編排中' && (
+        <ul style={{ fontSize: 12, color: '#B08968', marginBottom: 8, paddingLeft: 18 }}>
+          {syncNotices.map((m, i) => (
+            <li key={i}>{m}</li>
+          ))}
+        </ul>
+      )}
+
+      {/* ---- 不擔任考場班級（勾選後，下面的考場清單自動排除該班） ---- */}
+      {session.status === '編排中' && (
+        <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>
+            不擔任考場班級
+            {savingExcluded && <span style={{ fontSize: 12, color: '#999', marginLeft: 8 }}>儲存中…</span>}
+          </div>
+          <p style={{ fontSize: 12, color: '#999', marginBottom: 6 }}>勾選的班級不會被自動建立成考場（教室不方便當考場時使用），但該班學生仍可以被安排到其他班級的考場應試。</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+            {classOptions.map((c) => (
+              <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="checkbox" checked={excludedIds.has(c.id)} disabled={savingExcluded} onChange={() => toggleExcluded(c.id)} />
+                {c.label}（{c.headcount}人）
+              </label>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* ---- 考場清單（所有班級自動設為考場，座位數＝該班目前在校人數） ---- */}
