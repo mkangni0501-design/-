@@ -38,10 +38,11 @@ export type ClassOption = {
 
 const MAX_SEATS_PER_ROOM = 49; // 最大 7*7
 export const MAX_CLASSES_PER_ROOM = 4; // 每個考場最多安排 4 個應試班級
-const PAGE_SIZE = 1000; // Supabase/PostgREST 單次查詢預設上限，超過需要分頁抓取，否則班級人數會被截斷變成 0 或少算
+const PAGE_SIZE = 500; // 每次查詢筆數上限（保守值，低於 Supabase/PostgREST 常見預設上限1000），超過需要分頁抓取，否則資料會被截斷變成0或算錯
+const IN_FILTER_CHUNK_SIZE = 150; // 「.in(欄位, 一大串值)」時每批帶入的數量上限，避免全校1000～1300+人時單一請求的網址/參數過長被伺服器拒絕或截斷
 
 /**
- * 分頁抓取所有符合條件的資料列，避免資料筆數超過 Supabase 單次查詢上限（預設1000筆）
+ * 分頁抓取所有符合條件的資料列，避免資料筆數超過 Supabase 單次查詢上限
  * 時被截斷，導致像是「班級人數變成0或算錯」這種問題。呼叫端需自行加上足以保證穩定
  * 排序的 .order(...)（例如用主鍵排序），否則分頁之間可能重複或漏掉資料列。
  */
@@ -56,6 +57,26 @@ async function fetchAllRows<T>(build: (from: number, to: number) => PromiseLike<
     all.push(...rows);
     if (rows.length < PAGE_SIZE) break;
     from += PAGE_SIZE;
+  }
+  return all;
+}
+
+/** 把一個陣列切成每批固定大小的小陣列，用於 .in(...) 查詢條件過長時分批查詢（全校1000～1300+人時很容易發生） */
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** 分批（.in 條件）＋分頁（單批筆數）抓取所有符合條件的資料列，兩種截斷風險一次處理 */
+async function fetchAllRowsChunked<T>(
+  ids: string[],
+  build: (idsChunk: string[], from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+): Promise<T[]> {
+  const all: T[] = [];
+  for (const idsChunk of chunkArray(ids, IN_FILTER_CHUNK_SIZE)) {
+    const rows = await fetchAllRows<T>((from, to) => build(idsChunk, from, to));
+    all.push(...rows);
   }
   return all;
 }
@@ -178,13 +199,14 @@ async function findHiddenStudentNos(studentNos: string[]): Promise<Set<string>> 
   const uniq = Array.from(new Set(studentNos));
   const hidden = new Set<string>();
   if (uniq.length === 0) return hidden;
-  // 依 student_no 分組、每組內依日期新到舊排序，並用 id 當最終排序依據，
-  // 確保分頁抓取（.range）時每一頁的排序都是穩定、不會重複或漏抓。
-  const statusRows = await fetchAllRows<{ student_no: string; status: string }>((from, to) =>
+  // 全校可能超過1000～1300+人，所以「.in(student_no, uniq)」要分批查詢，每一批再視需要分頁抓取，
+  // 並依 student_no 分組、每組內依日期新到舊排序、最後用 id 當並列時的依據，
+  // 確保每一批、每一頁的排序都是穩定的，不會重複或漏抓。
+  const statusRows = await fetchAllRowsChunked<{ student_no: string; status: string }>(uniq, (idsChunk, from, to) =>
     supabase
       .from('student_status_changes')
       .select('student_no, status, effective_date, created_at, id')
-      .in('student_no', uniq)
+      .in('student_no', idsChunk)
       .order('student_no', { ascending: true })
       .order('effective_date', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: false })
@@ -209,15 +231,15 @@ export async function listClassOptionsWithHeadcount(academicYear?: number): Prom
   });
   const ids = classes.map((c: any) => c.id);
   if (ids.length === 0) return [];
-  const rows = await fetchAllRows<{ class_id: string; student_no: string }>((from, to) =>
-    supabase.from('enrollments').select('class_id, student_no, id').in('class_id', ids).eq('is_current', true).order('id').range(from, to)
+  // 全校學生可能有1000～1300+人，「.in(class_id, ids)」查出來的 enrollments 筆數會超過單次查詢上限，
+  // 這裡同時做「分批 in 條件」＋「分頁抓取」，確保每個班級的人數都完整算到，不會被截斷。
+  const rows = await fetchAllRowsChunked<{ class_id: string; student_no: string }>(ids, (idsChunk, from, to) =>
+    supabase.from('enrollments').select('class_id, student_no, id').in('class_id', idsChunk).eq('is_current', true).order('id').range(from, to)
   );
 
   // enrollments.is_current 不會因為學生休學/轉學/退學/畢業/肄業而自動改回 false
   // （這是刻意保留、讓管理員之後仍查得到歷史資料的設計，見 sql/61），
   // 所以這裡要另外排除「目前學籍狀態已離校」的學生，人數才會等於真正在校人數。
-  // 另外，抓取的兩個查詢都改用分頁（fetchAllRows）撈全部資料，避免全校學生數超過
-  // Supabase 單次查詢上限（預設1000筆）時被截斷，造成很多班級人數變成0或算錯。
   const hiddenStudentNos = await findHiddenStudentNos(rows.map((r) => r.student_no));
 
   const counts: Record<string, number> = {};
@@ -254,6 +276,81 @@ export async function saveExamRoomClassAssignment(examRoomId: string, classIds: 
     .from('exam_room_classes')
     .insert(classIds.map((class_id) => ({ exam_room_id: examRoomId, class_id, allocated_count: 0 })));
   if (insErr) throw new Error('儲存班級考場分配失敗：' + insErr.message);
+}
+
+/** 一次儲存「所有考場」目前的應試班級分配，讓畫面上只需要一個儲存鍵 */
+export async function saveAllRoomClassGroups(assignments: { examRoomId: string; classIds: string[] }[]) {
+  for (const a of assignments) {
+    await saveExamRoomClassAssignment(a.examRoomId, a.classIds);
+  }
+}
+
+// ------------------------------------------------------------
+// 考場共用群組（哪些班級互相共用彼此的考場）
+// ------------------------------------------------------------
+
+/**
+ * 從目前已儲存的 exam_room_classes 還原出「共用考場的班級群組」：
+ * 同一群組內的班級，一定會互相出現在彼此的考場應試班級名單裡（對稱）。
+ * 即使舊資料不是完全對稱，這裡也會用連通分量把它們正規化成群組，之後存檔就會自動修正成對稱狀態。
+ * 沒有跟任何人共用考場的班級，不會出現在回傳結果裡（視為「單獨一個群組＝自己」）。
+ */
+export function computeGroupsFromRoomClasses(rooms: ExamRoom[], roomClasses: ExamRoomClass[], classOptions: ClassOption[]): string[][] {
+  const labelToId: Record<string, string> = Object.fromEntries(classOptions.map((c) => [c.label, c.id]));
+  const parent: Record<string, string> = {};
+  function find(x: string): string {
+    if (!(x in parent)) parent[x] = x;
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+  function union(a: string, b: string) {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  }
+  for (const room of rooms) {
+    const ownerId = labelToId[room.room_name];
+    if (!ownerId) continue;
+    find(ownerId);
+    for (const rc of roomClasses.filter((x) => x.exam_room_id === room.id)) {
+      find(rc.class_id);
+      union(ownerId, rc.class_id);
+    }
+  }
+  const groupsMap: Record<string, string[]> = {};
+  for (const id of Object.keys(parent)) {
+    const root = find(id);
+    groupsMap[root] = groupsMap[root] ?? [];
+    groupsMap[root].push(id);
+  }
+  return Object.values(groupsMap).filter((g) => g.length > 1);
+}
+
+/** 找出某個班級目前所在的群組（包含自己）；如果沒有跟任何人共用考場，就回傳只有自己的陣列 */
+export function findGroupOf(groups: string[][], classId: string): string[] {
+  return groups.find((g) => g.includes(classId)) ?? [classId];
+}
+
+/**
+ * 切換「某考場（ownerId 為該考場對應的班級）是否包含 targetId 這個應試班級」，
+ * 並回傳更新後、維持對稱的群組清單（同群組的每個班級，考場都會互相出現彼此）。
+ * 一個班級同時間只會屬於一個群組；如果 targetId 已經跟別的群組共用考場，這裡不會處理合併，
+ * 呼叫端（畫面上）要先把那個 checkbox 擋成不能勾。
+ */
+export function toggleGroupMember(groups: string[][], ownerId: string, targetId: string): string[][] {
+  const ownerGroup = findGroupOf(groups, ownerId);
+  const rest = groups.filter((g) => g !== ownerGroup);
+  if (ownerGroup.includes(targetId)) {
+    const shrunk = ownerGroup.filter((id) => id !== targetId);
+    if (shrunk.length > 1) rest.push(shrunk);
+    return rest;
+  }
+  const targetGroup = findGroupOf(groups, targetId);
+  if (targetGroup.length > 1 && targetGroup !== ownerGroup) return groups; // target 已被安排在別的群組，忽略
+  const merged = Array.from(new Set([...ownerGroup, targetId]));
+  if (merged.length > MAX_CLASSES_PER_ROOM) return groups;
+  rest.push(merged);
+  return rest;
 }
 
 /** 儲存試算/手動修改後的各班考場人數（第3-4步的【儲存】） */
