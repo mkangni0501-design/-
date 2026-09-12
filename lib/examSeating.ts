@@ -423,6 +423,56 @@ export function computeAllocatedCounts(inputs: AllocationInput[]): Record<string
   return result;
 }
 
+/**
+ * 橫向加總（computeAllocatedCounts）已經保證正確，但縱向（某考場各班加總 <= 座位數）
+ * 可能因為考場座位數是「建立考場當下」的班級人數快照、之後班級人數又有異動（轉入/轉出等）
+ * 而兜不起來。這裡自動在「同一個班級的不同考場之間」搬動名額（只在同一班的列內移動，
+ * 橫向加總維持不變），把超額的考場挪一些給還有空位的考場，直到兩項驗證都符合為止；
+ * 如果整組（同一群班級＋考場）的總人數本來就超過總座位數，會盡量調到最接近、
+ * 但無法完全消除超額，此時仍需要教務處手動調整（例如調整分組或人數）。
+ * 回傳新的 matrix，不會修改傳入的參數。
+ */
+export function autoBalanceAllocation(params: {
+  matrix: Record<string, Record<string, number>>; // examRoomId -> classId -> count
+  roomCapacities: Record<string, number>; // examRoomId -> 座位數
+  classRoomMap: Record<string, string[]>; // classId -> 分配到的 examRoomId 清單（同一組內的考場）
+}): Record<string, Record<string, number>> {
+  const matrix: Record<string, Record<string, number>> = {};
+  for (const roomId of Object.keys(params.matrix)) matrix[roomId] = { ...params.matrix[roomId] };
+
+  function roomSum(roomId: string): number {
+    return Object.values(matrix[roomId] ?? {}).reduce((s, v) => s + v, 0);
+  }
+
+  let changed = true;
+  let guard = 0;
+  while (changed && guard < 5000) {
+    changed = false;
+    guard += 1;
+    for (const roomId of Object.keys(params.roomCapacities)) {
+      let overflow = roomSum(roomId) - params.roomCapacities[roomId];
+      if (overflow <= 0) continue;
+      const classesHere = Object.keys(matrix[roomId] ?? {}).filter((cid) => (matrix[roomId][cid] ?? 0) > 0);
+      for (const classId of classesHere) {
+        if (overflow <= 0) break;
+        for (const otherRoom of params.classRoomMap[classId] ?? []) {
+          if (otherRoom === roomId || overflow <= 0) continue;
+          const slack = params.roomCapacities[otherRoom] - roomSum(otherRoom);
+          if (slack <= 0) continue;
+          const moveAmount = Math.min(overflow, slack, matrix[roomId][classId]);
+          if (moveAmount <= 0) continue;
+          matrix[roomId][classId] -= moveAmount;
+          matrix[otherRoom] = matrix[otherRoom] ?? {};
+          matrix[otherRoom][classId] = (matrix[otherRoom][classId] ?? 0) + moveAmount;
+          overflow -= moveAmount;
+          changed = true;
+        }
+      }
+    }
+  }
+  return matrix;
+}
+
 /** 雙驗證：橫向（班級加總=總人數）、縱向（考場加總<=座位數） */
 export type ValidationResult = {
   horizontalOk: boolean;

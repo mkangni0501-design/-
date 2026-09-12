@@ -338,9 +338,12 @@ export default function ClassSummaryPage() {
       // 永遠跳過、鎖定狀態查不到，導致畫面一直顯示「可以點的鎖定按鈕」，
       // 即使實際上已經鎖定了。
       if (yearForQuery && currentTerm) {
-        const { data: lockRow } = await supabase
+        const { data: lockRowRaw } = await supabase
           .rpc('class_lock_status', { p_class_id: classId, p_academic_year: yearForQuery, p_term: currentTerm })
           .maybeSingle();
+        // class_lock_status() 的回傳型別沒有納入這個專案的 Supabase 型別產生流程，
+        // 所以 .rpc(...).maybeSingle() 推斷出來的是 unknown，這裡明確標註實際欄位型別。
+        const lockRow = lockRowRaw as { mid_locked: boolean; fin_locked: boolean; day_locked: boolean } | null;
         setLockedByType({
           期中考: !!lockRow?.mid_locked,
           期末考: !!lockRow?.fin_locked,
