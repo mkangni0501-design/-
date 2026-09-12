@@ -12,6 +12,7 @@ export type ExamSession = {
   term: string;
   status: '編排中' | '已發送' | '已完成';
   sent_at: string | null;
+  excluded_class_ids: string[]; // 這次考試「不擔任考場」的班級（考場分配時自動排除，不會被自動建立成考場）
 };
 
 export type ExamRoom = {
@@ -93,10 +94,10 @@ export function gridSizeForCapacity(capacity: number): number {
 export async function listExamSessions(): Promise<ExamSession[]> {
   const { data, error } = await supabase
     .from('exam_sessions')
-    .select('id, name, academic_year, term, status, sent_at')
+    .select('id, name, academic_year, term, status, sent_at, excluded_class_ids')
     .order('created_at', { ascending: false });
   if (error) throw new Error('讀取考試清單失敗：' + error.message);
-  return (data ?? []) as ExamSession[];
+  return ((data ?? []) as any[]).map((r) => ({ ...r, excluded_class_ids: r.excluded_class_ids ?? [] })) as ExamSession[];
 }
 
 export async function createExamSession(params: { name: string; academic_year: number; term: string; created_by: string | null }) {
@@ -112,6 +113,12 @@ export async function createExamSession(params: { name: string; academic_year: n
 export async function deleteExamSession(id: string) {
   const { error } = await supabase.from('exam_sessions').delete().eq('id', id);
   if (error) throw new Error('刪除考試失敗：' + error.message);
+}
+
+/** 設定這次考試「不擔任考場」的班級（下次自動同步考場時會自動跳過／移除這些班級的考場） */
+export async function setExcludedClasses(examSessionId: string, classIds: string[]) {
+  const { error } = await supabase.from('exam_sessions').update({ excluded_class_ids: classIds }).eq('id', examSessionId);
+  if (error) throw new Error('儲存排除班級失敗：' + error.message);
 }
 
 export async function listExamRooms(examSessionId: string): Promise<ExamRoom[]> {
@@ -142,37 +149,83 @@ export async function deleteExamRoom(id: string) {
   if (error) throw new Error('刪除考場失敗：' + error.message);
 }
 
-export type RoomSyncResult = { createdCount: number; skippedTooBig: string[]; skippedEmpty: string[] };
+export type RoomSyncResult = {
+  createdCount: number;
+  skippedTooBig: string[];
+  skippedEmpty: string[];
+  removedExcluded: string[];
+  updatedCapacities: { label: string; oldCapacity: number; newCapacity: number }[];
+  confirmedMismatches: { label: string; roomCapacity: number; currentHeadcount: number }[];
+};
 
 /**
- * 讓「所有班級」自動成為考場，教務處不用再一個個手動新增：
- * 針對這個學年度、目前還沒被建立成考場的班級，自動新增考場
- * （考場名稱＝班級名稱，座位數＝該班目前真正在校人數）。
- * 人數為0（沒有在校學生）或超過49人（超出方形座位7*7上限）的班級會被跳過，回傳名單供畫面提示。
+ * 讓「所有班級」自動成為考場，教務處不用再一個個手動新增，同時確保每個考場的座位數
+ * 一直等於該班「目前真正在校」的人數（例如班級人數後來有異動，考場座位數就會自動校正）：
+ * - 還沒被建立成考場、且沒有被勾選「不擔任考場」的班級，自動新增考場。
+ * - 已經是考場、但座位表還沒【確認】的，如果班級人數跟座位數不一致，自動更新座位數（連帶重算方形大小）。
+ * - 已經【確認】座位表的考場，因為座位已經排定，不會自動改動座位數，只會回報「人數不合」讓教務處自行確認要不要重新排。
+ * - 被勾選「不擔任考場」的班級，如果考場還沒確認，會自動移除該考場（並清掉它在其他考場應試班級名單裡的紀錄）；已確認的話只會回報，不會自動刪除。
+ * 人數為0（沒有在校學生）或超過49人（超出方形座位7*7上限）的班級不會自動建立考場，回傳名單供畫面提示。
  */
-export async function autoSyncRoomsForSession(examSessionId: string, academicYear: number): Promise<RoomSyncResult> {
+export async function autoSyncRoomsForSession(examSessionId: string, academicYear: number, excludedClassIds: string[] = []): Promise<RoomSyncResult> {
   const [existingRooms, classOptions] = await Promise.all([listExamRooms(examSessionId), listClassOptionsWithHeadcount(academicYear)]);
-  const existingNames = new Set(existingRooms.map((r) => r.room_name));
-  const toCreate = classOptions.filter((c) => !existingNames.has(c.label));
+  const excludedSet = new Set(excludedClassIds);
+  const existingByName = new Map(existingRooms.map((r) => [r.room_name, r]));
+
   const skippedTooBig: string[] = [];
   const skippedEmpty: string[] = [];
-  const rows: { exam_session_id: string; room_name: string; seat_capacity: number; grid_size: number }[] = [];
-  for (const c of toCreate) {
-    if (c.headcount <= 0) {
-      skippedEmpty.push(c.label);
+  const removedExcluded: string[] = [];
+  const updatedCapacities: { label: string; oldCapacity: number; newCapacity: number }[] = [];
+  const confirmedMismatches: { label: string; roomCapacity: number; currentHeadcount: number }[] = [];
+  const toCreate: { exam_session_id: string; room_name: string; seat_capacity: number; grid_size: number }[] = [];
+
+  for (const c of classOptions) {
+    const existing = existingByName.get(c.label);
+
+    if (excludedSet.has(c.id)) {
+      if (existing) {
+        if (!existing.confirmed) {
+          await supabase.from('exam_room_classes').delete().eq('class_id', c.id); // 清掉這個班在（可能共用的）其他考場應試班級名單裡的紀錄
+          await supabase.from('exam_rooms').delete().eq('id', existing.id);
+          removedExcluded.push(c.label);
+        } else {
+          confirmedMismatches.push({ label: c.label, roomCapacity: existing.seat_capacity, currentHeadcount: c.headcount });
+        }
+      }
       continue;
     }
-    if (c.headcount > MAX_SEATS_PER_ROOM) {
-      skippedTooBig.push(c.label);
+
+    if (!existing) {
+      if (c.headcount <= 0) {
+        skippedEmpty.push(c.label);
+      } else if (c.headcount > MAX_SEATS_PER_ROOM) {
+        skippedTooBig.push(c.label);
+      } else {
+        toCreate.push({ exam_session_id: examSessionId, room_name: c.label, seat_capacity: c.headcount, grid_size: gridSizeForCapacity(c.headcount) });
+      }
       continue;
     }
-    rows.push({ exam_session_id: examSessionId, room_name: c.label, seat_capacity: c.headcount, grid_size: gridSizeForCapacity(c.headcount) });
+
+    if (existing.seat_capacity !== c.headcount) {
+      if (existing.confirmed) {
+        confirmedMismatches.push({ label: c.label, roomCapacity: existing.seat_capacity, currentHeadcount: c.headcount });
+      } else if (c.headcount > 0 && c.headcount <= MAX_SEATS_PER_ROOM) {
+        const { error } = await supabase
+          .from('exam_rooms')
+          .update({ seat_capacity: c.headcount, grid_size: gridSizeForCapacity(c.headcount) })
+          .eq('id', existing.id);
+        if (error) throw new Error('更新考場座位數失敗：' + error.message);
+        updatedCapacities.push({ label: c.label, oldCapacity: existing.seat_capacity, newCapacity: c.headcount });
+      }
+    }
   }
-  if (rows.length > 0) {
-    const { error } = await supabase.from('exam_rooms').insert(rows);
+
+  if (toCreate.length > 0) {
+    const { error } = await supabase.from('exam_rooms').insert(toCreate);
     if (error) throw new Error('自動建立考場失敗：' + error.message);
   }
-  return { createdCount: rows.length, skippedTooBig, skippedEmpty };
+
+  return { createdCount: toCreate.length, skippedTooBig, skippedEmpty, removedExcluded, updatedCapacities, confirmedMismatches };
 }
 
 const HIDDEN_STUDENT_STATUSES = ['休學', '轉學', '退學', '畢業', '肄業'];

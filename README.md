@@ -20,7 +20,7 @@ app/
   (app)/admin/layout.tsx          -- 【第五輪】非管理員擋在「系統設定」類頁面外（/admin、/admin/grading、/admin/registrar 例外，內部自己依角色決定顯示哪些分頁）
   (app)/admin/page.tsx            -- 【首頁改版】管理後台首頁：管理者視角＝教務／訓導／總務三區（系統管理員S可按「修正分類」拖曳調整）；教師卡片視角＝僅顯示教學相關攤平清單
   (app)/admin/scheduling/page.tsx -- 【排課系統整合】① 產生排課工具貼上格式 ② 內嵌/連結排課工具本體 ③ 排課完成匯出Excel後上傳，自動寫回班級/科目節數/課表
-  (app)/admin/exam-seating/page.tsx -- 【考試分班】教務處：新增/刪除考試 → 系統自動把所有班級設為考場（考場名稱＝班級名稱、座位數＝該班目前在校人數，不用另外手動新增）→ 考場旁邊直接展開勾選應試班級群組（最多4班，考場自己的班級一定包含，選了誰對方考場也會自動連動勾選回來，全部改完只要按一次【儲存應試班級】）→ 依座位數比例試算各考場人數（雙驗證，可手動修改）→ 產生梅花座位表並確認 → 全部考場完成後發送考場表通知各班導師 → 發送後可預覽各考場名單/座位並列印座位表、簽到表
+  (app)/admin/exam-seating/page.tsx -- 【考試分班】教務處：新增/刪除考試 → 可勾選「不擔任考場班級」（自動排除，該班學生仍可被安排到其他班考場）→ 系統自動把其餘班級設為考場並持續同步座位數＝該班目前在校人數（未確認的考場人數異動會自動校正，已確認的只會警示不會硬改）→ 考場旁邊直接展開勾選應試班級群組（最多4班，考場自己的班級一定包含，選了誰對方考場也會自動連動勾選回來，全部改完只要按一次【儲存應試班級】）→ 依分組（只顯示有共用考場的班級群組，簡化表格）試算各考場人數，兩項驗證不合時可按【自動調整】自動搬動名額（仍保留逐格手動調整）→ 產生梅花座位表並確認 → 全部考場完成後發送考場表通知各班導師 → 發送後可預覽各考場名單/座位並列印座位表、簽到表
   (app)/exam-rosters/page.tsx -- 【考試分班】導師：收到考場通知後，把本班學生填入分配到的考場座位（可隨機分配），完成後送出並鎖定
   (app)/admin/grading/page.tsx    -- 【本次整合】成績相關設定及查詢（6分頁：成績相關設定〔管理員限定〕/學生成績登錄/班級成績總表/班級成績結果與排名/全校排行榜/歷年成績查詢）
   (app)/admin/registrar/page.tsx  -- 【本次整合】學籍設定及查詢（7分頁：查詢學生〔全體教職員〕/新生登記/快速建檔/學籍狀態變更/學期中轉班/升級作業/年級升級對照表設定〔以上6項管理員限定〕）
@@ -62,7 +62,7 @@ lib/
   gradeMapping.ts        -- 年級↔部別對照、具體年級清單
   ReportCardDocument.tsx -- 【第三階段】成績單PDF版型元件
   scoreAttendanceSheetParser.ts -- 解析「成績、出缺輸入表」格式（表頭、學生名單、分數區塊、出缺勤日期欄位）
-  examSeating.ts -- 【考試分班】考試/考場/應試班級 CRUD、依座位數比例計算各考場人數（含最大餘數法校正＋雙驗證）、梅花座位表演算法（方形座位、最大7*7、公平交錯排班讓同班盡量不相鄰）、考場共用班級群組（對稱勾選、最多4班）、全校規模（1000～1300+人）查詢的分頁／分批防截斷處理
+  examSeating.ts -- 【考試分班】考試/考場/應試班級 CRUD、不擔任考場班級（排除）、考場座位數持續同步班級真實人數、依座位數比例計算各考場人數（含最大餘數法校正＋雙驗證＋自動微調搬動名額修正超額）、梅花座位表演算法（方形座位、最大7*7、公平交錯排班讓同班盡量不相鄰）、考場共用班級群組（對稱勾選、最多4班）、全校規模（1000～1300+人）查詢的分頁／分批防截斷處理
 public/
   scheduler/scheduler-tool.html -- 【排課系統整合】排課工具本體（原始檔案上加了「學年度」分頁＋「帳號管理」導覽項，排課核心邏輯未更動；資料只存在瀏覽器記憶體，須自行「備份專案」下載JSON）
 docs/
@@ -74,7 +74,7 @@ docs/
 ## 建置步驟
 
 1. **建立 Supabase 專案**（https://supabase.com），取得 Project URL 與 anon key。
-2. 在 Supabase SQL Editor 依序執行 `sql/schema.sql`、`sql/policies.sql`、`sql/calculations.sql`、`sql/registration.sql`、`sql/promotion.sql`、`sql/portal.sql`、`sql/conduct_defaults.sql`，之後依檔名數字順序執行 `sql/` 資料夾其餘檔案（含新增的 `sql/90exam_seating.sql`〔考試分班／考場編排，需要先執行過 `8attendance_alerts_and_guardian_edit.sql` 的 `staff_notifications`、以及 `19`/`26` 的 `is_system_admin()`/`has_department()`〕）。
+2. 在 Supabase SQL Editor 依序執行 `sql/schema.sql`、`sql/policies.sql`、`sql/calculations.sql`、`sql/registration.sql`、`sql/promotion.sql`、`sql/portal.sql`、`sql/conduct_defaults.sql`，之後依檔名數字順序執行 `sql/` 資料夾其餘檔案（含新增的 `sql/90exam_seating.sql`、`sql/91exam_seating_exclude_classes.sql`〔考試分班／考場編排，需要先執行過 `8attendance_alerts_and_guardian_edit.sql` 的 `staff_notifications`、以及 `19`/`26` 的 `is_system_admin()`/`has_department()`〕）。
    `registration.sql` 需要用到檔案儲存，請在 Supabase 後台 Storage 建立一個名為 `student-documents` 的 bucket（私有即可，不需公開），用來存放學籍狀態變更的佐證資料。
    `portal.sql` 的家長/學生登入**不需要額外申請 Google OAuth**，用的是 Supabase 內建的信箱驗證連結（Magic Link），預設就會用，不用去 Google Cloud Console 申請任何東西。
 3. 在專案根目錄建立 `.env.local`：
