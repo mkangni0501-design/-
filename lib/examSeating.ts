@@ -679,6 +679,55 @@ export type ExamRoomSeatRow = {
   exam_seat_students?: { student_no: string | null; class_seat_no: number | null; students?: { name: string } | null } | null;
 };
 
+// ------------------------------------------------------------
+// 簽到表／座位表：共用的資料整理（不依賴任何 Excel 套件，純資料處理，
+// 產生 Excel 檔案這件事留給呼叫端在瀏覽器端動態 import 'xlsx' 再做，
+// 避免這個共用檔案被伺服器端載入時因為 'xlsx' 套件跳出 "self is not defined" 錯誤）
+// ------------------------------------------------------------
+
+export type SignInRow = { classLabel: string; classSeatNo: number | null; studentNo: string | null; name: string };
+export type SeatGridCell = { row: number; col: number; classLabel: string; classSeatNo: number | null; studentNo: string | null; name: string };
+export type RoomExportData = { roomName: string; gridSize: number; signInRows: SignInRow[]; seatGrid: SeatGridCell[] };
+
+/** 依「班級」為第一排序、「原班座號」為第二排序，整理成簽到表要用的資料列 */
+export function buildSignInRows(seats: ExamRoomSeatRow[], classLabelMap: Record<string, string>): SignInRow[] {
+  return seats
+    .filter((s) => s.class_id)
+    .map((s) => ({
+      classLabel: classLabelMap[s.class_id!] ?? '',
+      classSeatNo: s.exam_seat_students?.class_seat_no ?? null,
+      studentNo: s.exam_seat_students?.student_no ?? null,
+      name: s.exam_seat_students?.students?.name ?? '',
+    }))
+    .sort((a, b) => {
+      const byClass = a.classLabel.localeCompare(b.classLabel, 'zh-Hant');
+      if (byClass !== 0) return byClass;
+      return (a.classSeatNo ?? 0) - (b.classSeatNo ?? 0);
+    });
+}
+
+/** 座位表用的座位格資料（每一格都帶著班級，不會因為已經填了學生就看不到是哪一班） */
+export function buildSeatGridCells(seats: ExamRoomSeatRow[], classLabelMap: Record<string, string>): SeatGridCell[] {
+  return seats.map((s) => ({
+    row: s.row_no,
+    col: s.col_no,
+    classLabel: s.class_id ? classLabelMap[s.class_id] ?? '' : '',
+    classSeatNo: s.exam_seat_students?.class_seat_no ?? null,
+    studentNo: s.exam_seat_students?.student_no ?? null,
+    name: s.exam_seat_students?.students?.name ?? '',
+  }));
+}
+
+/** 匯出整間考場（簽到表＋座位表）需要的資料，供列印或匯出 Excel共用 */
+export function buildRoomExportData(room: ExamRoom, seats: ExamRoomSeatRow[], classLabelMap: Record<string, string>): RoomExportData {
+  return {
+    roomName: room.room_name,
+    gridSize: room.grid_size,
+    signInRows: buildSignInRows(seats, classLabelMap),
+    seatGrid: buildSeatGridCells(seats, classLabelMap),
+  };
+}
+
 export async function listRoomSeats(examRoomId: string): Promise<ExamRoomSeatRow[]> {
   const { data, error } = await supabase
     .from('exam_room_seats')
