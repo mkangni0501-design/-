@@ -1,19 +1,32 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { supabase, getCurrentTeacherId } from '@/lib/supabaseClient';
+import { supabase, getCurrentTeacherId, getCurrentAppUser } from '@/lib/supabaseClient';
+import { getMyDepartments, hasDepartment } from '@/lib/departments';
 import ErrorBanner from '@/components/ErrorBanner';
-import { ExamRoomSeatRow, listRoomSeats, upsertSeatStudent, submitClassRoster, listRosterStatus, RosterStatus, listCurrentEnrollments, EnrollmentRow } from '@/lib/examSeating';
+import {
+  ExamRoomSeatRow,
+  listRoomSeats,
+  upsertSeatStudent,
+  submitClassRoster,
+  listRosterStatus,
+  RosterStatus,
+  listCurrentEnrollments,
+  EnrollmentRow,
+  escapeHtml,
+} from '@/lib/examSeating';
 
 // ============================================================
-// 導師【輸入考場名單】頁
-// 收到【考場通知】後，從通知連過來；左側為本班尚未安排的學生（座號/學號/姓名），
+// 【輸入考場名單】頁
+// 導師：收到【考場通知】後，從通知連過來；左側為本班尚未安排的學生（座號/學號/姓名），
 // 右側表格第一列為各考場（班級人數），第二列起為該考場屬於本班的座位，
 // 由導師填入是哪位學生（原班座號）。可用【隨機分配】自動帶入，完成後按【完成名單】送出並鎖定。
+// 管理員A、系統管理員S、教務處：可以直接代替任何一班的導師安排（不限自己帶的班）。
 // ============================================================
 
 type MyClass = { id: string; label: string };
 type ExamSessionOption = { id: string; name: string; status: string };
+type SessionClassOption = { id: string; label: string; submitted: boolean };
 
 export default function ExamRostersPage() {
   const [myTeacherId, setMyTeacherId] = useState<string | null>(null);
@@ -21,34 +34,67 @@ export default function ExamRostersPage() {
   const [classId, setClassId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ExamSessionOption[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+
+  const [isPrivileged, setIsPrivileged] = useState(false);
+  const [allSessions, setAllSessions] = useState<ExamSessionOption[]>([]);
+  const [adminSessionId, setAdminSessionId] = useState<string | null>(null);
+  const [sessionClasses, setSessionClasses] = useState<SessionClassOption[]>([]);
+  const [adminClassId, setAdminClassId] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
+      const me = await getCurrentAppUser();
+      let privileged = false;
+      if (me) {
+        if (me.role === 'system_admin_s' || me.role === 'admin_a') {
+          privileged = true;
+        } else {
+          const depts = await getMyDepartments(me.id);
+          privileged = hasDepartment(depts, 'academic');
+        }
+      }
+      setIsPrivileged(privileged);
+
       const teacherId = await getCurrentTeacherId();
       setMyTeacherId(teacherId);
-      if (!teacherId) {
-        setLoading(false);
-        return;
+      if (teacherId) {
+        const { data: classes, error: classErr } = await supabase
+          .from('classes')
+          .select('id, grade_level, class_name, academic_year')
+          .eq('homeroom_teacher_id', teacherId)
+          .order('academic_year', { ascending: false });
+        if (classErr) {
+          setError('讀取班級資料失敗：' + classErr.message);
+        } else {
+          const options = (classes ?? []).map((c: any) => ({ id: c.id, label: `${c.academic_year} ${c.grade_level}${c.class_name}` }));
+          setMyClasses(options);
+          if (options.length > 0) setClassId(options[0].id);
+        }
       }
-      const { data: classes, error: classErr } = await supabase
-        .from('classes')
-        .select('id, grade_level, class_name, academic_year')
-        .eq('homeroom_teacher_id', teacherId)
-        .order('academic_year', { ascending: false });
-      if (classErr) {
-        setError('讀取班級資料失敗：' + classErr.message);
-        setLoading(false);
-        return;
+
+      if (privileged) {
+        const { data: rows, error: sessErr } = await supabase
+          .from('exam_sessions')
+          .select('id, name, status')
+          .in('status', ['已發送', '已完成'])
+          .order('created_at', { ascending: false });
+        if (sessErr) {
+          setError('讀取考試清單失敗：' + sessErr.message);
+        } else {
+          const opts = (rows ?? []).map((s: any) => ({ id: s.id, name: s.name, status: s.status }));
+          setAllSessions(opts);
+          if (opts.length > 0) setAdminSessionId(opts[0].id);
+        }
       }
-      const options = (classes ?? []).map((c: any) => ({ id: c.id, label: `${c.academic_year} ${c.grade_level}${c.class_name}` }));
-      setMyClasses(options);
-      if (options.length > 0) setClassId(options[0].id);
+
       setLoading(false);
     })();
   }, []);
 
+  // ---- 導師視角：選了班級後，列出這個班有分配到考場的考試 ----
   useEffect(() => {
     if (!classId) {
       setSessions([]);
@@ -57,7 +103,6 @@ export default function ExamRostersPage() {
     }
     (async () => {
       setError(null);
-      // 只列出「已分配到考場」且考場表已發送/已完成的考試
       const { data: rows, error: err } = await supabase
         .from('exam_class_roster_status')
         .select('exam_session_id, exam_sessions(id, name, status)')
@@ -75,56 +120,142 @@ export default function ExamRostersPage() {
     })();
   }, [classId]);
 
+  // ---- 管理員／教務視角：選了考試後，列出這次考試涉及的所有班級 ----
+  useEffect(() => {
+    if (!adminSessionId) {
+      setSessionClasses([]);
+      setAdminClassId(null);
+      return;
+    }
+    (async () => {
+      setError(null);
+      const { data, error: err } = await supabase
+        .from('exam_class_roster_status')
+        .select('class_id, submitted, classes(grade_level, class_name)')
+        .eq('exam_session_id', adminSessionId);
+      if (err) {
+        setError('讀取班級清單失敗：' + err.message);
+        return;
+      }
+      const opts = (data ?? [])
+        .map((r: any) => ({ id: r.class_id, label: `${r.classes?.grade_level ?? ''}${r.classes?.class_name ?? ''}`, submitted: !!r.submitted }))
+        .sort((a: SessionClassOption, b: SessionClassOption) => a.label.localeCompare(b.label));
+      setSessionClasses(opts);
+      setAdminClassId(opts.length > 0 ? opts[0].id : null);
+    })();
+  }, [adminSessionId]);
+
   return (
     <main style={{ maxWidth: 900, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 18, marginBottom: 4 }}>輸入考場名單</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 16 }}>
-        收到考場通知後，在這裡把本班學生填入分配到的考場座位。填完後按【完成名單】送出，送出後即鎖定不得再修改。
+        收到考場通知後，在這裡把班級學生填入分配到的考場座位。填完後按【完成名單】送出，送出後即鎖定不得再修改。
       </p>
       <ErrorBanner message={error} />
 
       {loading ? (
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
-      ) : !myTeacherId ? (
-        <p style={{ fontSize: 13, color: '#999' }}>這個帳號沒有連結教師資料。</p>
-      ) : myClasses.length === 0 ? (
-        <p style={{ fontSize: 13, color: '#999' }}>目前沒有帶班紀錄。</p>
       ) : (
         <>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-            {myClasses.length > 1 && (
-              <select value={classId ?? ''} onChange={(e) => setClassId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
-                {myClasses.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            )}
-            {sessions.length > 1 && (
-              <select value={sessionId ?? ''} onChange={(e) => setSessionId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
-                {sessions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          {sessions.length === 0 ? (
-            <p style={{ fontSize: 13, color: '#999' }}>目前沒有已發送的考場表。</p>
-          ) : (
-            classId &&
-            sessionId && <ClassRosterEditor classId={classId} sessionId={sessionId} teacherId={myTeacherId} sessionName={sessions.find((s) => s.id === sessionId)?.name ?? ''} />
+          {isPrivileged && (
+            <section style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 20 }}>
+              <h2 style={{ fontSize: 14, marginBottom: 8 }}>管理員／教務處：代替導師安排</h2>
+              {allSessions.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#999' }}>目前沒有已發送的考場表。</p>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <select value={adminSessionId ?? ''} onChange={(e) => setAdminSessionId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
+                      {allSessions.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                    {sessionClasses.length > 0 && (
+                      <select value={adminClassId ?? ''} onChange={(e) => setAdminClassId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
+                        {sessionClasses.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.label}
+                            {c.submitted ? '（已送出）' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  {adminSessionId && adminClassId && (
+                    <ClassRosterEditor
+                      key={`${adminSessionId}-${adminClassId}`}
+                      classId={adminClassId}
+                      sessionId={adminSessionId}
+                      teacherId={myTeacherId}
+                      sessionName={allSessions.find((s) => s.id === adminSessionId)?.name ?? ''}
+                    />
+                  )}
+                </>
+              )}
+            </section>
           )}
+
+          {myClasses.length > 0 && (
+            <section>
+              {isPrivileged && <h2 style={{ fontSize: 14, marginBottom: 8 }}>我的班級</h2>}
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+                {myClasses.length > 1 && (
+                  <select value={classId ?? ''} onChange={(e) => setClassId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
+                    {myClasses.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {sessions.length > 1 && (
+                  <select value={sessionId ?? ''} onChange={(e) => setSessionId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
+                    {sessions.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {sessions.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#999' }}>目前沒有已發送的考場表。</p>
+              ) : (
+                classId &&
+                sessionId && (
+                  <ClassRosterEditor
+                    key={`${classId}-${sessionId}`}
+                    classId={classId}
+                    sessionId={sessionId}
+                    teacherId={myTeacherId}
+                    sessionName={sessions.find((s) => s.id === sessionId)?.name ?? ''}
+                  />
+                )
+              )}
+            </section>
+          )}
+
+          {!isPrivileged && myClasses.length === 0 && <p style={{ fontSize: 13, color: '#999' }}>這個帳號沒有帶班紀錄，也沒有代管考場名單的權限。</p>}
         </>
       )}
     </main>
   );
 }
 
-function ClassRosterEditor({ classId, sessionId, teacherId, sessionName }: { classId: string; sessionId: string; teacherId: string; sessionName: string }) {
+function ClassRosterEditor({
+  classId,
+  sessionId,
+  teacherId,
+  sessionName,
+}: {
+  classId: string;
+  sessionId: string;
+  teacherId: string | null;
+  sessionName: string;
+}) {
   const [roomGroups, setRoomGroups] = useState<{ roomId: string; roomName: string; seats: ExamRoomSeatRow[] }[]>([]);
   const [enrollments, setEnrollments] = useState<EnrollmentRow[]>([]);
   const [submitted, setSubmitted] = useState(false);
@@ -193,9 +324,9 @@ function ClassRosterEditor({ classId, sessionId, teacherId, sessionName }: { cla
       for (const g of roomGroups) for (const s of g.seats) if (!s.exam_seat_students?.student_no) emptySeatIds.push(s.id);
       const shuffled = [...unassigned].sort(() => Math.random() - 0.5);
       const n = Math.min(emptySeatIds.length, shuffled.length);
-      for (let i = 0; i < n; i++) {
-        await upsertSeatStudent(emptySeatIds[i], shuffled[i].student_no, shuffled[i].seat_no, teacherId);
-      }
+      await Promise.all(
+        Array.from({ length: n }).map((_, i) => upsertSeatStudent(emptySeatIds[i], shuffled[i].student_no, shuffled[i].seat_no, teacherId))
+      );
       setNotice('已隨機分配');
       await reload();
     } catch (e: any) {
@@ -223,14 +354,16 @@ function ClassRosterEditor({ classId, sessionId, teacherId, sessionName }: { cla
       .flatMap((g) => g.seats.map((s) => ({ room: g.roomName, seatNo: s.seat_no, seatNoClass: s.exam_seat_students?.class_seat_no, studentNo: s.exam_seat_students?.student_no })))
       .map((r) => {
         const name = enrollments.find((e) => e.student_no === r.studentNo)?.name ?? '';
-        return `<tr><td>${r.room}</td><td>${r.seatNo}</td><td>${r.seatNoClass ?? ''}</td><td>${r.studentNo ?? ''}</td><td>${name}</td></tr>`;
+        return `<tr><td>${escapeHtml(r.room)}</td><td>${r.seatNo}</td><td>${escapeHtml(r.seatNoClass ?? '')}</td><td>${escapeHtml(r.studentNo ?? '')}</td><td>${escapeHtml(
+          name
+        )}</td></tr>`;
       })
       .join('');
     w.document.write(`
-      <html><head><title>${sessionName}－座位表</title>
+      <html><head><title>${escapeHtml(sessionName)}－座位表</title>
       <style>body{font-family:sans-serif;padding:24px;}table{border-collapse:collapse;width:100%;margin-top:12px;}
       td,th{border:1px solid #999;padding:6px 10px;font-size:13px;text-align:center;}</style></head><body>
-      <h1 style="font-size:18px;">${sessionName}</h1>
+      <h1 style="font-size:18px;">${escapeHtml(sessionName)}</h1>
       <table><thead><tr><th>考場</th><th>考場座位號</th><th>原班座號</th><th>學號</th><th>姓名</th></tr></thead>
       <tbody>${rows}</tbody></table></body></html>`);
     w.document.close();
@@ -250,7 +383,7 @@ function ClassRosterEditor({ classId, sessionId, teacherId, sessionName }: { cla
         </p>
       )}
       {roomGroups.length === 0 ? (
-        <p style={{ fontSize: 13, color: '#999' }}>本班尚未分配到任何考場座位。</p>
+        <p style={{ fontSize: 13, color: '#999' }}>這個班還沒有分配到任何考場座位。</p>
       ) : (
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 200 }}>
