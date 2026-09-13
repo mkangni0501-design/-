@@ -87,6 +87,12 @@ export function gridSizeForCapacity(capacity: number): number {
   return Math.min(7, Math.max(1, Math.ceil(Math.sqrt(Math.max(1, capacity)))));
 }
 
+/** 列印座位表／簽到表時，把姓名等使用者資料放進 HTML 字串前先做逸出，避免內容剛好含有 HTML 特殊字元時跑版或被當成標籤 */
+export function escapeHtml(text: string | number | null | undefined): string {
+  if (text == null) return '';
+  return String(text).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+}
+
 // ------------------------------------------------------------
 // 讀取
 // ------------------------------------------------------------
@@ -331,11 +337,9 @@ export async function saveExamRoomClassAssignment(examRoomId: string, classIds: 
   if (insErr) throw new Error('儲存班級考場分配失敗：' + insErr.message);
 }
 
-/** 一次儲存「所有考場」目前的應試班級分配，讓畫面上只需要一個儲存鍵 */
+/** 一次儲存「所有考場」目前的應試班級分配，讓畫面上只需要一個儲存鍵（平行送出，不用一間一間等） */
 export async function saveAllRoomClassGroups(assignments: { examRoomId: string; classIds: string[] }[]) {
-  for (const a of assignments) {
-    await saveExamRoomClassAssignment(a.examRoomId, a.classIds);
-  }
+  await Promise.all(assignments.map((a) => saveExamRoomClassAssignment(a.examRoomId, a.classIds)));
 }
 
 // ------------------------------------------------------------
@@ -407,11 +411,20 @@ export function toggleGroupMember(groups: string[][], ownerId: string, targetId:
 }
 
 /** 儲存試算/手動修改後的各班考場人數（第3-4步的【儲存】） */
-export async function saveAllocatedCounts(rows: { id: string; allocated_count: number }[]) {
-  for (const row of rows) {
-    const { error } = await supabase.from('exam_room_classes').update({ allocated_count: row.allocated_count }).eq('id', row.id);
-    if (error) throw new Error('儲存分配人數失敗：' + error.message);
-  }
+/**
+ * 儲存試算/手動修改後的各班考場人數（第3-4步的【儲存】）。
+ * 改成一次 upsert 全部（用主鍵 id 當衝突目標，等同一次批次更新），
+ * 而不是每一列各發一次網路請求——列數一多（全校規模時可能上百列）逐列更新會非常慢。
+ */
+export async function saveAllocatedCounts(rows: { id: string; exam_room_id: string; class_id: string; allocated_count: number }[]) {
+  if (rows.length === 0) return;
+  const { error } = await supabase
+    .from('exam_room_classes')
+    .upsert(
+      rows.map((r) => ({ id: r.id, exam_room_id: r.exam_room_id, class_id: r.class_id, allocated_count: r.allocated_count })),
+      { onConflict: 'id' }
+    );
+  if (error) throw new Error('儲存分配人數失敗：' + error.message);
 }
 
 // ------------------------------------------------------------
@@ -573,16 +586,11 @@ export function validateAllocation(params: {
 
 export type SeatCell = { seatNo: number; row: number; col: number; classId: string | null };
 
-/**
- * 蛇形（之字形）走訪方形格子，取得座位序號 1..capacity 對應的 (row, col)。
- * 蛇形走法讓序列上相鄰的座位號，在方格上也大致相鄰，方便下面的公平交錯排班演算法
- * 產生「同班盡量不相鄰」的效果。超過 capacity 的格子（座位數不是完全平方數時）不使用。
- */
-function boustrophedonCells(gridSize: number, capacity: number): { row: number; col: number }[] {
+/** 依讀取順序（由左到右、由上到下）取得座位序號 1..capacity 對應的 (row, col)。 */
+function rowMajorCells(gridSize: number, capacity: number): { row: number; col: number }[] {
   const cells: { row: number; col: number }[] = [];
   for (let row = 0; row < gridSize && cells.length < capacity; row++) {
-    const cols = row % 2 === 0 ? [...Array(gridSize).keys()] : [...Array(gridSize).keys()].reverse();
-    for (const col of cols) {
+    for (let col = 0; col < gridSize; col++) {
       if (cells.length >= capacity) break;
       cells.push({ row, col });
     }
@@ -591,37 +599,48 @@ function boustrophedonCells(gridSize: number, capacity: number): { row: number; 
 }
 
 /**
- * 公平交錯排序（類似作業系統排程的公平佇列做法）：每一步都挑「目前已排入比例最低」的
- * 班級放進序列下一格，讓各班座位盡量平均、交錯分散在座位序列中，而不是同班連續坐在一起，
- * 藉此逼近梅花座「同班考生盡可能不相鄰」的效果。
+ * 依考場座位數與各班分配人數，產生梅花座座位表（尚未寫入資料庫）。
+ *
+ * 演算法：依「由左到右、由上到下」的順序逐一安排座位；安排每一格的時候，
+ * 「左邊」跟「上面」的座位一定已經排過了，所以只要這一格避開跟左、上兩個
+ * 已排座位同班，等到後面排到它們右邊/下面的座位時，也會反過來避開這一格——
+ * 這樣排完整個考場，前後左右四個方向都不會是同班（人數真的沒辦法避開時除外，
+ * 例如同一考場裡有一班人數壓倒性地多），從「第一次排」就直接做到，不用事後調整。
+ * 剩餘人數相同、有多種不衝突選擇時用亂數決定，所以每次呼叫（含【重新排列】）
+ * 結果都會不一樣。
  */
-function fairInterleave(counts: { classId: string; count: number }[]): (string | null)[] {
-  const items = counts.filter((c) => c.count > 0).map((c) => ({ ...c, placed: 0 }));
-  const total = items.reduce((s, c) => s + c.count, 0);
-  const seq: (string | null)[] = [];
-  for (let i = 0; i < total; i++) {
-    let best: (typeof items)[number] | null = null;
-    for (const it of items) {
-      if (it.placed >= it.count) continue;
-      if (best === null || it.placed / it.count < best.placed / best.count) best = it;
-    }
-    if (!best) break;
-    seq.push(best.classId);
-    best.placed += 1;
-  }
-  return seq;
-}
-
-/** 依考場座位數與各班分配人數，產生梅花座座位表（尚未寫入資料庫） */
 export function generateSeatLayout(params: { gridSize: number; capacity: number; classCounts: { classId: string; count: number }[] }): SeatCell[] {
-  const cells = boustrophedonCells(params.gridSize, params.capacity);
-  const seq = fairInterleave(params.classCounts);
-  return cells.map((cell, idx) => ({
-    seatNo: idx + 1,
-    row: cell.row,
-    col: cell.col,
-    classId: seq[idx] ?? null,
-  }));
+  const cells = rowMajorCells(params.gridSize, params.capacity);
+  const remaining: Record<string, number> = {};
+  for (const c of params.classCounts) if (c.count > 0) remaining[c.classId] = c.count;
+  const placed = new Map<string, string>(); // `${row}-${col}` -> classId
+
+  const result: SeatCell[] = [];
+  for (const cell of cells) {
+    const forbidden = new Set<string>();
+    const leftClass = placed.get(`${cell.row}-${cell.col - 1}`);
+    const topClass = placed.get(`${cell.row - 1}-${cell.col}`);
+    if (leftClass) forbidden.add(leftClass);
+    if (topClass) forbidden.add(topClass);
+
+    const available = Object.keys(remaining).filter((id) => remaining[id] > 0);
+    const nonConflicting = available.filter((id) => !forbidden.has(id));
+    const pool = nonConflicting.length > 0 ? nonConflicting : available; // 真的沒有不衝突的選項時，只好從剩下的裡面選
+
+    let classId: string | null = null;
+    if (pool.length > 0) {
+      // 優先挑「剩餘人數最多」的班級，讓後面還沒排的座位比較不容易被逼著同班相鄰；
+      // 剩餘人數相同時用亂數決定，讓每次產生的排法都不同。
+      const maxRemaining = Math.max(...pool.map((id) => remaining[id]));
+      const topChoices = pool.filter((id) => remaining[id] === maxRemaining);
+      classId = topChoices[Math.floor(Math.random() * topChoices.length)];
+      remaining[classId] -= 1;
+    }
+    if (classId) placed.set(`${cell.row}-${cell.col}`, classId);
+    result.push({ seatNo: 0, row: cell.row, col: cell.col, classId });
+  }
+  result.forEach((s, idx) => (s.seatNo = idx + 1));
+  return result;
 }
 
 // ------------------------------------------------------------
@@ -657,13 +676,13 @@ export type ExamRoomSeatRow = {
   row_no: number;
   col_no: number;
   class_id: string | null;
-  exam_seat_students?: { student_no: string | null; class_seat_no: number | null } | null;
+  exam_seat_students?: { student_no: string | null; class_seat_no: number | null; students?: { name: string } | null } | null;
 };
 
 export async function listRoomSeats(examRoomId: string): Promise<ExamRoomSeatRow[]> {
   const { data, error } = await supabase
     .from('exam_room_seats')
-    .select('id, exam_room_id, seat_no, row_no, col_no, class_id, exam_seat_students(student_no, class_seat_no)')
+    .select('id, exam_room_id, seat_no, row_no, col_no, class_id, exam_seat_students(student_no, class_seat_no, students(name))')
     .eq('exam_room_id', examRoomId)
     .order('seat_no');
   if (error) throw new Error('讀取座位表失敗：' + error.message);
