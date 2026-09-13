@@ -35,6 +35,8 @@ import {
   listRoomSeats,
   listRosterStatus,
   escapeHtml,
+  buildSignInRows,
+  buildRoomExportData,
 } from '@/lib/examSeating';
 
 // ============================================================
@@ -403,6 +405,7 @@ function ExamSessionEditor({
 
   const allConfirmed = rooms.length > 0 && rooms.every((r) => r.confirmed);
   const [rosterStatus, setRosterStatus] = useState<RosterStatus[]>([]);
+  const [downloadingExcel, setDownloadingExcel] = useState(false);
   useEffect(() => {
     if (session.status !== '已發送' && session.status !== '已完成') return;
     listRosterStatus(session.id).then(setRosterStatus).catch(() => {});
@@ -424,20 +427,76 @@ function ExamSessionEditor({
     }
   }
 
+  async function handleDownloadAllExcel() {
+    setError(null);
+    setDownloadingExcel(true);
+    try {
+      const seatsByRoom = await Promise.all(rooms.map((r) => listRoomSeats(r.id)));
+      const exportData = rooms.map((r, i) => buildRoomExportData(r, seatsByRoom[i], classLabelMap));
+      const XLSX = await import('xlsx');
+      const wb = XLSX.utils.book_new();
+      const usedNames = new Set<string>();
+      function uniqueSheetName(base: string): string {
+        let name = base.slice(0, 31);
+        let n = 1;
+        while (usedNames.has(name)) {
+          const suffix = `(${n++})`;
+          name = base.slice(0, 31 - suffix.length) + suffix;
+        }
+        usedNames.add(name);
+        return name;
+      }
+      for (const data of exportData) {
+        const signInAoa: (string | number)[][] = [
+          ['班級', '原班座號', '學號', '姓名', '簽名'],
+          ...data.signInRows.map((r) => [r.classLabel, r.classSeatNo ?? '', r.studentNo ?? '', r.name, '']),
+        ];
+        const signInWs = XLSX.utils.aoa_to_sheet(signInAoa);
+        signInWs['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 14 }];
+        XLSX.utils.book_append_sheet(wb, signInWs, uniqueSheetName(`${data.roomName}簽到表`));
+
+        const grid: string[][] = Array.from({ length: data.gridSize }, () => Array.from({ length: data.gridSize }, () => ''));
+        for (const cell of data.seatGrid) {
+          grid[cell.row][cell.col] = [cell.classLabel, cell.classSeatNo != null ? `座號${cell.classSeatNo}` : '', cell.name].filter(Boolean).join(' ');
+        }
+        const seatWs = XLSX.utils.aoa_to_sheet(grid);
+        seatWs['!cols'] = Array.from({ length: data.gridSize }, () => ({ wch: 16 }));
+        XLSX.utils.book_append_sheet(wb, seatWs, uniqueSheetName(`${data.roomName}座位表`));
+      }
+      XLSX.writeFile(wb, `${session.name}_考場簽到表座位表.xlsx`);
+    } catch (e: any) {
+      setError('匯出 Excel 失敗：' + (e?.message ?? String(e)));
+    } finally {
+      setDownloadingExcel(false);
+    }
+  }
+
   if (loading) return <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>;
+
+  const allRostersSubmitted = rosterStatus.length > 0 && rosterStatus.every((rs) => rs.submitted);
 
   return (
     <section style={{ borderTop: '2px solid #eee', paddingTop: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
         <h2 style={{ fontSize: 15 }}>
           {session.name}（{session.academic_year} {session.term}）
         </h2>
-        {session.status !== '已發送' && session.status !== '已完成' && (
-          <button onClick={handleSend} disabled={!allConfirmed} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
-            發送考場表
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          {(session.status === '已發送' || session.status === '已完成') && (
+            <button onClick={handleDownloadAllExcel} disabled={!allRostersSubmitted || downloadingExcel} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
+              {downloadingExcel ? '匯出中…' : '一鍵下載所有考場簽到表／座位表（Excel）'}
+            </button>
+          )}
+          {session.status !== '已發送' && session.status !== '已完成' && (
+            <button onClick={handleSend} disabled={!allConfirmed} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
+              發送考場表
+            </button>
+          )}
+        </div>
       </div>
+      {(session.status === '已發送' || session.status === '已完成') && !allRostersSubmitted && (
+        <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：所有班級都需完成【完成名單】送出後，才能一鍵下載 Excel。</p>
+      )}
       {!allConfirmed && session.status === '編排中' && (
         <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：所有考場都需完成座位表【確認】後，才能發送考場表。</p>
       )}
@@ -980,27 +1039,56 @@ function RoomDetailModal({
   function handlePrint() {
     const w = window.open('', '_blank');
     if (!w) return;
-    const rows = seats
-      .filter((s) => s.class_id)
-      .map((s) => {
-        const stu = s.exam_seat_students;
-        return `<tr><td>${s.seat_no}</td><td>${escapeHtml(classLabelMap[s.class_id!] ?? '')}</td><td>${escapeHtml(stu?.class_seat_no ?? '')}</td><td>${escapeHtml(
-          stu?.student_no ?? ''
-        )}</td><td>${escapeHtml(stu?.students?.name ?? '')}</td></tr>`;
-      })
+    const signInRows = buildSignInRows(seats, classLabelMap);
+    const bodyRows = signInRows
+      .map(
+        (r) =>
+          `<tr><td>${escapeHtml(r.classLabel)}</td><td>${escapeHtml(r.classSeatNo ?? '')}</td><td>${escapeHtml(r.studentNo ?? '')}</td><td>${escapeHtml(
+            r.name
+          )}</td><td></td></tr>`
+      )
       .join('');
+
+    const bySeat = new Map(seats.map((s) => [`${s.row_no}-${s.col_no}`, s]));
+    let gridHtml = `<div style="display:grid;grid-template-columns:repeat(${room.grid_size}, 1fr);gap:3px;margin-top:10px;">`;
+    for (let row = 0; row < room.grid_size; row++) {
+      for (let col = 0; col < room.grid_size; col++) {
+        const seat = bySeat.get(`${row}-${col}`);
+        if (!seat) {
+          gridHtml += `<div style="border:1px solid #ddd;border-radius:3px;height:52px;"></div>`;
+          continue;
+        }
+        const stu = seat.exam_seat_students;
+        const cls = seat.class_id ? classLabelMap[seat.class_id] ?? '' : '';
+        gridHtml += `<div style="border:1px solid #999;border-radius:3px;height:52px;padding:2px;font-size:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;">
+          <div style="color:#666;">#${seat.seat_no}</div>
+          <div style="font-weight:600;">${escapeHtml(cls)}</div>
+          <div>${stu?.class_seat_no != null ? `座號${escapeHtml(stu.class_seat_no)} ` : ''}${escapeHtml(stu?.students?.name ?? '')}</div>
+        </div>`;
+      }
+    }
+    gridHtml += `</div>`;
+
     w.document.write(`
       <html><head><title>${escapeHtml(examSessionName)}－${escapeHtml(room.room_name)}</title>
       <style>
-        body{font-family:sans-serif;padding:24px;}
-        h1{font-size:18px;} h2{font-size:14px;color:#666;}
-        table{border-collapse:collapse;width:100%;margin-top:16px;}
-        td,th{border:1px solid #999;padding:6px 10px;font-size:13px;text-align:center;}
+        @page { size: A4; margin: 12mm; }
+        body{font-family:sans-serif;padding:0;font-size:12px;}
+        h1{font-size:16px;margin:0 0 2px;} h2{font-size:12px;color:#666;margin:0 0 8px;font-weight:400;}
+        h3{font-size:13px;margin:14px 0 4px;}
+        table{border-collapse:collapse;width:100%;margin-top:4px;}
+        td,th{border:1px solid #999;padding:3px 6px;font-size:11px;text-align:center;}
+        .page{page-break-inside:avoid;}
       </style></head><body>
-      <h1>${escapeHtml(examSessionName)}</h1>
-      <h2>考場：${escapeHtml(room.room_name)}（座位數 ${room.seat_capacity}）</h2>
-      <table><thead><tr><th>考場座位號</th><th>班級</th><th>原班座號</th><th>學號</th><th>姓名</th><th>簽名</th></tr></thead>
-      <tbody>${rows.replace(/<\/tr>/g, '<td style="width:120px"></td></tr>')}</tbody></table>
+      <div class="page">
+        <h1>${escapeHtml(examSessionName)}</h1>
+        <h2>考場：${escapeHtml(room.room_name)}（座位數 ${room.seat_capacity}）</h2>
+        <h3>座位表</h3>
+        ${gridHtml}
+        <h3>簽到表（依班級、原班座號排序）</h3>
+        <table><thead><tr><th>班級</th><th>原班座號</th><th>學號</th><th>姓名</th><th>簽名</th></tr></thead>
+        <tbody>${bodyRows}</tbody></table>
+      </div>
       </body></html>`);
     w.document.close();
     w.focus();
@@ -1021,8 +1109,16 @@ function RoomDetailModal({
             seatContent={(seatNo) => {
               const seat = seats.find((s) => s.seat_no === seatNo);
               const stu = seat?.exam_seat_students;
-              if (stu?.class_seat_no != null) return `座號${stu.class_seat_no} ${stu.students?.name ?? ''}`;
-              return seat?.class_id ? classLabelMap[seat.class_id] : '';
+              const cls = seat?.class_id ? classLabelMap[seat.class_id] : '';
+              return (
+                <>
+                  <div style={{ fontWeight: 600 }}>{cls}</div>
+                  <div>
+                    {stu?.class_seat_no != null ? `座號${stu.class_seat_no} ` : ''}
+                    {stu?.students?.name ?? ''}
+                  </div>
+                </>
+              );
             }}
           />
           <p style={{ fontSize: 12, color: allSubmitted ? '#2D6A2D' : '#B08968', marginTop: 10 }}>

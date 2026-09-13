@@ -285,6 +285,7 @@ export default function ExamRostersPage() {
                       sessionId={adminSessionId}
                       teacherId={myTeacherId}
                       sessionName={allSessions.find((s) => s.id === adminSessionId)?.name ?? ''}
+                      classLabel={sessionClasses.find((c) => c.id === adminClassId)?.label ?? ''}
                     />
                   )}
                 </>
@@ -327,6 +328,7 @@ export default function ExamRostersPage() {
                     sessionId={sessionId}
                     teacherId={myTeacherId}
                     sessionName={sessions.find((s) => s.id === sessionId)?.name ?? ''}
+                    classLabel={myClasses.find((c) => c.id === classId)?.label ?? ''}
                   />
                 )
               )}
@@ -345,11 +347,13 @@ function ClassRosterEditor({
   sessionId,
   teacherId,
   sessionName,
+  classLabel,
 }: {
   classId: string;
   sessionId: string;
   teacherId: string | null;
   sessionName: string;
+  classLabel: string;
 }) {
   const [roomGroups, setRoomGroups] = useState<{ roomId: string; roomName: string; seats: ExamRoomSeatRow[] }[]>([]);
   const [enrollments, setEnrollments] = useState<EnrollmentRow[]>([]);
@@ -439,21 +443,28 @@ function ClassRosterEditor({
   function handlePrint() {
     const w = window.open('', '_blank');
     if (!w) return;
+    const classLabelValue = classLabel || '本班';
     const rows = roomGroups
       .flatMap((g) => g.seats.map((s) => ({ room: g.roomName, seatNo: s.seat_no, seatNoClass: s.exam_seat_students?.class_seat_no, studentNo: s.exam_seat_students?.student_no })))
+      .sort((a, b) => (a.seatNoClass ?? 0) - (b.seatNoClass ?? 0))
       .map((r) => {
         const name = enrollments.find((e) => e.student_no === r.studentNo)?.name ?? '';
-        return `<tr><td>${escapeHtml(r.room)}</td><td>${r.seatNo}</td><td>${escapeHtml(r.seatNoClass ?? '')}</td><td>${escapeHtml(r.studentNo ?? '')}</td><td>${escapeHtml(
+        return `<tr><td>${escapeHtml(classLabelValue)}</td><td>${escapeHtml(r.seatNoClass ?? '')}</td><td>${escapeHtml(r.studentNo ?? '')}</td><td>${escapeHtml(
           name
-        )}</td></tr>`;
+        )}</td><td>${escapeHtml(r.room)}</td><td></td></tr>`;
       })
       .join('');
     w.document.write(`
       <html><head><title>${escapeHtml(sessionName)}－座位表</title>
-      <style>body{font-family:sans-serif;padding:24px;}table{border-collapse:collapse;width:100%;margin-top:12px;}
-      td,th{border:1px solid #999;padding:6px 10px;font-size:13px;text-align:center;}</style></head><body>
-      <h1 style="font-size:18px;">${escapeHtml(sessionName)}</h1>
-      <table><thead><tr><th>考場</th><th>考場座位號</th><th>原班座號</th><th>學號</th><th>姓名</th></tr></thead>
+      <style>
+        @page { size: A4; margin: 12mm; }
+        body{font-family:sans-serif;padding:0;font-size:12px;}
+        h1{font-size:16px;margin:0 0 10px;}
+        table{border-collapse:collapse;width:100%;margin-top:4px;}
+        td,th{border:1px solid #999;padding:4px 8px;font-size:11px;text-align:center;}
+      </style></head><body>
+      <h1>${escapeHtml(sessionName)}（依原班座號排序）</h1>
+      <table><thead><tr><th>班級</th><th>原班座號</th><th>學號</th><th>姓名</th><th>考場</th><th>簽名</th></tr></thead>
       <tbody>${rows}</tbody></table></body></html>`);
     w.document.close();
     w.focus();
