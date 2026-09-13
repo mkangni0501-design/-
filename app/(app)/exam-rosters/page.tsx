@@ -9,6 +9,7 @@ import {
   listRoomSeats,
   upsertSeatStudent,
   submitClassRoster,
+  bulkSubmitClassRosters,
   listRosterStatus,
   RosterStatus,
   listCurrentEnrollments,
@@ -127,6 +128,30 @@ export default function ExamRostersPage() {
   }, [classId]);
 
   // ---- 管理員／教務視角：選了考試後，列出這次考試涉及的所有班級 ----
+  async function reloadSessionClasses(examSessionId: string, keepSelection?: Set<string>) {
+    setError(null);
+    const { data, error: err } = await supabase
+      .from('exam_class_roster_status')
+      .select('class_id, submitted, classes(grade_level, class_name)')
+      .eq('exam_session_id', examSessionId);
+    if (err) {
+      setError('讀取班級清單失敗：' + err.message);
+      return;
+    }
+    const opts = (data ?? [])
+      .map((r: any) => ({ id: r.class_id, label: `${r.classes?.grade_level ?? ''}${r.classes?.class_name ?? ''}`, submitted: !!r.submitted }))
+      .sort((a: SessionClassOption, b: SessionClassOption) => a.label.localeCompare(b.label));
+    setSessionClasses(opts);
+    if (keepSelection) {
+      // 重新整理後，已經被送出的班級要自動從勾選中移除（不能再對它們動作）
+      setSelectedClassIds(new Set([...keepSelection].filter((id) => opts.find((o) => o.id === id && !o.submitted))));
+    } else {
+      setAdminClassId(opts.length > 0 ? opts[0].id : null);
+      // 預設全選（尚未送出的班級），方便直接一鍵安排所有班級；已送出的班級不預設勾選，避免不小心蓋掉
+      setSelectedClassIds(new Set(opts.filter((c) => !c.submitted).map((c) => c.id)));
+    }
+  }
+
   useEffect(() => {
     if (!adminSessionId) {
       setSessionClasses([]);
@@ -134,24 +159,8 @@ export default function ExamRostersPage() {
       setSelectedClassIds(new Set());
       return;
     }
-    (async () => {
-      setError(null);
-      const { data, error: err } = await supabase
-        .from('exam_class_roster_status')
-        .select('class_id, submitted, classes(grade_level, class_name)')
-        .eq('exam_session_id', adminSessionId);
-      if (err) {
-        setError('讀取班級清單失敗：' + err.message);
-        return;
-      }
-      const opts = (data ?? [])
-        .map((r: any) => ({ id: r.class_id, label: `${r.classes?.grade_level ?? ''}${r.classes?.class_name ?? ''}`, submitted: !!r.submitted }))
-        .sort((a: SessionClassOption, b: SessionClassOption) => a.label.localeCompare(b.label));
-      setSessionClasses(opts);
-      setAdminClassId(opts.length > 0 ? opts[0].id : null);
-      // 預設全選（尚未送出的班級），方便直接一鍵安排所有班級；已送出的班級不預設勾選，避免不小心蓋掉
-      setSelectedClassIds(new Set(opts.filter((c) => !c.submitted).map((c) => c.id)));
-    })();
+    reloadSessionClasses(adminSessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminSessionId]);
 
   const allSelectableChecked = sessionClasses.filter((c) => !c.submitted).length > 0 && sessionClasses.filter((c) => !c.submitted).every((c) => selectedClassIds.has(c.id));
@@ -177,15 +186,32 @@ export default function ExamRostersPage() {
       setError('請至少勾選一個尚未送出的班級');
       return;
     }
-    if (!confirm(`確定要一鍵幫這 ${targets.length} 個班級隨機安排考場座位嗎？已經安排過的座位不會被覆蓋，只會補上還空著的座位。`)) return;
+    if (!confirm(`確定要一鍵幫這 ${targets.length} 個班級隨機安排考場座位並直接送出名單嗎？已經安排過的座位不會被覆蓋，只會補上還空著的座位；全部學生都排到座位的班級會直接送出並鎖定，讓考試分班頁可以列印座位表／簽到表。`))
+      return;
     setError(null);
     setBulkNotice(null);
     setBulkAssigning(true);
     try {
       const results = await bulkRandomAssignClasses(adminSessionId!, targets.map((c) => c.id), myTeacherId);
       const totalAssigned = results.reduce((s, r) => s + r.assigned, 0);
-      setBulkNotice(`已為 ${targets.length} 個班級安排座位，共安排 ${totalAssigned} 位學生（座位已滿或名單已排完的班級可能不會有變動）。`);
+      const fullyAssigned = results.filter((r) => r.remainingUnassigned === 0);
+      const incomplete = results.filter((r) => r.remainingUnassigned > 0);
+      if (fullyAssigned.length > 0) {
+        await bulkSubmitClassRosters(adminSessionId!, fullyAssigned.map((r) => r.classId), myTeacherId);
+      }
+      const labelOf = (classId: string) => sessionClasses.find((c) => c.id === classId)?.label ?? classId;
+      const parts = [`已為 ${targets.length} 個班級安排座位，共安排 ${totalAssigned} 位學生。`];
+      if (fullyAssigned.length > 0) parts.push(`已直接送出並鎖定 ${fullyAssigned.length} 個班級：${fullyAssigned.map((r) => labelOf(r.classId)).join('、')}。`);
+      if (incomplete.length > 0) {
+        parts.push(
+          `以下班級人數比座位多、還有學生沒有座位，未自動送出，請確認後手動處理：${incomplete
+            .map((r) => `${labelOf(r.classId)}（還差${r.remainingUnassigned}人）`)
+            .join('、')}。`
+        );
+      }
+      setBulkNotice(parts.join(' '));
       setRefreshTick((t) => t + 1);
+      await reloadSessionClasses(adminSessionId!, selectedClassIds);
     } catch (e: any) {
       setError(e.message);
     } finally {
