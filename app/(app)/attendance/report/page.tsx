@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
+import { resolveCurrentTerm } from '@/lib/academicTerm';
 import ErrorBanner from '@/components/ErrorBanner';
 
 type ClassOption = { id: string; label: string };
@@ -123,24 +124,95 @@ function AttendanceReportPageInner() {
       }));
       setStudents(rows);
 
-      let query = supabase.from('attendance').select('student_no, status').in('student_no', studentNos.length > 0 ? studentNos : ['__none__']);
+      // 【本輪修正】反映事項「只有少部分學生有資料，例如某生出缺席狀況只有病假2節、
+      // 出席卻是0」——根因跟 attendance/subject-view 頁之前修過的問題完全一樣：
+      // attendance 這張表只有老師「實際點過、跟預設值不同」的節次才會存成一筆紀錄，
+      // 「出席」只是畫面上沒存檔時的預設值，資料庫裡幾乎不會有 status='出席' 的列
+      // （只要老師沒特別把某節從出席改回出席存檔，那一節根本不會有紀錄）。原本這裡
+      // 是直接數「資料庫裡實際有幾列 status='出席'」，全校每個學生的出席數字因此
+      // 幾乎一定是 0，不是只有這一位學生的問題。修法跟 subject-view 一致：不要數
+      // 「資料庫有幾列」，改成先把這個班級「這學期課表」對應的每一次課（依課表的
+      // 星期幾＋第幾節，從學期開學日或所選月份逐日推算到今天為止）都列出來，每一
+      // 位學生每一次都算一格，資料庫有紀錄就用那筆的狀態，沒有紀錄就當作「出席」，
+      // 這樣不管老師有沒有每次都手動存檔，總節數都是「到目前為止實際上了幾次課」。
+      const currentTerm = await resolveCurrentTerm();
+      let termStart: string | null = null;
+      if (currentTerm) {
+        const { data: termRow } = await supabase
+          .from('academic_terms')
+          .select('term_start_date')
+          .eq('academic_year', currentTerm.academic_year)
+          .eq('term', currentTerm.term)
+          .maybeSingle();
+        termStart = termRow?.term_start_date ?? null;
+      }
+      const todayStr = toDateStr(new Date());
+
+      let rangeStart: string | null;
+      let rangeEnd: string;
       if (viewMode === 'month') {
         const [y, m] = monthValue.split('-').map(Number);
-        const startStr = toDateStr(new Date(y, m - 1, 1));
-        const endStr = toDateStr(new Date(y, m, 0));
-        query = query.gte('record_date', startStr).lte('record_date', endStr);
+        rangeStart = toDateStr(new Date(y, m - 1, 1));
+        const monthEnd = toDateStr(new Date(y, m, 0));
+        rangeEnd = monthEnd < todayStr ? monthEnd : todayStr; // 還沒發生的日期不算「已出席」
+      } else {
+        rangeStart = termStart;
+        rangeEnd = todayStr;
       }
-      // viewMode === 'term'：目前資料庫沒有存學期起訖日，這裡採計「目前在學學生」所有已登錄的出缺勤紀錄。
-      const { data: attRows, error: attErr } = await query;
+
+      let scheduleRows: { weekday: number; period_no: number }[] = [];
+      if (currentTerm) {
+        const { data: scheduleData, error: scheduleErr } = await supabase
+          .from('class_schedule')
+          .select('weekday, period_no')
+          .eq('class_id', classId)
+          .eq('academic_year', currentTerm.academic_year)
+          .eq('term', currentTerm.term);
+        if (scheduleErr) {
+          setLoadError('讀取課表失敗：' + scheduleErr.message);
+          setLoading(false);
+          return;
+        }
+        scheduleRows = scheduleData ?? [];
+      }
+
+      const scheduledDates: { dateStr: string; period_no: number }[] = [];
+      if (rangeStart && scheduleRows.length > 0) {
+        const cursor = new Date(`${rangeStart}T00:00:00`);
+        const end = new Date(`${rangeEnd}T00:00:00`);
+        while (cursor <= end) {
+          const weekday = cursor.getDay() || 7; // 0(週日)->7
+          const dateStr = toDateStr(cursor);
+          scheduleRows.forEach((s) => {
+            if (s.weekday === weekday) scheduledDates.push({ dateStr, period_no: s.period_no });
+          });
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      }
+
+      const { data: attRows, error: attErr } = await supabase
+        .from('attendance')
+        .select('student_no, record_date, period_no, status')
+        .in('student_no', studentNos.length > 0 ? studentNos : ['__none__'])
+        .gte('record_date', rangeStart ?? '1900-01-01')
+        .lte('record_date', rangeEnd);
       if (attErr) {
         setLoadError('讀取出缺勤紀錄失敗：' + attErr.message);
         setLoading(false);
         return;
       }
-      const map: Record<string, Record<string, number>> = {};
+      const existingByKey: Record<string, string> = {};
       (attRows ?? []).forEach((r: any) => {
-        map[r.student_no] = map[r.student_no] ?? {};
-        map[r.student_no][r.status] = (map[r.student_no][r.status] ?? 0) + 1;
+        existingByKey[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
+      });
+
+      const map: Record<string, Record<string, number>> = {};
+      rows.forEach((s) => {
+        map[s.student_no] = {};
+        scheduledDates.forEach(({ dateStr, period_no }) => {
+          const status = existingByKey[`${s.student_no}|${dateStr}|${period_no}`] ?? '出席';
+          map[s.student_no][status] = (map[s.student_no][status] ?? 0) + 1;
+        });
       });
       setSummary(map);
       setLoading(false);

@@ -218,8 +218,10 @@ function ExamSessionEditor({
 
   const [syncNotices, setSyncNotices] = useState<string[]>([]);
 
-  // 不擔任考場的班級（下面的考場清單會自動排除）；本地狀態即時反映，並同步寫回資料庫
-  const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set(session.excluded_class_ids ?? []));
+  // 不擔任考場的班級：本地暫存的編輯狀態，勾選完批次按下【儲存】才會真正寫入資料庫、
+  // 觸發下面考場清單的自動排除／同步（避免每勾一個班級就存檔+重新整理一次，很卡）。
+  const [pendingExcludedIds, setPendingExcludedIds] = useState<Set<string>>(new Set(session.excluded_class_ids ?? []));
+  const [savedExcludedIds, setSavedExcludedIds] = useState<Set<string>>(new Set(session.excluded_class_ids ?? []));
   const [savingExcluded, setSavingExcluded] = useState(false);
 
   // 應試班級共用群組：本地暫存的編輯狀態，按下唯一的【儲存應試班級】鍵才會真正寫入資料庫
@@ -236,7 +238,7 @@ function ExamSessionEditor({
   async function reload(excludedOverride?: Set<string>) {
     setLoading(true);
     try {
-      const effectiveExcluded = excludedOverride ?? excludedIds;
+      const effectiveExcluded = excludedOverride ?? savedExcludedIds;
       const classRows = await listClassOptionsWithHeadcount(session.academic_year);
       setClassOptions(classRows);
       // 步驟1：所有班級（扣掉勾選「不擔任考場」的班級）自動設為考場，不用教務處另行手動新增，
@@ -270,17 +272,25 @@ function ExamSessionEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
 
-  async function toggleExcluded(classId: string) {
-    const next = new Set(excludedIds);
+  function toggleExcludedPending(classId: string) {
+    const next = new Set(pendingExcludedIds);
     if (next.has(classId)) next.delete(classId);
     else next.add(classId);
-    setExcludedIds(next);
+    setPendingExcludedIds(next);
+  }
+
+  const excludedDirty =
+    pendingExcludedIds.size !== savedExcludedIds.size || [...pendingExcludedIds].some((id) => !savedExcludedIds.has(id));
+
+  async function handleSaveExcluded() {
     setSavingExcluded(true);
     setError(null);
     try {
-      await setExcludedClasses(session.id, Array.from(next));
-      await reload(next);
+      await setExcludedClasses(session.id, Array.from(pendingExcludedIds));
+      setSavedExcludedIds(new Set(pendingExcludedIds));
+      await reload(pendingExcludedIds);
       onSent(); // 順便刷新上層的考試清單，讓 session.excluded_class_ids 保持同步
+      setNotice('已儲存不擔任考場班級');
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -487,18 +497,10 @@ function ExamSessionEditor({
               {downloadingExcel ? '匯出中…' : '一鍵下載所有考場簽到表／座位表（Excel）'}
             </button>
           )}
-          {session.status !== '已發送' && session.status !== '已完成' && (
-            <button onClick={handleSend} disabled={!allConfirmed} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
-              發送考場表
-            </button>
-          )}
         </div>
       </div>
       {(session.status === '已發送' || session.status === '已完成') && !allRostersSubmitted && (
         <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：所有班級都需完成【完成名單】送出後，才能一鍵下載 Excel。</p>
-      )}
-      {!allConfirmed && session.status === '編排中' && (
-        <p style={{ fontSize: 12, color: '#B08968', marginBottom: 8 }}>提示：所有考場都需完成座位表【確認】後，才能發送考場表。</p>
       )}
 
       {syncNotices.length > 0 && session.status === '編排中' && (
@@ -509,22 +511,23 @@ function ExamSessionEditor({
         </ul>
       )}
 
-      {/* ---- 不擔任考場班級（勾選後，下面的考場清單自動排除該班） ---- */}
+      {/* ---- 不擔任考場班級（批次勾選完，按【儲存】才會套用，下面的考場清單才會自動排除） ---- */}
       {session.status === '編排中' && (
         <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, marginBottom: 6 }}>
-            不擔任考場班級
-            {savingExcluded && <span style={{ fontSize: 12, color: '#999', marginLeft: 8 }}>儲存中…</span>}
-          </div>
-          <p style={{ fontSize: 12, color: '#999', marginBottom: 6 }}>勾選的班級不會被自動建立成考場（教室不方便當考場時使用），但該班學生仍可以被安排到其他班級的考場應試。</p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>不擔任考場班級</div>
+          <p style={{ fontSize: 12, color: '#999', marginBottom: 6 }}>勾選的班級不會被自動建立成考場（教室不方便當考場時使用），但該班學生仍可以被安排到其他班級的考場應試。勾選完按【儲存】後，下面的考場清單才會套用。</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto', marginBottom: 8 }}>
             {classOptions.map((c) => (
               <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
-                <input type="checkbox" checked={excludedIds.has(c.id)} disabled={savingExcluded} onChange={() => toggleExcluded(c.id)} />
+                <input type="checkbox" checked={pendingExcludedIds.has(c.id)} disabled={savingExcluded} onChange={() => toggleExcludedPending(c.id)} />
                 {c.label}（{c.headcount}人）
               </label>
             ))}
           </div>
+          <button onClick={handleSaveExcluded} disabled={savingExcluded || !excludedDirty} style={{ fontSize: 13, padding: '5px 14px', fontWeight: 600 }}>
+            {savingExcluded ? '儲存中…' : '儲存'}
+          </button>
+          {excludedDirty && !savingExcluded && <span style={{ fontSize: 12, color: '#B08968', marginLeft: 8 }}>有尚未儲存的變更</span>}
         </div>
       )}
 
@@ -642,15 +645,19 @@ function ExamSessionEditor({
         </div>
       )}
 
-      {/* ---- 步驟5-6：瀏覽所有考場的梅花座位表，一鍵確認（必要時可先手動微調） ---- */}
+      {/* ---- 步驟5-6：瀏覽所有考場的梅花座位表，一鍵確認（必要時可先手動微調）；全部確認後就近發送考場表 ---- */}
       {session.status === '編排中' && rooms.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <button onClick={() => setAllRoomsReviewOpen(true)} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600 }}>
             瀏覽所有考場座位表並一鍵確認
           </button>
+          <button onClick={handleSend} disabled={!allConfirmed} style={{ fontSize: 13, padding: '6px 16px', fontWeight: 600, marginLeft: 8 }}>
+            發送考場表
+          </button>
           <span style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
             {rooms.filter((r) => r.confirmed).length}/{rooms.length} 個考場已確認
           </span>
+          {!allConfirmed && <p style={{ fontSize: 12, color: '#B08968', marginTop: 6 }}>提示：所有考場都需完成座位表【確認】後，才能發送考場表。</p>}
         </div>
       )}
       {allRoomsReviewOpen && (

@@ -39,6 +39,7 @@ export default function ExamRostersPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
 
   const [isPrivileged, setIsPrivileged] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [allSessions, setAllSessions] = useState<ExamSessionOption[]>([]);
   const [adminSessionId, setAdminSessionId] = useState<string | null>(null);
   const [sessionClasses, setSessionClasses] = useState<SessionClassOption[]>([]);
@@ -63,7 +64,11 @@ export default function ExamRostersPage() {
           privileged = hasDepartment(depts, 'academic');
         }
       }
+      // 【一鍵安排所選班級】開放給所有「代替導師安排」的身分使用：管理員A、系統管理員S、
+      // 以及擁有教務處身分的成員，跟能不能打開「代替導師安排」整個區塊的權限相同。
+      const admin = privileged;
       setIsPrivileged(privileged);
+      setIsAdmin(admin);
 
       const teacherId = await getCurrentTeacherId();
       setMyTeacherId(teacherId);
@@ -248,35 +253,47 @@ export default function ExamRostersPage() {
                     </select>
                   </div>
 
-                  {sessionClasses.length > 0 && (
-                    <div style={{ marginBottom: 12 }}>
-                      <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6, fontWeight: 600 }}>
-                        <input type="checkbox" checked={allSelectableChecked} onChange={toggleSelectAll} />
-                        全選（未送出的班級）
-                      </label>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 4, maxHeight: 200, overflowY: 'auto', border: '1px solid #eee', borderRadius: 6, padding: 8 }}>
-                        {sessionClasses.map((c) => (
-                          <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: c.submitted ? '#999' : '#333' }}>
-                            <input type="checkbox" checked={selectedClassIds.has(c.id)} disabled={c.submitted} onChange={() => toggleOneClass(c.id)} />
-                            <button
-                              onClick={() => setAdminClassId(c.id)}
-                              style={{ fontSize: 12, background: 'none', border: 'none', padding: 0, textDecoration: adminClassId === c.id ? 'underline' : 'none', cursor: 'pointer', color: 'inherit' }}
-                            >
+                  {sessionClasses.length > 0 &&
+                    (isAdmin ? (
+                      <div style={{ marginBottom: 12 }}>
+                        <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6, fontWeight: 600 }}>
+                          <input type="checkbox" checked={allSelectableChecked} onChange={toggleSelectAll} />
+                          全選（未送出的班級）
+                        </label>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 4, maxHeight: 200, overflowY: 'auto', border: '1px solid #eee', borderRadius: 6, padding: 8 }}>
+                          {sessionClasses.map((c) => (
+                            <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: c.submitted ? '#999' : '#333' }}>
+                              <input type="checkbox" checked={selectedClassIds.has(c.id)} disabled={c.submitted} onChange={() => toggleOneClass(c.id)} />
+                              <button
+                                onClick={() => setAdminClassId(c.id)}
+                                style={{ fontSize: 12, background: 'none', border: 'none', padding: 0, textDecoration: adminClassId === c.id ? 'underline' : 'none', cursor: 'pointer', color: 'inherit' }}
+                              >
+                                {c.label}
+                                {c.submitted ? '（已送出）' : ''}
+                              </button>
+                            </label>
+                          ))}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                          <button onClick={handleBulkAssign} disabled={bulkAssigning} style={{ fontSize: 13, padding: '5px 14px', fontWeight: 600 }}>
+                            {bulkAssigning ? '安排中…' : `一鍵安排所選班級（${selectedClassIds.size}）`}
+                          </button>
+                          <span style={{ fontSize: 11, color: '#999' }}>點班級名稱可以在下面打開該班詳細畫面逐一調整。</span>
+                        </div>
+                        {bulkNotice && <p style={{ fontSize: 12, color: '#2D6A2D', marginTop: 6 }}>{bulkNotice}</p>}
+                      </div>
+                    ) : (
+                      <div style={{ marginBottom: 12 }}>
+                        <select value={adminClassId ?? ''} onChange={(e) => setAdminClassId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
+                          {sessionClasses.map((c) => (
+                            <option key={c.id} value={c.id}>
                               {c.label}
                               {c.submitted ? '（已送出）' : ''}
-                            </button>
-                          </label>
-                        ))}
+                            </option>
+                          ))}
+                        </select>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                        <button onClick={handleBulkAssign} disabled={bulkAssigning} style={{ fontSize: 13, padding: '5px 14px', fontWeight: 600 }}>
-                          {bulkAssigning ? '安排中…' : `一鍵安排所選班級（${selectedClassIds.size}）`}
-                        </button>
-                        <span style={{ fontSize: 11, color: '#999' }}>點班級名稱可以在下面打開該班詳細畫面逐一調整。</span>
-                      </div>
-                      {bulkNotice && <p style={{ fontSize: 12, color: '#2D6A2D', marginTop: 6 }}>{bulkNotice}</p>}
-                    </div>
-                  )}
+                    ))}
 
                   {adminSessionId && adminClassId && (
                     <ClassRosterEditor
@@ -405,12 +422,30 @@ function ClassRosterEditor({
 
   const unassigned = enrollments.filter((e) => !assignedStudentNos.has(e.student_no));
 
+  // 【本輪修正】反映事項「導師安排學生考場座位號時，每完成一個都要等待許久」——
+  // 根因：每選一格座位，前面的寫法都會呼叫整個 reload()，等於重新抓一次「這次考試
+  // 所有考場的座位」（一個座位一次網路請求）＋重新抓一次全班名冊（含分批查學籍狀態）
+  // ＋重新抓一次送出狀態，一格就要等好幾次網路來回全部跑完，多排幾個學生就會累加
+  // 得很明顯。改成不用整個重新抓，直接把這一格的結果反映回本地狀態（我們剛剛才把它
+  // 寫進資料庫，內容已經知道，不需要再讀一次回來確認）。
   async function assignSeat(examRoomSeatId: string, studentNo: string | null) {
     setError(null);
     const student = enrollments.find((e) => e.student_no === studentNo) ?? null;
     try {
       await upsertSeatStudent(examRoomSeatId, studentNo, student?.seat_no ?? null, teacherId);
-      await reload();
+      setRoomGroups((prev) =>
+        prev.map((g) => ({
+          ...g,
+          seats: g.seats.map((s) =>
+            s.id === examRoomSeatId
+              ? {
+                  ...s,
+                  exam_seat_students: studentNo ? { student_no: studentNo, class_seat_no: student?.seat_no ?? null, students: { name: student?.name ?? '' } } : null,
+                }
+              : s
+          ),
+        }))
+      );
     } catch (e: any) {
       setError(e.message);
     }
