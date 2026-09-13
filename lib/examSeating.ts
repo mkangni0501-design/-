@@ -706,13 +706,15 @@ export async function upsertSeatStudent(examRoomSeatId: string, studentNo: strin
   if (error) throw new Error('儲存座位名單失敗：' + error.message);
 }
 
-export type BulkAssignResult = { classId: string; assigned: number; totalSeats: number };
+export type BulkAssignResult = { classId: string; assigned: number; totalSeats: number; remainingUnassigned: number };
 
 /**
  * 一鍵幫多個班級把「尚未安排」的學生隨機分配到「還空著」的考場座位（管理員／教務處代排用）。
  * 這次考試的所有考場座位只抓一次、在記憶體裡依 class_id 分組給各班用，
  * 不會每個班各自重複抓一次全部考場的座位（班級數一多會非常慢），寫入則整批平行送出。
  * 只會處理呼叫端傳進來的 classIds——已經送出鎖定的班級請呼叫端自行先排除，避免誤蓋已經確認的名單。
+ * 回傳的 remainingUnassigned 是「這次安排完之後還有幾位學生沒有座位」，呼叫端可以用這個
+ * 判斷是不是整班都排滿了、能不能直接送出名單。
  */
 export async function bulkRandomAssignClasses(examSessionId: string, classIds: string[], teacherId: string | null): Promise<BulkAssignResult[]> {
   const rooms = await listExamRooms(examSessionId);
@@ -723,14 +725,16 @@ export async function bulkRandomAssignClasses(examSessionId: string, classIds: s
     classIds.map(async (classId): Promise<BulkAssignResult> => {
       const mySeats = allSeats.filter((s) => s.class_id === classId);
       const emptySeats = mySeats.filter((s) => !s.exam_seat_students?.student_no);
-      if (emptySeats.length === 0) return { classId, assigned: 0, totalSeats: mySeats.length };
       const enrollments = await listCurrentEnrollments(classId);
       const assignedStudentNos = new Set(mySeats.map((s) => s.exam_seat_students?.student_no).filter((x): x is string => !!x));
       const unassigned = enrollments.filter((e) => !assignedStudentNos.has(e.student_no));
+      if (emptySeats.length === 0) {
+        return { classId, assigned: 0, totalSeats: mySeats.length, remainingUnassigned: unassigned.length };
+      }
       const shuffled = [...unassigned].sort(() => Math.random() - 0.5);
       const n = Math.min(emptySeats.length, shuffled.length);
       await Promise.all(Array.from({ length: n }).map((_, i) => upsertSeatStudent(emptySeats[i].id, shuffled[i].student_no, shuffled[i].seat_no, teacherId)));
-      return { classId, assigned: n, totalSeats: mySeats.length };
+      return { classId, assigned: n, totalSeats: mySeats.length, remainingUnassigned: unassigned.length - n };
     })
   );
 }
@@ -748,6 +752,11 @@ export async function submitClassRoster(examSessionId: string, classId: string, 
     .eq('exam_session_id', examSessionId)
     .eq('class_id', classId);
   if (error) throw new Error('送出名單失敗：' + error.message);
+}
+
+/** 一次送出多個班級的名單（平行處理），配合一鍵安排後直接送出，讓考試分班頁可以列印座位表／簽到表 */
+export async function bulkSubmitClassRosters(examSessionId: string, classIds: string[], teacherId: string | null) {
+  await Promise.all(classIds.map((classId) => submitClassRoster(examSessionId, classId, teacherId)));
 }
 
 export type RosterStatus = { exam_session_id: string; class_id: string; submitted: boolean; submitted_at: string | null };
