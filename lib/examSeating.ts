@@ -706,6 +706,41 @@ export async function upsertSeatStudent(examRoomSeatId: string, studentNo: strin
   if (error) throw new Error('儲存座位名單失敗：' + error.message);
 }
 
+export type BulkAssignResult = { classId: string; assigned: number; totalSeats: number };
+
+/**
+ * 一鍵幫多個班級把「尚未安排」的學生隨機分配到「還空著」的考場座位（管理員／教務處代排用）。
+ * 這次考試的所有考場座位只抓一次、在記憶體裡依 class_id 分組給各班用，
+ * 不會每個班各自重複抓一次全部考場的座位（班級數一多會非常慢），寫入則整批平行送出。
+ * 只會處理呼叫端傳進來的 classIds——已經送出鎖定的班級請呼叫端自行先排除，避免誤蓋已經確認的名單。
+ */
+export async function bulkRandomAssignClasses(examSessionId: string, classIds: string[], teacherId: string | null): Promise<BulkAssignResult[]> {
+  const rooms = await listExamRooms(examSessionId);
+  const seatsByRoom = await Promise.all(rooms.map((r) => listRoomSeats(r.id)));
+  const allSeats = seatsByRoom.flat();
+
+  return Promise.all(
+    classIds.map(async (classId): Promise<BulkAssignResult> => {
+      const mySeats = allSeats.filter((s) => s.class_id === classId);
+      const emptySeats = mySeats.filter((s) => !s.exam_seat_students?.student_no);
+      if (emptySeats.length === 0) return { classId, assigned: 0, totalSeats: mySeats.length };
+      const enrollments = await listCurrentEnrollments(classId);
+      const assignedStudentNos = new Set(mySeats.map((s) => s.exam_seat_students?.student_no).filter((x): x is string => !!x));
+      const unassigned = enrollments.filter((e) => !assignedStudentNos.has(e.student_no));
+      const shuffled = [...unassigned].sort(() => Math.random() - 0.5);
+      const n = Math.min(emptySeats.length, shuffled.length);
+      await Promise.all(Array.from({ length: n }).map((_, i) => upsertSeatStudent(emptySeats[i].id, shuffled[i].student_no, shuffled[i].seat_no, teacherId)));
+      return { classId, assigned: n, totalSeats: mySeats.length };
+    })
+  );
+}
+
+/** 單一班級版本（方便單班「隨機分配」按鈕直接呼叫，邏輯共用同一套） */
+export async function randomAssignClass(examSessionId: string, classId: string, teacherId: string | null): Promise<BulkAssignResult> {
+  const [result] = await bulkRandomAssignClasses(examSessionId, [classId], teacherId);
+  return result;
+}
+
 export async function submitClassRoster(examSessionId: string, classId: string, teacherId: string | null) {
   const { error } = await supabase
     .from('exam_class_roster_status')
