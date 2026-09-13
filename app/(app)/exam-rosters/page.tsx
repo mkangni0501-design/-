@@ -14,6 +14,8 @@ import {
   listCurrentEnrollments,
   EnrollmentRow,
   escapeHtml,
+  bulkRandomAssignClasses,
+  randomAssignClass,
 } from '@/lib/examSeating';
 
 // ============================================================
@@ -40,6 +42,10 @@ export default function ExamRostersPage() {
   const [adminSessionId, setAdminSessionId] = useState<string | null>(null);
   const [sessionClasses, setSessionClasses] = useState<SessionClassOption[]>([]);
   const [adminClassId, setAdminClassId] = useState<string | null>(null);
+  const [selectedClassIds, setSelectedClassIds] = useState<Set<string>>(new Set());
+  const [bulkAssigning, setBulkAssigning] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -125,6 +131,7 @@ export default function ExamRostersPage() {
     if (!adminSessionId) {
       setSessionClasses([]);
       setAdminClassId(null);
+      setSelectedClassIds(new Set());
       return;
     }
     (async () => {
@@ -142,8 +149,49 @@ export default function ExamRostersPage() {
         .sort((a: SessionClassOption, b: SessionClassOption) => a.label.localeCompare(b.label));
       setSessionClasses(opts);
       setAdminClassId(opts.length > 0 ? opts[0].id : null);
+      // 預設全選（尚未送出的班級），方便直接一鍵安排所有班級；已送出的班級不預設勾選，避免不小心蓋掉
+      setSelectedClassIds(new Set(opts.filter((c) => !c.submitted).map((c) => c.id)));
     })();
   }, [adminSessionId]);
+
+  const allSelectableChecked = sessionClasses.filter((c) => !c.submitted).length > 0 && sessionClasses.filter((c) => !c.submitted).every((c) => selectedClassIds.has(c.id));
+
+  function toggleSelectAll() {
+    if (allSelectableChecked) {
+      setSelectedClassIds(new Set());
+    } else {
+      setSelectedClassIds(new Set(sessionClasses.filter((c) => !c.submitted).map((c) => c.id)));
+    }
+  }
+
+  function toggleOneClass(classId: string) {
+    const next = new Set(selectedClassIds);
+    if (next.has(classId)) next.delete(classId);
+    else next.add(classId);
+    setSelectedClassIds(next);
+  }
+
+  async function handleBulkAssign() {
+    const targets = sessionClasses.filter((c) => selectedClassIds.has(c.id) && !c.submitted);
+    if (targets.length === 0) {
+      setError('請至少勾選一個尚未送出的班級');
+      return;
+    }
+    if (!confirm(`確定要一鍵幫這 ${targets.length} 個班級隨機安排考場座位嗎？已經安排過的座位不會被覆蓋，只會補上還空著的座位。`)) return;
+    setError(null);
+    setBulkNotice(null);
+    setBulkAssigning(true);
+    try {
+      const results = await bulkRandomAssignClasses(adminSessionId!, targets.map((c) => c.id), myTeacherId);
+      const totalAssigned = results.reduce((s, r) => s + r.assigned, 0);
+      setBulkNotice(`已為 ${targets.length} 個班級安排座位，共安排 ${totalAssigned} 位學生（座位已滿或名單已排完的班級可能不會有變動）。`);
+      setRefreshTick((t) => t + 1);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBulkAssigning(false);
+    }
+  }
 
   return (
     <main style={{ maxWidth: 900, margin: '0 auto', padding: 24 }}>
@@ -164,7 +212,7 @@ export default function ExamRostersPage() {
                 <p style={{ fontSize: 13, color: '#999' }}>目前沒有已發送的考場表。</p>
               ) : (
                 <>
-                  <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
                     <select value={adminSessionId ?? ''} onChange={(e) => setAdminSessionId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
                       {allSessions.map((s) => (
                         <option key={s.id} value={s.id}>
@@ -172,20 +220,41 @@ export default function ExamRostersPage() {
                         </option>
                       ))}
                     </select>
-                    {sessionClasses.length > 0 && (
-                      <select value={adminClassId ?? ''} onChange={(e) => setAdminClassId(e.target.value)} style={{ fontSize: 13, padding: '4px 8px' }}>
-                        {sessionClasses.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.label}
-                            {c.submitted ? '（已送出）' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    )}
                   </div>
+
+                  {sessionClasses.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6, fontWeight: 600 }}>
+                        <input type="checkbox" checked={allSelectableChecked} onChange={toggleSelectAll} />
+                        全選（未送出的班級）
+                      </label>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 4, maxHeight: 200, overflowY: 'auto', border: '1px solid #eee', borderRadius: 6, padding: 8 }}>
+                        {sessionClasses.map((c) => (
+                          <label key={c.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: c.submitted ? '#999' : '#333' }}>
+                            <input type="checkbox" checked={selectedClassIds.has(c.id)} disabled={c.submitted} onChange={() => toggleOneClass(c.id)} />
+                            <button
+                              onClick={() => setAdminClassId(c.id)}
+                              style={{ fontSize: 12, background: 'none', border: 'none', padding: 0, textDecoration: adminClassId === c.id ? 'underline' : 'none', cursor: 'pointer', color: 'inherit' }}
+                            >
+                              {c.label}
+                              {c.submitted ? '（已送出）' : ''}
+                            </button>
+                          </label>
+                        ))}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                        <button onClick={handleBulkAssign} disabled={bulkAssigning} style={{ fontSize: 13, padding: '5px 14px', fontWeight: 600 }}>
+                          {bulkAssigning ? '安排中…' : `一鍵安排所選班級（${selectedClassIds.size}）`}
+                        </button>
+                        <span style={{ fontSize: 11, color: '#999' }}>點班級名稱可以在下面打開該班詳細畫面逐一調整。</span>
+                      </div>
+                      {bulkNotice && <p style={{ fontSize: 12, color: '#2D6A2D', marginTop: 6 }}>{bulkNotice}</p>}
+                    </div>
+                  )}
+
                   {adminSessionId && adminClassId && (
                     <ClassRosterEditor
-                      key={`${adminSessionId}-${adminClassId}`}
+                      key={`${adminSessionId}-${adminClassId}-${refreshTick}`}
                       classId={adminClassId}
                       sessionId={adminSessionId}
                       teacherId={myTeacherId}
@@ -320,14 +389,8 @@ function ClassRosterEditor({
   async function randomAssign() {
     setError(null);
     try {
-      const emptySeatIds: string[] = [];
-      for (const g of roomGroups) for (const s of g.seats) if (!s.exam_seat_students?.student_no) emptySeatIds.push(s.id);
-      const shuffled = [...unassigned].sort(() => Math.random() - 0.5);
-      const n = Math.min(emptySeatIds.length, shuffled.length);
-      await Promise.all(
-        Array.from({ length: n }).map((_, i) => upsertSeatStudent(emptySeatIds[i], shuffled[i].student_no, shuffled[i].seat_no, teacherId))
-      );
-      setNotice('已隨機分配');
+      const result = await randomAssignClass(sessionId, classId, teacherId);
+      setNotice(`已隨機分配 ${result.assigned} 位學生`);
       await reload();
     } catch (e: any) {
       setError(e.message);
