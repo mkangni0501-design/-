@@ -244,7 +244,7 @@ function ExamSessionEditor({
       // 步驟1：所有班級（扣掉勾選「不擔任考場」的班級）自動設為考場，不用教務處另行手動新增，
       // 也會自動把還沒確認的考場座位數同步成班級目前的真實人數。
       if (session.status === '編排中') {
-        const sync = await autoSyncRoomsForSession(session.id, session.academic_year, Array.from(effectiveExcluded));
+        const sync = await autoSyncRoomsForSession(session.id, session.academic_year, Array.from(effectiveExcluded), classRows);
         const msgs: string[] = [];
         if (sync.skippedEmpty.length > 0) msgs.push(`${sync.skippedEmpty.join('、')} 目前沒有在校學生，未建立考場`);
         if (sync.skippedTooBig.length > 0) msgs.push(`${sync.skippedTooBig.join('、')} 人數超過49人，超出單一考場座位上限，未自動建立考場`);

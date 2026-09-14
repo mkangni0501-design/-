@@ -5,6 +5,8 @@ import { useSearchParams } from 'next/navigation';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { resolveCurrentTerm } from '@/lib/academicTerm';
+import { getEffectivePeriodCount } from '@/lib/periodConfig';
+import { departmentForGrade } from '@/lib/gradeMapping';
 import ErrorBanner from '@/components/ErrorBanner';
 
 type ClassOption = { id: string; label: string };
@@ -131,10 +133,20 @@ function AttendanceReportPageInner() {
       // （只要老師沒特別把某節從出席改回出席存檔，那一節根本不會有紀錄）。原本這裡
       // 是直接數「資料庫裡實際有幾列 status='出席'」，全校每個學生的出席數字因此
       // 幾乎一定是 0，不是只有這一位學生的問題。修法跟 subject-view 一致：不要數
-      // 「資料庫有幾列」，改成先把這個班級「這學期課表」對應的每一次課（依課表的
-      // 星期幾＋第幾節，從學期開學日或所選月份逐日推算到今天為止）都列出來，每一
-      // 位學生每一次都算一格，資料庫有紀錄就用那筆的狀態，沒有紀錄就當作「出席」，
-      // 這樣不管老師有沒有每次都手動存檔，總節數都是「到目前為止實際上了幾次課」。
+      // 「資料庫有幾列」，改成先把這個班級「到目前為止總共應該上了幾節課」都列出來，
+      // 每一位學生每一節都算一格，資料庫有紀錄就用那筆的狀態，沒有紀錄就當作「出席」。
+      //
+      // 【本輪再次修正】上一輪的做法是用 class_schedule（課表排的科目節次）決定「有哪些
+      // 節次」，這裡有漏洞：class_schedule 只包含「排了科目老師」的節次，像早自習、午休、
+      // 班會、彈性課程這類沒有排科目老師、但導師登錄出缺勤頁面（attendance/weekly、
+      // attendance/mobile）仍然會照樣開放輸入的節次，並不在 class_schedule 裡；這些節次
+      // 即使資料庫裡有曠課/遲到/病假/事假/公假的紀錄，因為不在 class_schedule 枚舉出來的
+      // 「有課節次」清單裡，就會被整段跳過、完全不會被算進任何欄位——不只出席被低估，
+      // 曠課/遲到/病假/事假/公假這些例外紀錄也會一起被漏算，全校都受影響。
+      // 真正決定「這一天總共有幾節」的資料來源，是導師登錄頁本來就在用的
+      // getEffectivePeriodCount()（依「班級>部別>全校」找 period_config 設定的堂數），
+      // 不是 class_schedule；這裡改成跟登錄頁一樣的依據，才能涵蓋所有真正開放登錄出缺勤
+      // 的節次，不會漏算。
       const currentTerm = await resolveCurrentTerm();
       let termStart: string | null = null;
       if (currentTerm) {
@@ -160,32 +172,26 @@ function AttendanceReportPageInner() {
         rangeEnd = todayStr;
       }
 
-      let scheduleRows: { weekday: number; period_no: number }[] = [];
-      if (currentTerm) {
-        const { data: scheduleData, error: scheduleErr } = await supabase
-          .from('class_schedule')
-          .select('weekday, period_no')
-          .eq('class_id', classId)
-          .eq('academic_year', currentTerm.academic_year)
-          .eq('term', currentTerm.term);
-        if (scheduleErr) {
-          setLoadError('讀取課表失敗：' + scheduleErr.message);
-          setLoading(false);
-          return;
-        }
-        scheduleRows = scheduleData ?? [];
-      }
+      const { data: classRow } = await supabase.from('classes').select('grade_level').eq('id', classId).maybeSingle();
+      const department = departmentForGrade(classRow?.grade_level ?? '');
+      // period_config 每個星期幾的堂數是固定的（不會因為日期不同而變），所以只需要各查一次
+      // （最多6個星期幾），不用每一天都各查一次，避免整學期範圍要查上百次。
+      const periodCountsByWeekday: Record<number, number> = {};
+      await Promise.all(
+        [1, 2, 3, 4, 5, 6].map(async (wd) => {
+          periodCountsByWeekday[wd] = await getEffectivePeriodCount(wd, department, classId);
+        })
+      );
 
       const scheduledDates: { dateStr: string; period_no: number }[] = [];
-      if (rangeStart && scheduleRows.length > 0) {
+      if (rangeStart) {
         const cursor = new Date(`${rangeStart}T00:00:00`);
         const end = new Date(`${rangeEnd}T00:00:00`);
         while (cursor <= end) {
-          const weekday = cursor.getDay() || 7; // 0(週日)->7
+          const weekday = cursor.getDay() || 7; // 0(週日)->7；period_config 只設定1~6，週日一律視為0節
           const dateStr = toDateStr(cursor);
-          scheduleRows.forEach((s) => {
-            if (s.weekday === weekday) scheduledDates.push({ dateStr, period_no: s.period_no });
-          });
+          const count = periodCountsByWeekday[weekday] ?? 0;
+          for (let p = 1; p <= count; p++) scheduledDates.push({ dateStr, period_no: p });
           cursor.setDate(cursor.getDate() + 1);
         }
       }
