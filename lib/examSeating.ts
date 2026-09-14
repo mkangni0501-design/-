@@ -69,17 +69,16 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-/** 分批（.in 條件）＋分頁（單批筆數）抓取所有符合條件的資料列，兩種截斷風險一次處理 */
+/** 分批（.in 條件）＋分頁（單批筆數）抓取所有符合條件的資料列，兩種截斷風險一次處理。
+ * 各批次彼此獨立（不同的 id 清單），改成平行送出而不是一批批排隊等，
+ * 全校規模（1000～1300+人、要分好幾批）時會快很多。 */
 async function fetchAllRowsChunked<T>(
   ids: string[],
   build: (idsChunk: string[], from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
 ): Promise<T[]> {
-  const all: T[] = [];
-  for (const idsChunk of chunkArray(ids, IN_FILTER_CHUNK_SIZE)) {
-    const rows = await fetchAllRows<T>((from, to) => build(idsChunk, from, to));
-    all.push(...rows);
-  }
-  return all;
+  const chunks = chunkArray(ids, IN_FILTER_CHUNK_SIZE);
+  const results = await Promise.all(chunks.map((idsChunk) => fetchAllRows<T>((from, to) => build(idsChunk, from, to))));
+  return results.flat();
 }
 
 /** 依座位數換算方形邊長（最大7），供新增考場時使用 */
@@ -172,9 +171,26 @@ export type RoomSyncResult = {
  * - 已經【確認】座位表的考場，因為座位已經排定，不會自動改動座位數，只會回報「人數不合」讓教務處自行確認要不要重新排。
  * - 被勾選「不擔任考場」的班級，如果考場還沒確認，會自動移除該考場（並清掉它在其他考場應試班級名單裡的紀錄）；已確認的話只會回報，不會自動刪除。
  * 人數為0（沒有在校學生）或超過49人（超出方形座位7*7上限）的班級不會自動建立考場，回傳名單供畫面提示。
+ *
+ * 【本輪修正】反映事項「不擔任考場班級功能很慢」——根因有兩個：
+ * 1. 呼叫端（畫面的 reload()）通常剛好才呼叫過一次 listClassOptionsWithHeadcount()
+ *    （抓全校人數的重查詢，全校規模時本身就要好幾批），這裡又不管三七二十一重抓一次，
+ *    等於同一個很貴的查詢做兩遍。改成可以由呼叫端把已經抓好的結果直接傳進來（precomputedClassOptions），
+ *    有傳就不再重抓。
+ * 2. 每個要新增/更新/刪除考場的班級，原本是一個一個 for 迴圈排隊等 await，班級一多
+ *    （例如剛好很多班座位數需要校正）就會像骨牌一樣越排越久。改成收集好每個班要做的
+ *    動作後，一次用 Promise.all 平行送出。
  */
-export async function autoSyncRoomsForSession(examSessionId: string, academicYear: number, excludedClassIds: string[] = []): Promise<RoomSyncResult> {
-  const [existingRooms, classOptions] = await Promise.all([listExamRooms(examSessionId), listClassOptionsWithHeadcount(academicYear)]);
+export async function autoSyncRoomsForSession(
+  examSessionId: string,
+  academicYear: number,
+  excludedClassIds: string[] = [],
+  precomputedClassOptions?: ClassOption[]
+): Promise<RoomSyncResult> {
+  const [existingRooms, classOptions] = await Promise.all([
+    listExamRooms(examSessionId),
+    precomputedClassOptions ?? listClassOptionsWithHeadcount(academicYear),
+  ]);
   const excludedSet = new Set(excludedClassIds);
   const existingByName = new Map(existingRooms.map((r) => [r.room_name, r]));
 
@@ -184,6 +200,7 @@ export async function autoSyncRoomsForSession(examSessionId: string, academicYea
   const updatedCapacities: { label: string; oldCapacity: number; newCapacity: number }[] = [];
   const confirmedMismatches: { label: string; roomCapacity: number; currentHeadcount: number }[] = [];
   const toCreate: { exam_session_id: string; room_name: string; seat_capacity: number; grid_size: number }[] = [];
+  const tasks: Promise<void>[] = [];
 
   for (const c of classOptions) {
     const existing = existingByName.get(c.label);
@@ -191,9 +208,13 @@ export async function autoSyncRoomsForSession(examSessionId: string, academicYea
     if (excludedSet.has(c.id)) {
       if (existing) {
         if (!existing.confirmed) {
-          await supabase.from('exam_room_classes').delete().eq('class_id', c.id); // 清掉這個班在（可能共用的）其他考場應試班級名單裡的紀錄
-          await supabase.from('exam_rooms').delete().eq('id', existing.id);
           removedExcluded.push(c.label);
+          tasks.push(
+            (async () => {
+              await supabase.from('exam_room_classes').delete().eq('class_id', c.id); // 清掉這個班在（可能共用的）其他考場應試班級名單裡的紀錄
+              await supabase.from('exam_rooms').delete().eq('id', existing.id);
+            })()
+          );
         } else {
           confirmedMismatches.push({ label: c.label, roomCapacity: existing.seat_capacity, currentHeadcount: c.headcount });
         }
@@ -216,20 +237,30 @@ export async function autoSyncRoomsForSession(examSessionId: string, academicYea
       if (existing.confirmed) {
         confirmedMismatches.push({ label: c.label, roomCapacity: existing.seat_capacity, currentHeadcount: c.headcount });
       } else if (c.headcount > 0 && c.headcount <= MAX_SEATS_PER_ROOM) {
-        const { error } = await supabase
-          .from('exam_rooms')
-          .update({ seat_capacity: c.headcount, grid_size: gridSizeForCapacity(c.headcount) })
-          .eq('id', existing.id);
-        if (error) throw new Error('更新考場座位數失敗：' + error.message);
         updatedCapacities.push({ label: c.label, oldCapacity: existing.seat_capacity, newCapacity: c.headcount });
+        tasks.push(
+          (async () => {
+            const { error } = await supabase
+              .from('exam_rooms')
+              .update({ seat_capacity: c.headcount, grid_size: gridSizeForCapacity(c.headcount) })
+              .eq('id', existing.id);
+            if (error) throw new Error('更新考場座位數失敗：' + error.message);
+          })()
+        );
       }
     }
   }
 
   if (toCreate.length > 0) {
-    const { error } = await supabase.from('exam_rooms').insert(toCreate);
-    if (error) throw new Error('自動建立考場失敗：' + error.message);
+    tasks.push(
+      (async () => {
+        const { error } = await supabase.from('exam_rooms').insert(toCreate);
+        if (error) throw new Error('自動建立考場失敗：' + error.message);
+      })()
+    );
   }
+
+  await Promise.all(tasks);
 
   return { createdCount: toCreate.length, skippedTooBig, skippedEmpty, removedExcluded, updatedCapacities, confirmedMismatches };
 }
@@ -246,11 +277,14 @@ export async function listCurrentEnrollments(classId: string): Promise<Enrollmen
       .select('id, student_no, seat_no, students(name)')
       .eq('class_id', classId)
       .eq('is_current', true)
-      .order('id')
+      .order('id') // 分頁用的穩定排序依據（見 fetchAllRows 的說明），實際顯示順序在下面依座號另外排好
       .range(from, to)
   );
   const hiddenStudentNos = await findHiddenStudentNos(rows.map((r) => r.student_no));
-  return rows.filter((r) => !hiddenStudentNos.has(r.student_no)).map((r) => ({ student_no: r.student_no, seat_no: r.seat_no, name: r.students?.name ?? '' }));
+  return rows
+    .filter((r) => !hiddenStudentNos.has(r.student_no))
+    .map((r) => ({ student_no: r.student_no, seat_no: r.seat_no, name: r.students?.name ?? '' }))
+    .sort((a, b) => (a.seat_no ?? 0) - (b.seat_no ?? 0)); // 【本輪修正】依座號排序，之前用 id（UUID）分頁排序，畫面上看起來像亂序
 }
 
 /** 給一批學號，回傳其中「目前學籍狀態已離校」（休學/轉學/退學/畢業/肄業）的學號集合 */
