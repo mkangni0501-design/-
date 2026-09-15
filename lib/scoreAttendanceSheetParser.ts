@@ -126,44 +126,45 @@ function resolveTextDateYear(month: number, academicYear: number, lastMonth: num
 
 export async function findAttendanceDateColumns(rowsRaw: any[][], academicYear?: number) {
   const dateRow = rowsRaw[4] ?? []; // 第5列(index4)：日期
-  // 【本輪新增】反映事項「每天的節數要符合該班級課表設定節數」：下載範本那一側
-  // 現在每一天的堂數會依課表設定不同（不再固定5節），這裡改成從第6列(index5)
-  // 「第1節/第2節/...」的節次標題往右數，數到不是「第N節」格式或空白為止，
-  // 藉此還原出這個日期實際佔了幾欄，供呼叫端用 `dc.colIndex` 到
-  // `dc.colIndex + dc.periodCount - 1` 讀取這一天的所有節次，取代原本寫死
-  // `period <= 5` 的迴圈。
+  // 【本輪修正，根因已找到並驗證】反映事項「批次上傳全校出缺席表，大量學生資料
+  // 消失或跑到錯的日期／節次」——原本這裡是「從某一天的第一欄開始，只要儲存格
+  // 文字符合『第N節』格式就一直往右數」，但「第1節、第2節…」這幾個字每一天都
+  // 會重複出現、兩天之間完全沒有空白欄位隔開，導致數到「下一天、下下天……」的
+  // 節次標題也照樣符合，完全不會停。實測樣本檔案，學期第一天算出來的節數不是
+  // 正確的 2 節，而是把後面幾乎整學期的欄位（270欄）都當成同一天！這造成後面
+  // 每一天各自重新掃一次、範圍互相大幅重疊，同一個儲存格會被重複讀取成幾十、
+  // 上百種不同的（錯誤日期、離譜節次編號）組合寫進資料庫——資料量暴增數十倍
+  // （一個班從應有的九千多筆暴增到數十萬筆），批次上傳很容易半途逾時或中斷，
+  // 中斷點前後哪些學生的正確資料還沒寫進去就變成隨機的，這正是「有人全對、
+  // 有人全錯、有人部分對」這種看似沒規律的資料消失現象的根因。
+  //
+  // 【修法】節數的計算範圍不能無限期一直數下去，必須在「遇到下一個真正的日期
+  // 欄位」就停止：先用同一個 dateRow 找出所有日期欄位各自的起始位置，再用
+  // 「下一個日期欄位的起始位置 - 這個日期欄位的起始位置」當作這一天的節數上限，
+  // 只有最後一個日期（沒有下一個可以當邊界）才退回原本「往右數，數到不是
+  // 『第N節』格式或空白為止」的算法（並保留 || 5 的保底值，避免舊版檔案完全
+  // 讀不到節次標題時整批失敗）。
   const periodHeaderRow = rowsRaw[5] ?? [];
   const PERIOD_HEADER_RE = /^第\d+節$/;
-  const columns: { colIndex: number; date: Date; periodCount: number }[] = [];
   const numericCodes = dateRow.some((v, idx) => idx >= 3 && typeof v === 'number' && v > 40000);
   const XLSX = numericCodes ? await loadXLSX() : null;
   let lastMonth: number | null = null;
   let yearOffset = 0;
-  const countPeriodsAt = (colIndex: number) => {
-    let count = 0;
-    while (
-      periodHeaderRow[colIndex + count] != null &&
-      PERIOD_HEADER_RE.test(String(periodHeaderRow[colIndex + count]).trim())
-    ) {
-      count++;
-    }
-    return count || 5; // 讀不到節次標題（例如舊版檔案）時退回原本固定5節的行為
-  };
+
+  // 第一步：只負責「這一欄是不是日期欄位、對應到哪一天」，不在這裡算節數。
+  const dateStarts: { colIndex: number; date: Date }[] = [];
   dateRow.forEach((v, idx) => {
     if (idx < 3) return; // 前3欄是座號/學號/姓名
     if (v instanceof Date) {
-      columns.push({ colIndex: idx, date: v, periodCount: countPeriodsAt(idx) });
+      dateStarts.push({ colIndex: idx, date: v });
     } else if (typeof v === 'number' && v > 40000 && XLSX) {
       // Excel 日期序號（極少數情況 sheet_to_json 不會自動轉成 Date）。
-      // 【本輪修正】根因：XLSX.SSF.parse_date_code(v) 回傳的不是 JS 的 Date
-      // 物件，而是 { y, m, d, H, M, S, ... } 這種純數字欄位的日期代碼物件——
-      // 這裡原本直接把它當 Date 塞進 columns，後面 toDateStr() 呼叫
-      // `.getFullYear()` 時，因為這個物件根本沒有這個方法，就丟出
-      // 「d.getFullYear is not a function」，導致「匯入全校出缺席表」整批失敗。
-      // 修法：手動把這個日期代碼物件轉成真正的 `new Date(y, m-1, d)`，日期格式
-      // 不對、轉不出來（回傳 undefined）的儲存格則直接跳過，不要讓整批中斷。
+      // XLSX.SSF.parse_date_code(v) 回傳的不是 JS 的 Date 物件，而是
+      // { y, m, d, H, M, S, ... } 這種純數字欄位的日期代碼物件，這裡手動轉成
+      // 真正的 `new Date(y, m-1, d)`；轉不出來（回傳 undefined）的儲存格則
+      // 直接跳過，不要讓整批中斷。
       const code = XLSX.SSF.parse_date_code(v);
-      if (code) columns.push({ colIndex: idx, date: new Date(code.y, code.m - 1, code.d), periodCount: countPeriodsAt(idx) });
+      if (code) dateStarts.push({ colIndex: idx, date: new Date(code.y, code.m - 1, code.d) });
     } else if (typeof v === 'string' && academicYear) {
       const m = v.trim().match(TEXT_DATE_RE);
       if (m) {
@@ -172,9 +173,27 @@ export async function findAttendanceDateColumns(rowsRaw: any[][], academicYear?:
         const resolved = resolveTextDateYear(month, academicYear, lastMonth, yearOffset);
         lastMonth = month;
         yearOffset = resolved.yearOffset;
-        columns.push({ colIndex: idx, date: new Date(resolved.year, month - 1, day), periodCount: countPeriodsAt(idx) });
+        dateStarts.push({ colIndex: idx, date: new Date(resolved.year, month - 1, day) });
       }
     }
+  });
+
+  // 第二步：依「下一個日期欄位的起始位置」界定每一天的節數上限，避免跨天over-count。
+  const countPeriodsAt = (colIndex: number, boundary: number | null) => {
+    let count = 0;
+    while (
+      (boundary == null || colIndex + count < boundary) &&
+      periodHeaderRow[colIndex + count] != null &&
+      PERIOD_HEADER_RE.test(String(periodHeaderRow[colIndex + count]).trim())
+    ) {
+      count++;
+    }
+    return count || 5; // 讀不到節次標題（例如舊版檔案）時退回原本固定5節的行為
+  };
+
+  const columns: { colIndex: number; date: Date; periodCount: number }[] = dateStarts.map((d, i) => {
+    const boundary = i + 1 < dateStarts.length ? dateStarts[i + 1].colIndex : null;
+    return { colIndex: d.colIndex, date: d.date, periodCount: countPeriodsAt(d.colIndex, boundary) };
   });
   return columns;
 }
