@@ -184,6 +184,7 @@ function AttendanceReportPageInner() {
       );
 
       const scheduledDates: { dateStr: string; period_no: number }[] = [];
+      const scheduledSet = new Set<string>();
       if (rangeStart) {
         const cursor = new Date(`${rangeStart}T00:00:00`);
         const end = new Date(`${rangeEnd}T00:00:00`);
@@ -191,7 +192,10 @@ function AttendanceReportPageInner() {
           const weekday = cursor.getDay() || 7; // 0(週日)->7；period_config 只設定1~6，週日一律視為0節
           const dateStr = toDateStr(cursor);
           const count = periodCountsByWeekday[weekday] ?? 0;
-          for (let p = 1; p <= count; p++) scheduledDates.push({ dateStr, period_no: p });
+          for (let p = 1; p <= count; p++) {
+            scheduledDates.push({ dateStr, period_no: p });
+            scheduledSet.add(`${dateStr}|${p}`);
+          }
           cursor.setDate(cursor.getDate() + 1);
         }
       }
@@ -212,10 +216,33 @@ function AttendanceReportPageInner() {
         existingByKey[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
       });
 
+      // 【本輪修正】反映事項「用所有身分查學生出席紀錄查詢（月報／學期），全校出席、
+      // 曠課、遲到、病假、事假、公假節數，跟導師修正學生一週出缺席表單顯示的不一樣」——
+      // 根因：上面 scheduledDates 只列出「依目前節次設定（period_config）現況」算出來
+      // 的節次，下面加總時也只查這些節次有沒有紀錄。但 attendance 表裡實際存在的紀錄，
+      // 可能是節次設定被調整「之前」登錄的——例如某天原本開放登錄到第8節、後來訓導處
+      // 把節次設定改成6節，資料庫裡那幾筆第7、8節的曠課/遲到/病假/事假/公假紀錄並不會
+      // 跟著消失，但因為第7、8節已經不在目前算出來的 scheduledDates 裡，加總時完全不會
+      // 被查到、也不會被算進任何一欄（不是被誤算成「出席」，是整筆憑空消失）——這才是
+      // 「全校出缺席節數兜不起來」的根因：這裡漏算的是「一週出缺席登錄表」（attendance
+      // 表本身）明明有的紀錄，不是計算方式的四捨五入或範圍差異。
+      // 修法：把 attRows 裡實際存在、但不在 scheduledSet 裡的 (日期,節次) 也一併補進
+      // 要加總的清單——這樣不管節次設定後來有沒有被調整過，已經登錄過的紀錄都保證會被
+      // 算進對應的欄位，不會再整筆消失；沒有紀錄的學生在這些補進來的節次一樣視為「出席」，
+      // 跟其他節次的計算邏輯一致。
+      const extraSlots = new Map<string, { dateStr: string; period_no: number }>();
+      (attRows ?? []).forEach((r: any) => {
+        const key = `${r.record_date}|${r.period_no}`;
+        if (!scheduledSet.has(key) && !extraSlots.has(key)) {
+          extraSlots.set(key, { dateStr: r.record_date, period_no: r.period_no });
+        }
+      });
+      const allSlots = extraSlots.size > 0 ? [...scheduledDates, ...extraSlots.values()] : scheduledDates;
+
       const map: Record<string, Record<string, number>> = {};
       rows.forEach((s) => {
         map[s.student_no] = {};
-        scheduledDates.forEach(({ dateStr, period_no }) => {
+        allSlots.forEach(({ dateStr, period_no }) => {
           const status = existingByKey[`${s.student_no}|${dateStr}|${period_no}`] ?? '出席';
           map[s.student_no][status] = (map[s.student_no][status] ?? 0) + 1;
         });
