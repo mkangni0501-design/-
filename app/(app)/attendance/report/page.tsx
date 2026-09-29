@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { fetchAllPaged } from '@/lib/schoolWideDataQueries';
-import { resolveCurrentTerm } from '@/lib/academicTerm';
+import { resolveCurrentTerm, estimateTermStart } from '@/lib/academicTerm';
 import { getEffectivePeriodCount } from '@/lib/periodConfig';
 import { departmentForGrade } from '@/lib/gradeMapping';
 import ErrorBanner from '@/components/ErrorBanner';
@@ -192,20 +192,17 @@ function AttendanceReportPageInner() {
         rangeEnd = termEnd && termEnd < todayStr ? termEnd : todayStr; // 學期結束後不再往後累計
       }
       setRangeNote(null);
-      if (viewMode === 'term' && !rangeStart && studentNos.length > 0) {
-        // 【本輪修正】學期起始日還沒設定時，原本 rangeStart 是 null，整個「應上節次」清單是空的，
-        // 出席一律算成 0。改成退回「這個班級最早一筆出缺勤紀錄的日期」，並在畫面上提示。
-        const { data: firstRow } = await supabase
-          .from('attendance')
-          .select('record_date')
-          .in('student_no', studentNos)
-          .order('record_date', { ascending: true })
-          .limit(1);
-        rangeStart = firstRow?.[0]?.record_date ?? null;
+      if (viewMode === 'term' && !rangeStart && currentTerm) {
+        // 【本輪修正】反映事項「讀取出缺勤紀錄失敗：canceling statement due to
+        // statement timeout」——上一輪這裡是另外查「這個班級最早一筆出缺勤紀錄」
+        // 當下限，但那筆查詢本身仍然是「不限日期、對整張表找最舊一筆」，對於
+        // RLS 判斷成本較高的身分（任課教師）一樣可能逼近逾時，而且沒有解決
+        // 「主查詢的日期下限本身沒收斂」這個真正的根因。改成不查資料庫，直接
+        // 用「學年度＋學期」估出一個合理的開學日下限（見 estimateTermStart），
+        // 保證查詢範圍被收斂在「這學期」等級，不會再退化成整張表。
+        rangeStart = estimateTermStart(currentTerm.academic_year, currentTerm.term);
         setRangeNote(
-          rangeStart
-            ? `學年學期設定裡尚未填寫本學期開學日，暫以最早一筆出缺勤紀錄日期（${rangeStart}）起算，出席節數可能偏低，請開發人員補上開學日。`
-            : '學年學期設定裡尚未填寫本學期開學日，且目前沒有任何出缺勤紀錄，無法計算。'
+          `學年學期設定裡尚未填寫本學期開學日，暫以「${currentTerm.academic_year} ${currentTerm.term}」推算的開學日（約 ${rangeStart}）起算，實際節數可能略有誤差，請開發人員盡快到「學年學期設定」頁補上正確的開學日。`
         );
       }
 
