@@ -80,6 +80,7 @@ export const BACKUP_TABLES = [
   'club_scores',
   'club_selection_windows',
   'club_preferences',
+  'conduct_event_requests', // 敘獎分層審核（管理員B→A→S）的申請/審核紀錄（sql/95）
 ] as const;
 
 // 大部分資料表拿 id（uuid）當「符合全部列」的比對欄位；少數是複合主鍵或文字主鍵，這裡特別列出。
