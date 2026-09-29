@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
+import { fetchAllPaged } from '@/lib/schoolWideDataQueries';
 import { resolveCurrentTerm } from '@/lib/academicTerm';
 import { getEffectivePeriodCount } from '@/lib/periodConfig';
 import { departmentForGrade } from '@/lib/gradeMapping';
@@ -13,6 +14,13 @@ type ClassOption = { id: string; label: string };
 type StudentRow = { student_no: string; seat_no: number; name: string };
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
+const EXCEPTION_STATUSES = ['曠課', '遲到', '病假', '事假', '公假'] as const;
+type ExceptionRecord = { status: string; date: string; period: number };
+const WEEKDAY_LABEL = ['日', '一', '二', '三', '四', '五', '六'];
+function formatRecordDate(dateStr: string) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  return `${d.getMonth() + 1}/${d.getDate()}（週${WEEKDAY_LABEL[d.getDay()]}）`;
+}
 
 function toDateStr(d: Date) {
   const y = d.getFullYear();
@@ -41,6 +49,9 @@ function AttendanceReportPageInner() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [noClass, setNoClass] = useState(false);
+  const [exceptions, setExceptions] = useState<Record<string, ExceptionRecord[]>>({});
+  const [detailStudent, setDetailStudent] = useState<StudentRow | null>(null);
+  const [rangeNote, setRangeNote] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -99,9 +110,12 @@ function AttendanceReportPageInner() {
         if (opt) setClassName(opt.label);
       }
 
-      const { data: enrollRowsRaw, error: enrollErr } = await supabase
+      // 【本輪修正】enrollments 每位學生「上學期」「下學期」各有一列，原本沒有依學期過濾，
+      // 同一位學生會被撈兩次（名單重複、React key 重複），改成只取目前學期、並以學號去重。
+      const currentTerm = await resolveCurrentTerm();
+      const { data: enrollRawAll, error: enrollErr } = await supabase
         .from('enrollments')
-        .select('seat_no, student_no')
+        .select('seat_no, student_no, term')
         .eq('class_id', classId)
         .order('seat_no');
       if (enrollErr) {
@@ -109,8 +123,13 @@ function AttendanceReportPageInner() {
         setLoading(false);
         return;
       }
-      // 【本輪新增】理由見 lib/hiddenStudents.ts 的說明（管理員切換教師視角
-      // 預覽時，RLS 不會過濾隱藏名單，這裡在前端補一層過濾）。
+      const preferTerm = currentTerm?.term;
+      const seen = new Set<string>();
+      const enrollRowsRaw = [
+        ...(enrollRawAll ?? []).filter((r: any) => r.term === preferTerm),
+        ...(enrollRawAll ?? []).filter((r: any) => r.term !== preferTerm),
+      ].filter((r: any) => (seen.has(r.student_no) ? false : (seen.add(r.student_no), true)));
+      enrollRowsRaw.sort((a: any, b: any) => a.seat_no - b.seat_no);
       const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
       const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
       const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
@@ -147,16 +166,17 @@ function AttendanceReportPageInner() {
       // getEffectivePeriodCount()（依「班級>部別>全校」找 period_config 設定的堂數），
       // 不是 class_schedule；這裡改成跟登錄頁一樣的依據，才能涵蓋所有真正開放登錄出缺勤
       // 的節次，不會漏算。
-      const currentTerm = await resolveCurrentTerm();
       let termStart: string | null = null;
+      let termEnd: string | null = null;
       if (currentTerm) {
         const { data: termRow } = await supabase
           .from('academic_terms')
-          .select('term_start_date')
+          .select('term_start_date, term_end_date')
           .eq('academic_year', currentTerm.academic_year)
           .eq('term', currentTerm.term)
           .maybeSingle();
         termStart = termRow?.term_start_date ?? null;
+        termEnd = termRow?.term_end_date ?? null;
       }
       const todayStr = toDateStr(new Date());
 
@@ -169,7 +189,24 @@ function AttendanceReportPageInner() {
         rangeEnd = monthEnd < todayStr ? monthEnd : todayStr; // 還沒發生的日期不算「已出席」
       } else {
         rangeStart = termStart;
-        rangeEnd = todayStr;
+        rangeEnd = termEnd && termEnd < todayStr ? termEnd : todayStr; // 學期結束後不再往後累計
+      }
+      setRangeNote(null);
+      if (viewMode === 'term' && !rangeStart && studentNos.length > 0) {
+        // 【本輪修正】學期起始日還沒設定時，原本 rangeStart 是 null，整個「應上節次」清單是空的，
+        // 出席一律算成 0。改成退回「這個班級最早一筆出缺勤紀錄的日期」，並在畫面上提示。
+        const { data: firstRow } = await supabase
+          .from('attendance')
+          .select('record_date')
+          .in('student_no', studentNos)
+          .order('record_date', { ascending: true })
+          .limit(1);
+        rangeStart = firstRow?.[0]?.record_date ?? null;
+        setRangeNote(
+          rangeStart
+            ? `學年學期設定裡尚未填寫本學期開學日，暫以最早一筆出缺勤紀錄日期（${rangeStart}）起算，出席節數可能偏低，請開發人員補上開學日。`
+            : '學年學期設定裡尚未填寫本學期開學日，且目前沒有任何出缺勤紀錄，無法計算。'
+        );
       }
 
       const { data: classRow } = await supabase.from('classes').select('grade_level').eq('id', classId).maybeSingle();
@@ -200,12 +237,21 @@ function AttendanceReportPageInner() {
         }
       }
 
-      const { data: attRows, error: attErr } = await supabase
-        .from('attendance')
-        .select('student_no, record_date, period_no, status')
-        .in('student_no', studentNos.length > 0 ? studentNos : ['__none__'])
-        .gte('record_date', rangeStart ?? '1900-01-01')
-        .lte('record_date', rangeEnd);
+      // 【本輪修正】學期統計數字有誤的主因：這裡原本是單次查詢，PostgREST 單次最多只回傳
+      // 1000 筆（見 lib/schoolWideDataQueries.ts 的說明），整學期範圍很容易超過，超過的
+      // 紀錄被靜默截斷，曠課/遲到/病假/事假/公假少算、出席多算。改用 fetchAllPaged 分頁撈到底。
+      const { data: attRows, error: attErr } = await fetchAllPaged<any>((from, to) =>
+        supabase
+          .from('attendance')
+          .select('student_no, record_date, period_no, status')
+          .in('student_no', studentNos.length > 0 ? studentNos : ['__none__'])
+          .gte('record_date', rangeStart ?? '1900-01-01')
+          .lte('record_date', rangeEnd)
+          .order('student_no')
+          .order('record_date')
+          .order('period_no')
+          .range(from, to)
+      );
       if (attErr) {
         setLoadError('讀取出缺勤紀錄失敗：' + attErr.message);
         setLoading(false);
@@ -248,6 +294,12 @@ function AttendanceReportPageInner() {
         });
       });
       setSummary(map);
+      const exc: Record<string, ExceptionRecord[]> = {};
+      (attRows ?? []).forEach((r: any) => {
+        if (r.status === '出席' || !(EXCEPTION_STATUSES as readonly string[]).includes(r.status)) return;
+        (exc[r.student_no] = exc[r.student_no] ?? []).push({ status: r.status, date: r.record_date, period: r.period_no });
+      });
+      setExceptions(exc);
       setLoading(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -295,6 +347,7 @@ function AttendanceReportPageInner() {
         </label>
       </div>
 
+      {rangeNote && <p style={{ fontSize: 12, color: '#A36A2D', marginBottom: 8 }}>{rangeNote}</p>}
       {loading ? (
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
       ) : (
@@ -314,7 +367,14 @@ function AttendanceReportPageInner() {
             {students.map((s) => (
               <tr key={s.student_no} style={{ borderTop: '1px solid #eee' }}>
                 <td style={{ padding: 6 }}>{s.seat_no}</td>
-                <td style={{ padding: 6 }}>{s.name}</td>
+                <td style={{ padding: 6 }}>
+                  <button
+                    onClick={() => setDetailStudent(s)}
+                    style={{ background: 'none', border: 'none', padding: 0, color: '#185FA5', textDecoration: 'underline', cursor: 'pointer', fontSize: 13 }}
+                  >
+                    {s.name}
+                  </button>
+                </td>
                 {STATUS_OPTIONS.map((opt) => (
                   <td key={opt} style={{ padding: 6, textAlign: 'right' }}>
                     {summary[s.student_no]?.[opt] ?? 0}
@@ -331,6 +391,50 @@ function AttendanceReportPageInner() {
             )}
           </tbody>
         </table>
+      )}
+
+      {detailStudent && (
+        <div
+          onClick={() => setDetailStudent(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 16 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: '#fff', borderRadius: 8, padding: 20, width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto' }}
+          >
+            <h2 style={{ fontSize: 15, marginBottom: 4 }}>
+              {detailStudent.seat_no} 號 {detailStudent.name}　出缺席明細
+            </h2>
+            <p style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>
+              {viewMode === 'month' ? `${monthValue} 月` : '本學期'}（只列出曠課、遲到、病假、事假、公假）
+            </p>
+            {(exceptions[detailStudent.student_no] ?? []).length === 0 ? (
+              <p style={{ fontSize: 13, color: '#999' }}>這段期間沒有任何曠課、遲到、病假、事假、公假紀錄。</p>
+            ) : (
+              EXCEPTION_STATUSES.map((st) => {
+                const list = (exceptions[detailStudent.student_no] ?? []).filter((r) => r.status === st);
+                if (list.length === 0) return null;
+                return (
+                  <div key={st} style={{ marginBottom: 12 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                      {st}　共 {list.length} 節
+                    </p>
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
+                      {list.map((r) => (
+                        <li key={`${r.date}|${r.period}`}>
+                          {formatRecordDate(r.date)}　{r.date}　第 {r.period} 節
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })
+            )}
+            <button onClick={() => setDetailStudent(null)} style={{ padding: '6px 16px', marginTop: 4 }}>
+              關閉
+            </button>
+          </div>
+        </div>
       )}
     </main>
   );

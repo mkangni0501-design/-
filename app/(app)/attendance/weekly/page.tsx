@@ -650,50 +650,81 @@ export default function WeeklyAttendancePage() {
     setNotifyQueue((prev) => prev.slice(1));
   }
 
-  // 【本輪修改】原本是「一改就立刻寫入資料庫」，改成只「暫存」這一格要改成的
-  // 狀態，實際寫入移到 handleSaveIndividualChanges()（按下「儲存」按鈕時）才會
-  // 真的送出——不合法的變動（不是自己任教節次、又不符合允許的更正規則）還是
-  // 在這裡立刻擋下來、不會暫存，避免累積一堆選好之後儲存時才發現一半不能用。
+  // 【本輪修正】反映事項「導師在非任課時段修正、還沒儲存就被提醒『非任課只能...』，
+  // 只能整頁放棄重來」——原本是編輯當下（還沒按儲存）就立刻檢查是否符合非任教節次
+  // 的更正規則、不符合就跳 alert 擋下、不暫存，使用者要嘛照規則改，要嘛只能按
+  // 「放棄目前尚未儲存的變更」整頁重來，沒有折衷、體驗很差。
+  // 改成：編輯當下一律先暫存，不做任何檢查／提醒；規則檢查全部移到按下「儲存」時
+  // 才一次做（見 handleSaveIndividualChanges），而且只提示真正不合規則的那幾格
+  // （學生、日期、第幾節都列出來），導師可以直接回去改那幾格，不用整頁重來。
   function stageStatus(student_no: string, dateStr: string, period: number, status: string) {
-    const notOwnPeriod = !isAdmin && !isOwnTaughtPeriod(dateStr, period);
-    if (notOwnPeriod) {
-      const currentStatus = pendingChanges[`${student_no}|${dateStr}|${period}`] ?? attMap[`${student_no}|${dateStr}|${period}`] ?? '出席';
-      if (!isAllowedNonTeachingChange(currentStatus, status)) {
-        alert(
-          homeroomAssistEnabled
-            ? '這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假；「出席」可以改成事假／病假／公假／遲到／曠課。'
-            : '這一節不是您任教的科目，只能把「曠課」改成事假／病假／公假。'
-        );
-        return;
-      }
-    }
     setPendingChanges((prev) => ({ ...prev, [`${student_no}|${dateStr}|${period}`]: status }));
   }
+
+  const COUNTED_EXCEPTION_STATUSES = ['曠課', '遲到', '病假', '事假', '公假'] as const;
 
   // 【本輪新增】「儲存」按鈕：把 pendingChanges 裡暫存的每一格，一次分批送出。
   // 反映事項「請在導師更正任課老師課堂時出缺席的功能下按下套用或者儲存時，跳出
   // 修正的確認框，讓導師確認所填寫的資料是否正確（並提醒若送出後發現錯誤須申請
-  // 開放修正），點選正確後才發出」：這裡統一在真正送出前，只要暫存的變更裡有
-  // 任何一格是「非本人任教節次」的更正，就跳出一次確認（列出總共幾格），不用
-  // 每改一格就跳一次，累積填完一整週再一次確認、一次送出。
+  // 開放修正），點選正確後才發出」——這裡改成按下儲存時，一律先列出「不合規則的
+  // 非任教節次更正」（有的話直接擋下、不送出，讓導師回去改那幾格），規則都符合後
+  // 再列出這次要送出的內容，依學生列出曠課/遲到/病假/事假/公假各幾節讓導師核對，
+  // 並提醒「點選確認後要修正須找該任課教師或管理員協助」，確認後才真的送出。
   async function handleSaveIndividualChanges() {
     const entries = Object.entries(pendingChanges);
     if (entries.length === 0) {
       alert('目前沒有尚未儲存的變更。');
       return;
     }
-    let nonTeachingChangeCount = 0;
-    for (const key of Object.keys(pendingChanges)) {
-      const [, dateStr, periodStr] = key.split('|');
-      if (!isAdmin && !isOwnTaughtPeriod(dateStr, Number(periodStr))) nonTeachingChangeCount++;
+
+    if (!isAdmin) {
+      const invalid: string[] = [];
+      entries.forEach(([key, status]) => {
+        const [student_no, dateStr, periodStr] = key.split('|');
+        const period = Number(periodStr);
+        if (!isOwnTaughtPeriod(dateStr, period)) {
+          const currentStatus = attMap[key] ?? '出席';
+          if (!isAllowedNonTeachingChange(currentStatus, status)) {
+            const name = students.find((s) => s.student_no === student_no)?.name ?? student_no;
+            invalid.push(`${name}　${dateStr}　第${period}節（${currentStatus}→${status}）`);
+          }
+        }
+      });
+      if (invalid.length > 0) {
+        alert(
+          '以下更正不是您任教的節次、且不符合允許的更正規則，尚未儲存：\n\n' +
+            invalid.join('\n') +
+            '\n\n' +
+            (homeroomAssistEnabled
+              ? '非任教節次只能把「曠課」改成事假／病假／公假；「出席」可以改成事假／病假／公假／遲到／曠課。'
+              : '非任教節次只能把「曠課」改成事假／病假／公假。') +
+            '\n\n請回去修改或還原這幾格後再重新按「儲存」，其餘已填寫的內容不會遺失。'
+        );
+        return;
+      }
     }
-    if (nonTeachingChangeCount > 0) {
-      const confirmed = window.confirm(
-        `這次儲存的變更裡，有 ${nonTeachingChangeCount} 格不是您任教的科目（正在幫任課教師修正）。\n\n` +
-          '請再次確認所有填寫的資料正確無誤後再送出——送出後如果發現改錯了，需要另外申請開放修正，不能直接再改一次。'
-      );
-      if (!confirmed) return;
-    }
+
+    const byStudent = new Map<string, Record<string, number>>();
+    entries.forEach(([key, status]) => {
+      if (!(COUNTED_EXCEPTION_STATUSES as readonly string[]).includes(status)) return;
+      const student_no = key.split('|')[0];
+      const rec = byStudent.get(student_no) ?? {};
+      rec[status] = (rec[status] ?? 0) + 1;
+      byStudent.set(student_no, rec);
+    });
+    const summaryLines: string[] = [];
+    byStudent.forEach((rec, student_no) => {
+      const name = students.find((s) => s.student_no === student_no)?.name ?? student_no;
+      const parts = COUNTED_EXCEPTION_STATUSES.filter((st) => rec[st]).map((st) => `${st} ${rec[st]} 節`);
+      if (parts.length > 0) summaryLines.push(`${name}：${parts.join('、')}`);
+    });
+    const confirmed = window.confirm(
+      '即將送出以下修正：\n\n' +
+        (summaryLines.length > 0 ? summaryLines.join('\n') : '（這次沒有曠課／遲到／病假／事假／公假的變更）') +
+        '\n\n請確認以上內容正確無誤。點選確認後要修正須找該任課教師或管理員協助。'
+    );
+    if (!confirmed) return;
+
     setSavingPending(true);
     const payload = entries.map(([key, status]) => {
       const [student_no, record_date, periodStr] = key.split('|');
