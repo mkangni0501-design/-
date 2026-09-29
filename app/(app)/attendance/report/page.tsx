@@ -249,24 +249,16 @@ function AttendanceReportPageInner() {
         existingByKey[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
       });
 
-      // 【本輪修正】反映事項「用所有身分查學生出席紀錄查詢（月報／學期），全校出席、
-      // 曠課、遲到、病假、事假、公假節數，跟導師修正學生一週出缺席表單顯示的不一樣」——
-      // 根因：上面 scheduledDates 只列出「依目前節次設定（period_config）現況」算出來
-      // 的節次，下面加總時也只查這些節次有沒有紀錄。但 attendance 表裡實際存在的紀錄，
-      // 可能是節次設定被調整「之前」登錄的——例如某天原本開放登錄到第8節、後來訓導處
-      // 把節次設定改成6節，資料庫裡那幾筆第7、8節的曠課/遲到/病假/事假/公假紀錄並不會
-      // 跟著消失，但因為第7、8節已經不在目前算出來的 scheduledDates 裡，加總時完全不會
-      // 被查到、也不會被算進任何一欄（不是被誤算成「出席」，是整筆憑空消失）——這才是
-      // 「全校出缺席節數兜不起來」的根因：這裡漏算的是「一週出缺席登錄表」（attendance
-      // 表本身）明明有的紀錄，不是計算方式的四捨五入或範圍差異。
-      //
-      // 【本輪再次修正】上一輪把「補進來的節次」（extraSlots）當成全班共用的一份清單，
-      // 每一位學生都會在這些補進來的節次上被算一次——但那些節次只是「某個學生」在
-      // 節次設定調整前曾經被登錄過，不代表「全班」那一天真的有開到那一節課。結果是：
-      // 其他根本沒有那一節課、也沒有任何紀錄的學生，會被平白多算一節「出席」，導致
-      // 「出席」總節數比一週登錄表上實際看到的還要多——這正是使用者反映「數據不一致」
-      // 的另一個根因。改成 extraSlots 只補「這個學生自己」實際有紀錄的節次，不會影響
-      // 到班上其他學生的出席計算。
+      // 【本輪修正】反映事項「本校是夜校，各部別節次數都不同，應該依照本校各部別
+      // 實際設定的節次做顯示與計算；學期累計出席節數遠超過該部別一週最多節次數
+      // 乘上週數的理論上限」——前兩輪在這裡加的「把 attendance 表裡實際存在、
+      // 但不在 scheduledSet 裡的節次也算進去」，對這個學校是錯的：這些「不在
+      // 目前部別節次設定裡」的紀錄，不是節次設定調整前的合理舊資料，而是不該
+      // 存在的錯誤資料（例如超過該部別實際節次數的髒資料），加進去計算反而讓
+      // 出席節數遠超過理論上限。改回嚴格只依照 scheduledDates（getEffectivePeriodCount
+      // 依「班級>部別>全校」period_config 算出來的節次清單）計算——這樣才是
+      // 真正「依照本校所設定的各部別節次做顯示與計算」，任何不在這個部別節次
+      // 設定範圍內的紀錄都不會被算進統計、也不會出現在下面的明細清單裡。
       const map: Record<string, Record<string, number>> = {};
       rows.forEach((s) => {
         map[s.student_no] = {};
@@ -275,17 +267,11 @@ function AttendanceReportPageInner() {
           map[s.student_no][status] = (map[s.student_no][status] ?? 0) + 1;
         });
       });
-      (attRows ?? []).forEach((r: any) => {
-        const key = `${r.record_date}|${r.period_no}`;
-        if (scheduledSet.has(key)) return; // 已經在上面 scheduledDates 那一輪算過了，不要重複計算
-        const rec = map[r.student_no];
-        if (!rec) return;
-        rec[r.status] = (rec[r.status] ?? 0) + 1;
-      });
       setSummary(map);
       const exc: Record<string, ExceptionRecord[]> = {};
       (attRows ?? []).forEach((r: any) => {
         if (r.status === '出席' || !(EXCEPTION_STATUSES as readonly string[]).includes(r.status)) return;
+        if (!scheduledSet.has(`${r.record_date}|${r.period_no}`)) return; // 不在這個部別的節次設定範圍內，視為錯誤資料，不顯示
         (exc[r.student_no] = exc[r.student_no] ?? []).push({ status: r.status, date: r.record_date, period: r.period_no });
       });
       setExceptions(exc);
