@@ -5,6 +5,7 @@ import { supabase, getCurrentAppUser } from '@/lib/supabaseClient';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
 import { resolveCurrentTerm, estimateTermStart } from '@/lib/academicTerm';
+import { fetchAttendanceForStudents } from '@/lib/attendanceQueries';
 
 type ClassSubjectOption = { class_id: string; subject: string; label: string; periodNos: number[]; slots: { weekday: number; period_no: number }[] };
 type StudentRow = { student_no: string; seat_no: number; name: string };
@@ -185,27 +186,24 @@ export default function SubjectAttendanceViewPage() {
       setStudents(rows);
       const studentNos = rows.map((r) => r.student_no);
 
-      // 只查詢這個科目對應節次的出缺勤——RLS 本來就只會回傳任課教師自己教的節次，
-      // 這裡再加上 period_no 篩選，是為了同一班若教超過一科時，不同科目的節次不會混在一起。
-      // 【本輪修正】period_no 篩選只能先縮小 DB 查詢範圍（減少要抓的列數），
-      // 不能只靠這個判斷「是不是這堂課的紀錄」——同一個 period_no 在不同星期幾
-      // 可能是別科老師的課，所以多抓 record_date 回來，下面再用「日期換算出的
-      // 星期幾」+ period_no 兩者都符合 opt.slots 裡的組合，才算數。
-      let attQuery = supabase
-        .from('attendance')
-        .select('student_no, status, record_date, period_no')
-        .in('student_no', studentNos.length > 0 ? studentNos : ['__none__'])
-        .in('period_no', opt.periodNos.length > 0 ? opt.periodNos : [-1]);
-      // 【本輪修正】限制在「這學期開學日 ~ 今天」的範圍內，理由見上面課表查詢
-      // 那段的說明——不限制日期的話，會把其他學年學期、課表配置完全不同時期的
-      // 出缺勤紀錄也混進來比對，多算或少算都有可能，還會因為查詢範圍沒收斂而
-      // 逼近逾時（見上面 estimateTermStart 那段的說明）。只有在完全找不到
-      // 目前生效的學年學期（currentTerm 是 null，代表 academic_terms 整張表
-      // 都還沒有任何資料）時，termDateRange.start 才會維持 null——這種情況下
-      // 確實沒有任何依據可以估出合理範圍，只能維持不限制。
-      if (termDateRange.start) attQuery = attQuery.gte('record_date', termDateRange.start);
-      if (termDateRange.end) attQuery = attQuery.lte('record_date', termDateRange.end);
-      const { data: attRows, error: attErr } = await attQuery;
+      // 【本輪修正】反映事項「開學日已經填了（5/11～9/30），還是逾時／開啟很慢」
+      // ——原本是一次對 attendance 下「一大串學號 IN + period_no IN + 日期範圍」，
+      // 這種組合查詢規劃器不一定會用上 (student_no, record_date, period_no) 這組
+      // 複合索引，選錯索引就會退化成掃描全校整學期規模的資料，不是只有這個班級
+      // 這堂課（詳見 lib/attendanceQueries.ts 的說明）。改用
+      // fetchAttendanceForStudents()：逐學生查詢（每次都是單一學號相等條件，
+      // 精準命中索引），period_no 篩選則保留在下面「日期換算星期幾 + period_no
+      // 都要對到 opt.slots」那段就好，不用在 SQL 這層先篩一次。
+      //
+      // 限制在「這學期開學日 ~ 今天」的範圍內，理由見上面課表查詢那段的說明。
+      // 只有在完全找不到目前生效的學年學期（currentTerm 是 null，代表
+      // academic_terms 整張表都還沒有任何資料）時，termDateRange.start 才會
+      // 維持 null——這種情況下確實沒有任何依據可以估出合理範圍，只能維持不限制。
+      const { data: attRows, error: attErr } = await fetchAttendanceForStudents(
+        studentNos,
+        termDateRange.start,
+        termDateRange.end ?? toLocalDateStr(new Date())
+      );
       if (attErr) {
         setLoadError('讀取出缺勤紀錄失敗：' + attErr.message);
         setLoading(false);

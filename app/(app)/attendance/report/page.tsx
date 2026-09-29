@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
-import { fetchAllPaged } from '@/lib/schoolWideDataQueries';
+import { fetchAttendanceForStudents } from '@/lib/attendanceQueries';
 import { resolveCurrentTerm, estimateTermStart } from '@/lib/academicTerm';
 import { getEffectivePeriodCount } from '@/lib/periodConfig';
 import { departmentForGrade } from '@/lib/gradeMapping';
@@ -234,21 +234,11 @@ function AttendanceReportPageInner() {
         }
       }
 
-      // 【本輪修正】學期統計數字有誤的主因：這裡原本是單次查詢，PostgREST 單次最多只回傳
-      // 1000 筆（見 lib/schoolWideDataQueries.ts 的說明），整學期範圍很容易超過，超過的
-      // 紀錄被靜默截斷，曠課/遲到/病假/事假/公假少算、出席多算。改用 fetchAllPaged 分頁撈到底。
-      const { data: attRows, error: attErr } = await fetchAllPaged<any>((from, to) =>
-        supabase
-          .from('attendance')
-          .select('student_no, record_date, period_no, status')
-          .in('student_no', studentNos.length > 0 ? studentNos : ['__none__'])
-          .gte('record_date', rangeStart ?? '1900-01-01')
-          .lte('record_date', rangeEnd)
-          .order('student_no')
-          .order('record_date')
-          .order('period_no')
-          .range(from, to)
-      );
+      // 【本輪修正】改用 fetchAttendanceForStudents()：逐學生查詢，避免「一大串
+      // 學號 IN + 日期範圍」讓查詢規劃器選到不理想的索引、退化成掃描全校全學期
+      // 規模的資料（詳見 lib/attendanceQueries.ts 的說明），這是「已經把日期收斂
+      // 在這學期、還是逾時／很慢」的真正根因。
+      const { data: attRows, error: attErr } = await fetchAttendanceForStudents(studentNos, rangeStart, rangeEnd);
       if (attErr) {
         setLoadError('讀取出缺勤紀錄失敗：' + attErr.message);
         setLoading(false);
