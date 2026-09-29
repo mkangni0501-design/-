@@ -416,45 +416,20 @@ export async function buildScoreAttendanceSheetForClass(params: {
   const toDateStrLocal = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-  // 【本輪修正】反映事項「導師修正學生一週出缺席後，管理員一鍵下載全部資料，發現
-  // 沒有完全把已輸入的資料下載下來」——根因：原本每一天要留幾欄（幾節），只看
-  // periodCountsByWeekday（依「目前」的節次設定 period_config 現況算出來的堂數）。
-  // 但 attendance 表裡已經存在的紀錄，可能是在節次設定被調整「之前」登錄的——例如
-  // 某天原本開放登錄到第8節、後來訓導處把節次設定改成6節，資料庫裡那幾筆第7、8節
-  // 的舊紀錄並不會跟著消失，period_no 還是7、8。下載範本卻只依照「目前」的節次數
-  // 決定每天的欄位寬度，只留6欄，於是那幾筆超過目前欄數的舊紀錄，因為根本沒有對應
-  // 欄位可以填，組表格時被整個跳過、不會出現在下載下來的檔案裡——不是資料庫裡的
-  // 資料不見了，是版面欄位不夠寬，把已經登錄的資料擠掉了。
-  // 修法：每一天實際要留幾欄，改成「目前節次設定的堂數」跟「currentAttendance 裡這
-  // 一天所有學生實際存在的最大節次」兩者取較大值——這樣不管節次設定後來有沒有被
-  // 調整過，已經登錄過的紀錄都保證有欄位可以放，不會再被悄悄漏掉。
-  const maxRecordedPeriodByDateStr: Record<string, number> = {};
-  if (params.currentAttendance) {
-    Object.values(params.currentAttendance).forEach((byKey) => {
-      Object.keys(byKey).forEach((k) => {
-        const sep = k.lastIndexOf('_');
-        if (sep === -1) return;
-        const dateStr = k.slice(0, sep);
-        const period = Number(k.slice(sep + 1));
-        if (!Number.isFinite(period)) return;
-        if (!maxRecordedPeriodByDateStr[dateStr] || period > maxRecordedPeriodByDateStr[dateStr]) {
-          maxRecordedPeriodByDateStr[dateStr] = period;
-        }
-      });
-    });
-  }
-
-  // 每個日期各自要佔幾欄（依那一天是星期幾對應的堂數而定，並確保不小於實際已登錄
-  // 的最大節次），欄位是依日期先後「連續」排列、中間不留空欄——這樣上傳那一側
-  // （findAttendanceDateColumns）才能單純用「這一欄到下一個日期欄之間的距離」
-  // 還原回堂數，不用另外存一份對照表。
+  // 【本輪修正】反映事項「本校是夜校，各部別節次數都不同，應該依照本校各部別
+  // 實際設定的節次做顯示與計算」——上一輪在這裡加的「欄位寬度用目前節次設定跟
+  // 實際存在的最大節次兩者取較大值」，對這個學校是錯的：會把不屬於這個部別、
+  // 根本不該存在的錯誤節次資料也照樣排進下載範本裡。改回單純依照
+  // periodCountsByWeekday（getEffectivePeriodCount() 依「班級>部別>全校」
+  // period_config 設定算出來的堂數）決定每天要留幾欄，不要用資料庫裡實際存在
+  // 的節次去撐開欄位寬度。
+  //
+  // 每個日期各自要佔幾欄（依那一天是星期幾對應的堂數而定），欄位是依日期先後
+  // 「連續」排列、中間不留空欄——這樣上傳那一側（findAttendanceDateColumns）
+  // 才能單純用「這一欄到下一個日期欄之間的距離」還原回堂數，不用另外存一份對照表。
   const dateColStarts: number[] = [];
   let cursor = ATTENDANCE_WEEKDAY_START;
-  const periodCountForDate = (d: Date) => {
-    const configured = Math.max(periodCountsByWeekday[weekdayIndex0to5(d)] ?? 5, 1);
-    const recorded = maxRecordedPeriodByDateStr[toDateStrLocal(d)] ?? 0;
-    return Math.max(configured, recorded);
-  };
+  const periodCountForDate = (d: Date) => Math.max(periodCountsByWeekday[weekdayIndex0to5(d)] ?? 5, 1);
   attendanceDates.forEach((d) => {
     dateColStarts.push(cursor);
     cursor += periodCountForDate(d);
