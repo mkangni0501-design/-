@@ -511,7 +511,6 @@ export default function WeeklyAttendancePage() {
 
       const dept = isAdmin ? departmentForGrade(classOptions.find((c) => c.id === classId)?.grade_level ?? '') : department;
       const counts = await Promise.all(weekDates.map((d) => getEffectivePeriodCount((d.getDay() || 7), dept, classId)));
-      setPeriodCounts(counts);
 
       const startStr = toDateStr(weekDates[0]);
       const endStr = toDateStr(weekDates[5]);
@@ -529,8 +528,34 @@ export default function WeeklyAttendancePage() {
           map[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
         });
         setAttMap(map);
+
+        // 【本輪修正】反映事項「出席紀錄查詢頁看到某學生某天有一筆曠課/事假等紀錄，
+        // 但一週登錄表這裡都顯示出席、跟紙本一致」——根因：這一格的節次設定
+        // （period_config）如果後來被調降過（例如某天原本開放到第5節、後來改成
+        // 只開放4節），資料庫裡第5節那筆舊紀錄不會消失，但這裡的 periodCounts
+        // 只依「目前」節次設定算，第5節根本沒有欄位可以顯示、也沒辦法點開來改，
+        // 導師只看得到第1~4節都是出席，就會誤以為當天全部正常，看不到那筆卡住
+        // 的舊紀錄，更沒辦法在畫面上把它更正回來。
+        // 修法：跟 lib/excelTemplates.ts 下載範本那裡同樣的做法——每一天實際要
+        // 顯示幾欄，改成「目前節次設定」跟「attRows 裡這一天實際存在的最大節次」
+        // 兩者取較大值，這樣只要資料庫裡還有超過目前節次數的舊紀錄，畫面上一定會
+        // 多出對應的欄位、可以直接點開來看、也可以直接改回正確的狀態，不會再變成
+        // 看不到、也修不到的卡住資料。
+        const maxRecordedPeriodByDate: Record<string, number> = {};
+        (attRows ?? []).forEach((r: any) => {
+          if (!maxRecordedPeriodByDate[r.record_date] || r.period_no > maxRecordedPeriodByDate[r.record_date]) {
+            maxRecordedPeriodByDate[r.record_date] = r.period_no;
+          }
+        });
+        const widenedCounts = counts.map((c, i) => {
+          const dateStr = toDateStr(weekDates[i]);
+          const recorded = maxRecordedPeriodByDate[dateStr] ?? 0;
+          return Math.max(c, recorded);
+        });
+        setPeriodCounts(widenedCounts);
       } else {
         setAttMap({});
+        setPeriodCounts(counts);
       }
 
       // 是否已鎖定：改成呼叫 submission_window_locked()，跟排名頁面/成績登錄頁一致
