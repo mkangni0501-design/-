@@ -40,3 +40,29 @@ export async function resolveCurrentTerm(): Promise<CurrentTerm | null> {
   const secondTerm = sameYear.find((r: any) => r.term === '下學期');
   return secondTerm ? { academic_year: secondTerm.academic_year, term: secondTerm.term } : { academic_year: sameYear[0].academic_year, term: sameYear[0].term };
 }
+
+/**
+ * 【本輪新增】反映事項「學生出席紀錄查詢、任課班級出席查詢，讀取出缺勤紀錄
+ * 一直出現『canceling statement due to statement timeout』」。
+ *
+ * 根因：這幾頁在算「這學期／從開學到今天」的出缺勤時，如果 academic_terms
+ * 裡沒有人填過這個學年學期的開學日（term_start_date 是 null），原本的寫法是
+ * 完全不限制日期下限（或退回極早的日期）——等於每次都對整張 attendance 表
+ * （全校、從系統啟用第一天到現在，可能橫跨好幾個學年度）做查詢。對於本來就
+ * 不符合「系統管理員／訓導部門／導師本班」這幾個能被快速判斷的身分的使用者
+ * （最典型的就是任課教師——RLS 的 can_read_attendance() 對他們只能靠
+ * enrollments/class_schedule 的 EXISTS 子查詢逐列判斷），要判斷的候選列數一旦
+ * 沒有日期範圍收斂、變成整張表等級，逐列判斷的成本乘上去，就足以超過
+ * statement_timeout 被中止——這正是「讀取出缺勤紀錄失敗：canceling statement
+ * due to statement timeout」的根因，不是資料量本身有問題，是查詢範圍沒有被
+ * 限制住。
+ *
+ * 修法：開學日還沒填的話，不要整張表下限全部打開，改成用「學年度＋學期」
+ * 直接估出一個合理的開學日下限（上學期抓當年8/1、下學期抓隔年2/1）——不用
+ * 額外查一次資料庫、也一定能把查詢範圍收斂在「這學期」等級，不會再退化成
+ * 整張表的規模。等哪天有人真的到「學年學期設定」頁填了正確的開學日，就會
+ * 改用那個更準確的日期，這裡只是「還沒填之前」的安全下限，不是要取代它。
+ */
+export function estimateTermStart(academicYear: number, term: string): string {
+  return term === '下學期' ? `${academicYear + 1}-02-01` : `${academicYear}-08-01`;
+}
