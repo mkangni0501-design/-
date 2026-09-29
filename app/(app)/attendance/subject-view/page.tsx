@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { supabase, getCurrentAppUser } from '@/lib/supabaseClient';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
-import { resolveCurrentTerm } from '@/lib/academicTerm';
+import { resolveCurrentTerm, estimateTermStart } from '@/lib/academicTerm';
 
 type ClassSubjectOption = { class_id: string; subject: string; label: string; periodNos: number[]; slots: { weekday: number; period_no: number }[] };
 type StudentRow = { student_no: string; seat_no: number; name: string };
@@ -20,6 +20,13 @@ function toLocalDateStr(d: Date) {
 }
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
+const EXCEPTION_STATUSES = ['曠課', '遲到', '病假', '事假', '公假'] as const;
+type ExceptionRecord = { status: string; date: string; period: number };
+const WEEKDAY_LABEL = ['日', '一', '二', '三', '四', '五', '六'];
+function formatRecordDate(dateStr: string) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  return `${d.getMonth() + 1}/${d.getDate()}（週${WEEKDAY_LABEL[d.getDay()]}）`;
+}
 
 // 任課教師出席查詢：只能看到自己授課班級、自己教的那個科目所對應節次的出缺勤狀況，
 // 不會看到同班其他科目/節次的紀錄（跟導師「學生出缺席登錄（一週）」頁面不同，那是全班全節次）。
@@ -34,6 +41,8 @@ export default function SubjectAttendanceViewPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [noAssignment, setNoAssignment] = useState(false);
   const [termDateRange, setTermDateRange] = useState<{ start: string | null; end: string | null }>({ start: null, end: null });
+  const [exceptions, setExceptions] = useState<Record<string, ExceptionRecord[]>>({});
+  const [detailStudent, setDetailStudent] = useState<StudentRow | null>(null);
 
   useEffect(() => {
     getSiteContentMap().then(setSiteContent);
@@ -73,7 +82,18 @@ export default function SubjectAttendanceViewPage() {
           .eq('term', currentTerm.term)
           .maybeSingle();
         const todayStr = new Date().toISOString().slice(0, 10);
-        setTermDateRange({ start: termRow?.term_start_date ?? null, end: todayStr });
+        // 【本輪修正】反映事項「任課班級出席查詢，所有項目都無統計，一樣出現
+        // 『canceling statement due to statement timeout』」——根因：這裡原本
+        // 「開學日還沒填」時 termDateRange.start 直接是 null，下面查 attendance
+        // 完全不會加日期下限，等於對整張表（全校、系統啟用以來所有資料）下查詢；
+        // 任課教師本身不符合 RLS 裡能被快速判斷的身分（系統管理員／訓導部門／
+        // 導師本班），要靠 enrollments/class_schedule 的 EXISTS 子查詢逐列判斷，
+        // 候選列數一旦沒有日期範圍收斂到整張表等級，就足以逾時——這才是「所有
+        // 項目都查不到統計」的根因，不是這個科目真的沒有資料。改成開學日沒填時，
+        // 用「學年度＋學期」估出一個合理的開學日下限（estimateTermStart），
+        // 不再讓查詢範圍退化成不限制。
+        const start = termRow?.term_start_date ?? estimateTermStart(currentTerm.academic_year, currentTerm.term);
+        setTermDateRange({ start, end: todayStr });
       }
       let scheduleQuery = supabase
         .from('class_schedule')
@@ -178,9 +198,11 @@ export default function SubjectAttendanceViewPage() {
         .in('period_no', opt.periodNos.length > 0 ? opt.periodNos : [-1]);
       // 【本輪修正】限制在「這學期開學日 ~ 今天」的範圍內，理由見上面課表查詢
       // 那段的說明——不限制日期的話，會把其他學年學期、課表配置完全不同時期的
-      // 出缺勤紀錄也混進來比對，多算或少算都有可能。開學日如果還沒在「學年學期
-      // 設定」頁填，termDateRange.start 會是 null，這種情況沒辦法安全限縮日期，
-      // 寧可維持「不限制」也不要用錯的日期範圍篩掉真正該算的紀錄。
+      // 出缺勤紀錄也混進來比對，多算或少算都有可能，還會因為查詢範圍沒收斂而
+      // 逼近逾時（見上面 estimateTermStart 那段的說明）。只有在完全找不到
+      // 目前生效的學年學期（currentTerm 是 null，代表 academic_terms 整張表
+      // 都還沒有任何資料）時，termDateRange.start 才會維持 null——這種情況下
+      // 確實沒有任何依據可以估出合理範圍，只能維持不限制。
       if (termDateRange.start) attQuery = attQuery.gte('record_date', termDateRange.start);
       if (termDateRange.end) attQuery = attQuery.lte('record_date', termDateRange.end);
       const { data: attRows, error: attErr } = await attQuery;
@@ -205,6 +227,19 @@ export default function SubjectAttendanceViewPage() {
         if (!isThisClass) return;
         existingByKey[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
       });
+
+      // 【本輪新增】反映事項「這頁也要點學生名字看到他哪些天不在」——把這堂課
+      // 範圍內、非出席的紀錄依學生整理起來，點姓名時列出日期＋第幾節＋狀態。
+      const exc: Record<string, ExceptionRecord[]> = {};
+      (attRows ?? []).forEach((r: any) => {
+        if (!(EXCEPTION_STATUSES as readonly string[]).includes(r.status)) return;
+        const d = new Date(`${r.record_date}T00:00:00`);
+        const weekday = d.getDay() || 7;
+        const isThisClass = opt.slots.some((s) => s.weekday === weekday && s.period_no === r.period_no);
+        if (!isThisClass) return;
+        (exc[r.student_no] = exc[r.student_no] ?? []).push({ status: r.status, date: r.record_date, period: r.period_no });
+      });
+      setExceptions(exc);
 
       // 【本輪修正】反映事項「所有人的出席、曠課、遲到、病假、事假、公假總和節數
       // 應該要一樣，但是並沒有」——根因：attendance 這張表只有老師「實際點過」的
@@ -297,7 +332,14 @@ export default function SubjectAttendanceViewPage() {
             {students.map((s) => (
               <tr key={s.student_no} style={{ borderTop: '1px solid #eee' }}>
                 <td style={{ padding: 6 }}>{s.seat_no}</td>
-                <td style={{ padding: 6 }}>{s.name}</td>
+                <td style={{ padding: 6 }}>
+                  <button
+                    onClick={() => setDetailStudent(s)}
+                    style={{ background: 'none', border: 'none', padding: 0, color: '#185FA5', textDecoration: 'underline', cursor: 'pointer', fontSize: 13 }}
+                  >
+                    {s.name}
+                  </button>
+                </td>
                 {STATUS_OPTIONS.map((opt) => (
                   <td key={opt} style={{ padding: 6, textAlign: 'right' }}>
                     {summary[s.student_no]?.[opt] ?? 0}
@@ -314,6 +356,50 @@ export default function SubjectAttendanceViewPage() {
             )}
           </tbody>
         </table>
+      )}
+
+      {detailStudent && (
+        <div
+          onClick={() => setDetailStudent(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 16 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: '#fff', borderRadius: 8, padding: 20, width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto' }}
+          >
+            <h2 style={{ fontSize: 15, marginBottom: 4 }}>
+              {detailStudent.seat_no} 號 {detailStudent.name}　出缺席明細
+            </h2>
+            <p style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>
+              這學期到今天為止、這堂課的紀錄（只列出曠課、遲到、病假、事假、公假）
+            </p>
+            {(exceptions[detailStudent.student_no] ?? []).length === 0 ? (
+              <p style={{ fontSize: 13, color: '#999' }}>這段期間這堂課沒有任何曠課、遲到、病假、事假、公假紀錄。</p>
+            ) : (
+              EXCEPTION_STATUSES.map((st) => {
+                const list = (exceptions[detailStudent.student_no] ?? []).filter((r) => r.status === st);
+                if (list.length === 0) return null;
+                return (
+                  <div key={st} style={{ marginBottom: 12 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                      {st}　共 {list.length} 節
+                    </p>
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
+                      {list.map((r) => (
+                        <li key={`${r.date}|${r.period}`}>
+                          {formatRecordDate(r.date)}　{r.date}　第 {r.period} 節
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })
+            )}
+            <button onClick={() => setDetailStudent(null)} style={{ padding: '6px 16px', marginTop: 4 }}>
+              關閉
+            </button>
+          </div>
+        </div>
       )}
     </main>
   );
