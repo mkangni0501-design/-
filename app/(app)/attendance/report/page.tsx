@@ -259,26 +259,28 @@ function AttendanceReportPageInner() {
       // 被查到、也不會被算進任何一欄（不是被誤算成「出席」，是整筆憑空消失）——這才是
       // 「全校出缺席節數兜不起來」的根因：這裡漏算的是「一週出缺席登錄表」（attendance
       // 表本身）明明有的紀錄，不是計算方式的四捨五入或範圍差異。
-      // 修法：把 attRows 裡實際存在、但不在 scheduledSet 裡的 (日期,節次) 也一併補進
-      // 要加總的清單——這樣不管節次設定後來有沒有被調整過，已經登錄過的紀錄都保證會被
-      // 算進對應的欄位，不會再整筆消失；沒有紀錄的學生在這些補進來的節次一樣視為「出席」，
-      // 跟其他節次的計算邏輯一致。
-      const extraSlots = new Map<string, { dateStr: string; period_no: number }>();
-      (attRows ?? []).forEach((r: any) => {
-        const key = `${r.record_date}|${r.period_no}`;
-        if (!scheduledSet.has(key) && !extraSlots.has(key)) {
-          extraSlots.set(key, { dateStr: r.record_date, period_no: r.period_no });
-        }
-      });
-      const allSlots = extraSlots.size > 0 ? [...scheduledDates, ...extraSlots.values()] : scheduledDates;
-
+      //
+      // 【本輪再次修正】上一輪把「補進來的節次」（extraSlots）當成全班共用的一份清單，
+      // 每一位學生都會在這些補進來的節次上被算一次——但那些節次只是「某個學生」在
+      // 節次設定調整前曾經被登錄過，不代表「全班」那一天真的有開到那一節課。結果是：
+      // 其他根本沒有那一節課、也沒有任何紀錄的學生，會被平白多算一節「出席」，導致
+      // 「出席」總節數比一週登錄表上實際看到的還要多——這正是使用者反映「數據不一致」
+      // 的另一個根因。改成 extraSlots 只補「這個學生自己」實際有紀錄的節次，不會影響
+      // 到班上其他學生的出席計算。
       const map: Record<string, Record<string, number>> = {};
       rows.forEach((s) => {
         map[s.student_no] = {};
-        allSlots.forEach(({ dateStr, period_no }) => {
+        scheduledDates.forEach(({ dateStr, period_no }) => {
           const status = existingByKey[`${s.student_no}|${dateStr}|${period_no}`] ?? '出席';
           map[s.student_no][status] = (map[s.student_no][status] ?? 0) + 1;
         });
+      });
+      (attRows ?? []).forEach((r: any) => {
+        const key = `${r.record_date}|${r.period_no}`;
+        if (scheduledSet.has(key)) return; // 已經在上面 scheduledDates 那一輪算過了，不要重複計算
+        const rec = map[r.student_no];
+        if (!rec) return;
+        rec[r.status] = (rec[r.status] ?? 0) + 1;
       });
       setSummary(map);
       const exc: Record<string, ExceptionRecord[]> = {};
