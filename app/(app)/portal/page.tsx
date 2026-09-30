@@ -33,6 +33,7 @@ type Guardian = { id: string; relation: string; name: string | null; phone: stri
 type SubjectScoreRow = { subject: string; midterm: number | null; final: number | null; daily: number | null; subject_weighted_score: number | null };
 type ScheduleRow = { weekday: number; period_no: number; subject: string; teacher_name: string };
 type BulletinPost = { id: string; title: string; content: string; published_at: string | null };
+type ConductEventRow = { id: string; event_date: string; event_type: string; count: number; reason: string | null; created_at: string };
 
 // 可修改的欄位：本人（students 表）的地址/電話，以及每位監護人（guardians 表）的姓名/電話。
 // guardian_id 為 null 代表改的是 students 表本身的欄位。
@@ -64,7 +65,7 @@ const STUDENT_PROFILE_FIELDS: { field: string; label: string }[] = [
 ];
 
 export default function ParentPortalPage() {
-  const [activeTab, setActiveTab] = useState<'成績' | '課表' | '通知'>('成績');
+  const [activeTab, setActiveTab] = useState<'成績' | '課表' | '通知' | '獎懲'>('成績');
   const [linkedStudents, setLinkedStudents] = useState<LinkedStudent[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -394,6 +395,26 @@ export default function ParentPortalPage() {
 
   const hasUnseenNotification = (showAlert || editRequests.length > 0) && notificationSignal !== seenSignal;
 
+  // 【本輪新增】反映事項「增加查看獎懲頁面...家長及同學只能看到自己的」——
+  // conduct_events 的 read_conduct_events_for_history 政策（sql/98）已經開放
+  // is_linked_parent(student_no) 讀取，這裡跟其他分頁一樣，換小孩或切到這個
+  // 分頁才查一次。
+  const [rewardEvents, setRewardEvents] = useState<ConductEventRow[]>([]);
+  const [loadingRewards, setLoadingRewards] = useState(false);
+  useEffect(() => {
+    if (activeTab !== '獎懲' || !selected?.student_no) return;
+    (async () => {
+      setLoadingRewards(true);
+      const { data } = await supabase
+        .from('conduct_events')
+        .select('id, event_date, event_type, count, reason, created_at')
+        .eq('student_no', selected.student_no)
+        .order('event_date', { ascending: false });
+      setRewardEvents((data ?? []) as ConductEventRow[]);
+      setLoadingRewards(false);
+    })();
+  }, [activeTab, selected?.student_no]);
+
   // 切到「教師/班級課表」分頁、或換了選到的小孩、或本學期班級變了，才查課表——
   // 不用每次切分頁都重查，同一個班級課表查過一次就夠。
   useEffect(() => {
@@ -484,7 +505,7 @@ export default function ParentPortalPage() {
         <>
           {/* 頁面上方三個切換按鈕：成績／教師班級課表／通知 */}
           <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid #e5e5e0' }}>
-            {(['成績', '課表', '通知'] as const).map((tab) => (
+            {(['成績', '課表', '獎懲', '通知'] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -766,6 +787,37 @@ export default function ParentPortalPage() {
                 ) : (
                   <p style={{ fontSize: 13, color: '#666' }}>目前還沒有排課資料。</p>
                 )
+              )}
+            </section>
+          )}
+
+          {activeTab === '獎懲' && (
+            <section>
+              {loadingRewards ? (
+                <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
+              ) : rewardEvents.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#666' }}>目前還沒有任何獎懲紀錄。</p>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: 6 }}>登記時間</th>
+                      <th style={{ textAlign: 'left', padding: 6 }}>類別</th>
+                      <th style={{ textAlign: 'right', padding: 6 }}>次數</th>
+                      <th style={{ textAlign: 'left', padding: 6 }}>事由</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rewardEvents.map((r) => (
+                      <tr key={r.id} style={{ borderTop: '1px solid #eee' }}>
+                        <td style={{ padding: 6, whiteSpace: 'nowrap' }}>{new Date(r.created_at).toLocaleString('zh-TW')}</td>
+                        <td style={{ padding: 6 }}>{r.event_type}</td>
+                        <td style={{ padding: 6, textAlign: 'right' }}>{r.count}</td>
+                        <td style={{ padding: 6, color: '#666' }}>{r.reason ?? ''}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               )}
             </section>
           )}

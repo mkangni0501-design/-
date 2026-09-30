@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { restoreBackup, parseUploadedSnapshot, countsFromSnapshot, BackupSnapshot } from '@/lib/backupRestore';
+import { restoreBackup, parseUploadedSnapshot, countsFromSnapshot, insertBackupSnapshot, loadBackupSnapshot, BackupSnapshot } from '@/lib/backupRestore';
 
 // 還原本身（尤其上傳大檔案那條路徑：從 Storage 下載、parse、逐表刪除/插入）
 // 可能需要比預設更久的執行時間。
@@ -66,27 +66,38 @@ export async function POST(req: NextRequest) {
       // 從此變成「這個系統裡有的第一筆備份紀錄」，之後可以直接在清單上看到/下載/
       // 再次還原，不用每次都重新上傳檔案。理由與寫入方式（拉長 statement_timeout）
       // 見 sql/79backup_timeout_and_upload_restore.sql。
-      const { data: insertedRaw, error: insertErr } = await supabaseAdmin
-        .rpc('admin_insert_backup', {
-          p_kind: '上傳',
-          p_created_by: callerAuth.user.id,
-          p_tables: snapshot,
-          p_table_counts: countsFromSnapshot(snapshot),
-        })
-        .single();
-      if (insertErr || !insertedRaw) {
+      // 改用 insertBackupSnapshot()：上傳還原的檔案內容本來就可能很大（跟手動/
+      // 自動備份同樣的道理），理由見 lib/backupRestore.ts、
+      // sql/97fix_backup_creation_unknown_error.sql 的說明。
+      const { data: inserted, error: insertErr } = await insertBackupSnapshot(
+        supabaseAdmin,
+        '上傳',
+        callerAuth.user.id,
+        snapshot,
+        countsFromSnapshot(snapshot)
+      );
+      if (insertErr || !inserted) {
         return NextResponse.json({ error: '上傳檔案已讀取，但存成備份紀錄失敗：' + (insertErr?.message ?? '未知錯誤') }, { status: 500 });
       }
-      // admin_insert_backup() 的回傳型別沒有納入這個專案的 Supabase 型別產生流程，
-      // 所以 .rpc(...).single() 推斷出來的是 unknown，這裡明確標註實際欄位型別。
-      const inserted = insertedRaw as { id: string };
       targetBackupId = inserted.id;
     } else {
-      const { data: backupRow, error: backupErr } = await supabaseAdmin.from('backups').select('tables').eq('id', backupId).single();
+      const { data: backupRow, error: backupErr } = await supabaseAdmin
+        .from('backups')
+        .select('tables, storage_path')
+        .eq('id', backupId)
+        .single();
       if (backupErr || !backupRow) {
         return NextResponse.json({ error: '找不到這筆備份' }, { status: 404 });
       }
-      snapshot = backupRow.tables as BackupSnapshot;
+      // 【本輪修正】反映事項「備份失敗：未知錯誤」順便修正的另一半：備份現在可能
+      // 是「大檔案存在 Storage、backups.tables 是 null」這種形式（見上面
+      // insertBackupSnapshot 的說明），還原時要用 loadBackupSnapshot() 才能正確
+      // 取出實際內容，不能再假設 tables 一定有值。
+      const { snapshot: loaded, error: loadErr } = await loadBackupSnapshot(supabaseAdmin, backupRow);
+      if (loadErr || !loaded) {
+        return NextResponse.json({ error: '讀取備份內容失敗：' + (loadErr?.message ?? '未知錯誤') }, { status: 500 });
+      }
+      snapshot = loaded;
       targetBackupId = backupId as string;
     }
 
@@ -99,7 +110,10 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: result.errors.length === 0, ...result });
   } catch (e: any) {
-    return NextResponse.json({ error: e.message ?? '未知錯誤' }, { status: 500 });
+    console.error('[backup/restore] failed:', e);
+    const detail =
+      e?.message || e?.error_description || e?.details || e?.hint || (typeof e === 'string' ? e : null) || JSON.stringify(e) || '未知錯誤';
+    return NextResponse.json({ error: detail }, { status: 500 });
   } finally {
     // 上傳的檔案內容已經存進 backups 表（或還原失敗，反正這份暫存檔都不再需要），
     // 不管成功失敗都從 Storage 刪掉，避免佔用空間、也避免留著一份完整校務資料

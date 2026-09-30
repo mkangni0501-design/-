@@ -398,6 +398,14 @@ function AttendanceReportPageInner() {
                       {list.map((r) => (
                         <li key={`${r.date}|${r.period}`}>
                           {formatRecordDate(r.date)}　{r.date}　第 {r.period} 節
+                          {classId && (
+                            <a
+                              href={`/attendance/weekly?classId=${classId}&date=${r.date}&student=${detailStudent.student_no}`}
+                              style={{ marginLeft: 8, fontSize: 12, color: '#185FA5' }}
+                            >
+                              修正
+                            </a>
+                          )}
                         </li>
                       ))}
                     </ul>

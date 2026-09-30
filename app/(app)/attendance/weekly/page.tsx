@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView, getCurrentTeacherId } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useIsMobile } from '@/lib/useIsMobile';
@@ -248,8 +249,18 @@ async function fetchSubjectsAndScoresForClass(
   return { subjects, currentScores };
 }
 
-export default function WeeklyAttendancePage() {
+function WeeklyAttendancePageInner() {
   const isMobile = useIsMobile();
+  // 【本輪新增】反映事項「點名字後的出缺席明細增加連結功能，讓教師可以即時修正
+  // （修正時間內）或提出修正申請（超過時間）」——出缺席明細那邊（attendance/report
+  // 頁）改成幫每一筆紀錄加一個「修正」連結，連到這裡並帶上 ?classId=...&date=...
+  // &student=...，這裡讀出來後直接跳到那個學生所在的班級、那一天所在的那一週，
+  // 不用再手動選班級、翻頁找日期。是否「在修正期限內」（可以直接改）還是「已經
+  // 逾期」（只能送出修正申請）完全沿用這頁本來就有的 locked／correction_requests
+  // 邏輯，不用另外重寫一套判斷。
+  const searchParams = useSearchParams();
+  const focusClassId = searchParams.get('classId');
+  const focusStudentNo = searchParams.get('student');
   const [me, setMe] = useState<{ id: string; name: string; role: string } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isHomeroom, setIsHomeroom] = useState(false);
@@ -259,8 +270,13 @@ export default function WeeklyAttendancePage() {
   const [department, setDepartment] = useState('');
   const [students, setStudents] = useState<StudentRow[]>([]);
   // pivotDate：目前檢視週次所在的任一天，預設今天。可用「上一週／下一週」平移，
-  // 也可以直接用日期選擇器跳到任何一天所在的那一週。
-  const [pivotDate, setPivotDate] = useState<Date>(() => new Date());
+  // 也可以直接用日期選擇器跳到任何一天所在的那一週。網址帶了 ?date=... 的話
+  // （從出席紀錄查詢頁點「修正」連結過來），優先用那個日期，見上面的說明。
+  const [pivotDate, setPivotDate] = useState<Date>(() => {
+    const d = searchParams.get('date');
+    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) return new Date(`${d}T00:00:00`);
+    return new Date();
+  });
   const [periodCounts, setPeriodCounts] = useState<number[]>([0, 0, 0, 0, 0, 0]);
   const [attMap, setAttMap] = useState<Record<string, string>>({});
   const [locked, setLocked] = useState(false);
@@ -412,7 +428,8 @@ export default function WeeklyAttendancePage() {
           grade_level: c.grade_level,
         }));
         setClassOptions(options);
-        if (options.length > 0) setClassId(options[0].id);
+        const preferred = focusClassId && options.some((o) => o.id === focusClassId) ? focusClassId : options[0]?.id;
+        if (preferred) setClassId(preferred);
         else setLoading(false);
         return;
       }
@@ -1470,8 +1487,11 @@ export default function WeeklyAttendancePage() {
           </thead>
           <tbody>
             {students.map((s) => (
-              <tr key={s.student_no} style={{ borderTop: '1px solid #eee' }}>
-                <td style={{ padding: 6, position: 'sticky', left: 0, background: '#fff', whiteSpace: 'nowrap' }}>
+              <tr
+                key={s.student_no}
+                style={{ borderTop: '1px solid #eee', background: s.student_no === focusStudentNo ? '#FFF6D9' : undefined }}
+              >
+                <td style={{ padding: 6, position: 'sticky', left: 0, background: s.student_no === focusStudentNo ? '#FFF6D9' : '#fff', whiteSpace: 'nowrap' }}>
                   {s.seat_no} {s.name}
                 </td>
                 {weekDates.map((d, i) => {
@@ -1663,5 +1683,15 @@ export default function WeeklyAttendancePage() {
         </div>
       )}
     </main>
+  );
+}
+
+// useSearchParams() 依 Next.js 規定要包在 Suspense 裡（否則 build 會報錯／
+// 頁面會被強制整頁變成 client-only fallback），做法跟 attendance/report 頁一致。
+export default function WeeklyAttendancePage() {
+  return (
+    <Suspense fallback={null}>
+      <WeeklyAttendancePageInner />
+    </Suspense>
   );
 }

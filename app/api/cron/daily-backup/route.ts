@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runBackup } from '@/lib/backupRestore';
+import { runBackup, insertBackupSnapshot } from '@/lib/backupRestore';
 
 // 理由同 app/api/admin/backup/create/route.ts：全校資料撈取＋寫入備份紀錄，
 // 資料量大時需要比預設更久的執行時間。
@@ -21,24 +21,18 @@ export async function GET(req: NextRequest) {
 
   try {
     const { tables, counts } = await runBackup(supabaseAdmin);
-    // 改用 admin_insert_backup()：理由同「手動備份」route，避免資料量變大後
-    // 單一 INSERT 寫入整包快照被 statement_timeout 取消。
-    const { data: insertedRaw, error: insertErr } = await supabaseAdmin
-      .rpc('admin_insert_backup', {
-        p_kind: '自動',
-        p_created_by: null,
-        p_tables: tables,
-        p_table_counts: counts,
-      })
-      .single();
-    if (insertErr) {
-      return NextResponse.json({ error: '備份完成但寫入紀錄失敗：' + insertErr.message }, { status: 500 });
+    // 改用 insertBackupSnapshot()：理由同「手動備份」route（見該檔案與
+    // sql/97fix_backup_creation_unknown_error.sql 的說明）——資料量大時改走
+    // Storage，避免整包塞進單一 RPC 請求在網路層失敗。
+    const { data: inserted, error: insertErr } = await insertBackupSnapshot(supabaseAdmin, '自動', null, tables, counts);
+    if (insertErr || !inserted) {
+      return NextResponse.json({ error: '備份完成但寫入紀錄失敗：' + (insertErr?.message ?? '未知錯誤') }, { status: 500 });
     }
-    // admin_insert_backup() 的回傳型別沒有納入這個專案的 Supabase 型別產生流程，
-    // 所以 .rpc(...).single() 推斷出來的是 unknown，這裡明確標註實際欄位型別。
-    const inserted = insertedRaw as { id: string; created_at: string };
     return NextResponse.json({ success: true, id: inserted.id, created_at: inserted.created_at, counts });
   } catch (e: any) {
-    return NextResponse.json({ error: e.message ?? '未知錯誤' }, { status: 500 });
+    console.error('[cron/daily-backup] failed:', e);
+    const detail =
+      e?.message || e?.error_description || e?.details || e?.hint || (typeof e === 'string' ? e : null) || JSON.stringify(e) || '未知錯誤';
+    return NextResponse.json({ error: detail }, { status: 500 });
   }
 }

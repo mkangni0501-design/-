@@ -17,11 +17,16 @@ import ErrorBanner from '@/components/ErrorBanner';
 // 次數（1-5次）分開選，原因是整批共用一個、填在下面。
 // 其他教師一樣只能對自己有教過的班級送出申請（資料庫 sql/95 也有擋）。
 //
-// 【懲處】（警告／小過／大過）——沿用上一輪的規則：只有訓導部門／系統管理員S
-// 看得到這個分頁，送出後直接登記，不用審核（這次反映事項沒有要求懲處也要審核）。
+// 【懲處】（警告／小過／大過）——【本輪修正】反映事項「補上教師『懲處』的規則
+// （比照『敘獎』）」：訓導部門／系統管理員S 維持原本規則，送出後直接登記、
+// 不用審核；其他教師現在也能對自己有教過的班級送出懲處申請，規則完全比照
+// 敘獎的分層審核（管理員B→（小過/大過再送）管理員A→（大過再送）管理員S），
+// 只是換成「警告=嘉獎那一級」「小過=小功那一級」「大過=大功那一級」（見
+// sql/98 的說明）。UI 上敘獎／懲處兩種模式共用同一份「勾選＋類別＋次數」表格，
+// 只是類別選單依模式換成 REWARD_TYPES 或 PUNISHMENT_TYPES。
 //
-// 管理員A／B／系統管理員S 打開這頁時，另外會看到「待我審核的敘獎申請」，可以
-// 逐筆或全選後一次「同意」或「不同意」。
+// 管理員A／B／系統管理員S 打開這頁時，另外會看到「待我審核的敘獎/懲處申請」，
+// 可以逐筆或全選後一次「同意」或「不同意」。
 
 const REWARD_TYPES = ['嘉獎', '小功', '大功'] as const;
 const PUNISHMENT_TYPES = ['大過', '小過', '警告'] as const;
@@ -67,12 +72,10 @@ export default function RewardsPage() {
 
   // 敘獎：每位學生獨立勾選是否納入這次批次、要登記哪一種、幾次
   const [rewardIncluded, setRewardIncluded] = useState<Record<string, boolean>>({});
-  const [rewardType, setRewardType] = useState<Record<string, (typeof REWARD_TYPES)[number]>>({});
+  // 型別用 string 而不是 (typeof REWARD_TYPES)[number]：這個 state 現在敘獎／
+  // 懲處兩種模式共用，值可能是 REWARD_TYPES 或 PUNISHMENT_TYPES 其中一種。
+  const [rewardType, setRewardType] = useState<Record<string, string>>({});
   const [rewardCount, setRewardCount] = useState<Record<string, number>>({});
-
-  // 懲處：沿用原本「整批同一種、同一天」的做法
-  const [punishSelected, setPunishSelected] = useState<Record<string, string>>({});
-  const [punishType, setPunishType] = useState<string>('警告');
 
   const [eventDate, setEventDate] = useState(todayStr());
   const [reason, setReason] = useState('');
@@ -194,11 +197,10 @@ export default function RewardsPage() {
         rows.forEach((s) => (next[s.student_no] = s.name));
         return next;
       });
-      // 換班級時，重置敘獎逐列的暫存狀態，避免帶著上一班的勾選跑到新班級
+      // 換班級時，重置逐列的暫存狀態，避免帶著上一班的勾選跑到新班級
       setRewardIncluded({});
       setRewardType({});
       setRewardCount({});
-      setPunishSelected({});
       loadRecent(nos);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -253,37 +255,21 @@ export default function RewardsPage() {
     setRewardIncluded(Object.fromEntries(students.map((s) => [s.student_no, next])));
   }
 
-  const punishSelectedCount = Object.keys(punishSelected).length;
-  const allPunishSelected = useMemo(
-    () => students.length > 0 && students.every((s) => s.student_no in punishSelected),
-    [students, punishSelected]
-  );
-  function togglePunishStudent(s: StudentRow) {
-    setPunishSelected((prev) => {
-      const next = { ...prev };
-      if (s.student_no in next) delete next[s.student_no];
-      else next[s.student_no] = s.name;
-      return next;
-    });
-  }
-  function toggleAllPunish() {
-    setPunishSelected((prev) => {
-      const next = { ...prev };
-      if (allPunishSelected) students.forEach((s) => delete next[s.student_no]);
-      else students.forEach((s) => (next[s.student_no] = s.name));
-      return next;
-    });
-  }
-
-  async function handleSubmitReward() {
+  // 【本輪修正】原本只有敘獎會走這條「送審」的路；現在教師登記懲處也要走一樣
+  // 的流程（反映事項「補上教師『懲處』的規則，比照『敘獎』」），改成通用版本，
+  // 用 kind 參數決定文案／預設類別，敘獎、懲處都共用同一份
+  // rewardIncluded／rewardType／rewardCount 這幾個 state（兩種模式互斥，不會
+  // 同時用到）。
+  async function handleSubmitRequest(kind: '敘獎' | '懲處') {
     setMessage(null);
     const nos = rewardIncludedNos;
-    if (nos.length === 0) return alert('請先勾選要敘獎的學生。');
+    if (nos.length === 0) return alert(`請先勾選要${kind}的學生。`);
     if (!reason.trim()) return alert('請填寫原因。');
-    if (!isFull && !teacherId) return alert('找不到您的教師資料，無法送出申請。');
+    if (!teacherId && !isFull) return alert('找不到您的教師資料，無法送出申請。');
 
+    const defaultType = kind === '敘獎' ? '嘉獎' : '警告';
     const rows = nos.map((student_no) => {
-      const type = rewardType[student_no] ?? '嘉獎';
+      const type = rewardType[student_no] ?? defaultType;
       const count = rewardCount[student_no] ?? 1;
       const unit = pointDefaults[type] ?? FALLBACK_POINTS[type];
       return { student_no, type, count, points: unit * count };
@@ -291,7 +277,7 @@ export default function RewardsPage() {
 
     const summary = rows.map((r) => `${nameByNo[r.student_no] ?? r.student_no}：${r.type} × ${r.count}`).join('\n');
     const ok = window.confirm(
-      `即將送出以下敘獎申請：\n\n${summary}\n\n原因：${reason.trim()}\n\n` +
+      `即將送出以下${kind}申請：\n\n${summary}\n\n原因：${reason.trim()}\n\n` +
         '送出後會先送管理員B審核，視類別可能還要再送管理員A、管理員S，全部通過後才會正式記錄到學生資料，點選確認後無法自行撤回。'
     );
     if (!ok) return;
@@ -320,44 +306,51 @@ export default function RewardsPage() {
       alert('送出申請失敗：' + error.message);
       return;
     }
-    setMessage(`已送出 ${rows.length} 位學生的敘獎申請，待管理員B審核。`);
+    setMessage(`已送出 ${rows.length} 位學生的${kind}申請，待管理員B審核。`);
     setRewardIncluded({});
     setRewardType({});
     setRewardCount({});
     setReason('');
   }
 
-  async function handleSubmitPunishment() {
+  // 訓導部門／系統管理員S 登記懲處：維持原本「直接生效、不用審核」的規則，
+  // 改成跟敘獎一樣「每位學生各自選類別＋次數」，count 直接寫進
+  // conduct_events.count（sql/98 新增的欄位），points 依 count 換算。
+  async function handleSubmitDirectPunishment() {
     setMessage(null);
-    const nos = Object.keys(punishSelected);
-    if (nos.length === 0) return alert('請先勾選學生。');
+    const nos = rewardIncludedNos;
+    if (nos.length === 0) return alert('請先勾選要懲處的學生。');
     if (!reason.trim()) return alert('請填寫原因。');
 
-    const ok = window.confirm(
-      `確定為 ${nos.length} 位學生登記「${punishType}」（${eventDate}）？\n原因：${reason.trim()}`
-    );
+    const rows = nos.map((student_no) => {
+      const type = rewardType[student_no] ?? '警告';
+      const count = rewardCount[student_no] ?? 1;
+      const unit = pointDefaults[type] ?? FALLBACK_POINTS[type];
+      return { student_no, type, count, points: unit * count };
+    });
+    const summary = rows.map((r) => `${nameByNo[r.student_no] ?? r.student_no}：${r.type} × ${r.count}`).join('\n');
+    const ok = window.confirm(`確定登記以下懲處（${eventDate}）？\n\n${summary}\n\n原因：${reason.trim()}`);
     if (!ok) return;
 
     setBusy(true);
     const { data: existing } = await supabase
       .from('conduct_events')
-      .select('student_no')
+      .select('student_no, event_type')
       .in('student_no', nos)
-      .eq('event_date', eventDate)
-      .eq('event_type', punishType);
-    const existingSet = new Set((existing ?? []).map((r: any) => r.student_no));
-    const toInsert = nos.filter((n) => !existingSet.has(n));
+      .eq('event_date', eventDate);
+    const existingSet = new Set((existing ?? []).map((r: any) => `${r.student_no}|${r.event_type}`));
+    const toInsert = rows.filter((r) => !existingSet.has(`${r.student_no}|${r.type}`));
     if (toInsert.length === 0) {
       setBusy(false);
-      setMessage('所選學生當天都已經登記過同一種懲處，沒有新增任何紀錄。');
+      setMessage('所選學生當天都已經登記過對應的懲處類別，沒有新增任何紀錄。');
       return;
     }
-    const points = pointDefaults[punishType] ?? FALLBACK_POINTS[punishType];
-    const payload = toInsert.map((student_no) => ({
-      student_no,
+    const payload = toInsert.map((r) => ({
+      student_no: r.student_no,
       event_date: eventDate,
-      event_type: punishType,
-      points,
+      event_type: r.type,
+      count: r.count,
+      points: r.points,
       reason: reason.trim(),
       recorded_by: teacherId,
     }));
@@ -368,11 +361,13 @@ export default function RewardsPage() {
       return;
     }
     setMessage(
-      `已登記 ${toInsert.length} 位學生「${punishType}」` +
-        (existingSet.size > 0 ? `；另有 ${existingSet.size} 位當天已登記過同一種懲處，已略過` : '') +
+      `已登記 ${toInsert.length} 位學生的懲處` +
+        (rows.length > toInsert.length ? `；另有 ${rows.length - toInsert.length} 位當天已登記過同一類別，已略過` : '') +
         '。'
     );
-    setPunishSelected({});
+    setRewardIncluded({});
+    setRewardType({});
+    setRewardCount({});
     setReason('');
     loadRecent(students.map((s) => s.student_no));
   }
@@ -427,7 +422,7 @@ export default function RewardsPage() {
       {myStage && (
         <div style={{ border: '1px solid #E0C68A', background: '#FFFBEF', borderRadius: 8, padding: 16, marginBottom: 24 }}>
           <h2 style={{ fontSize: 14, marginBottom: 8 }}>
-            待您（{STAGE_LABEL[myStage]}）審核的敘獎申請　
+            待您（{STAGE_LABEL[myStage]}）審核的敘獎／懲處申請　
             <span style={{ fontWeight: 400, fontSize: 12, color: '#999' }}>共 {reviewRows.length} 筆</span>
           </h2>
           {reviewRows.length === 0 ? (
@@ -491,17 +486,41 @@ export default function RewardsPage() {
         </div>
       )}
 
-      {isFull && (
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-          <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
-            <input type="radio" checked={mode === 'reward'} onChange={() => setMode('reward')} />
-            敘獎（嘉獎／小功／大功）
-          </label>
-          <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
-            <input type="radio" checked={mode === 'punishment'} onChange={() => setMode('punishment')} />
-            懲處（警告／小過／大過）
-          </label>
-        </div>
+      {/* 【本輪修正】反映事項「補上教師『懲處』的規則（比照『敘獎』）」——這個
+          切換原本只有訓導/管理員（isFull）看得到，一般教師現在也能送出懲處
+          申請，所以兩種身分都要看得到這個切換。 */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <input
+            type="radio"
+            checked={mode === 'reward'}
+            onChange={() => {
+              setMode('reward');
+              setRewardIncluded({});
+              setRewardType({});
+              setRewardCount({});
+            }}
+          />
+          敘獎（嘉獎／小功／大功）
+        </label>
+        <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <input
+            type="radio"
+            checked={mode === 'punishment'}
+            onChange={() => {
+              setMode('punishment');
+              setRewardIncluded({});
+              setRewardType({});
+              setRewardCount({});
+            }}
+          />
+          懲處（警告／小過／大過）
+        </label>
+      </div>
+      {mode === 'punishment' && !isFull && (
+        <p style={{ fontSize: 12, color: '#A36A2D', marginBottom: 12 }}>
+          懲處申請一樣要走管理員審核（警告只需管理員B；小過還要再送管理員A；大過還要再送管理員S），全部通過後才會正式記錄到學生資料，規則跟敘獎相同。
+        </p>
       )}
 
       {classOptions.length === 0 ? (
@@ -520,163 +539,98 @@ export default function RewardsPage() {
             ))}
           </select>
 
-          {mode === 'reward' || !isFull ? (
-            <>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 16 }}>
-                <thead>
-                  <tr>
-                    <th style={{ width: 36, padding: 6 }}>
-                      <input type="checkbox" checked={allRewardIncluded} onChange={toggleAllReward} title="全選／取消全選本班" />
-                    </th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>座號</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>姓名</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>敘獎</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>次數</th>
+          {/* 【本輪修正】敘獎／懲處現在共用同一份「勾選＋類別＋次數」表格，差別只在
+              類別選單（typeOptions）跟送出時呼叫哪個 handler。 */}
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 16 }}>
+            <thead>
+              <tr>
+                <th style={{ width: 36, padding: 6 }}>
+                  <input type="checkbox" checked={allRewardIncluded} onChange={toggleAllReward} title="全選／取消全選本班" />
+                </th>
+                <th style={{ textAlign: 'left', padding: 6 }}>座號</th>
+                <th style={{ textAlign: 'left', padding: 6 }}>姓名</th>
+                <th style={{ textAlign: 'left', padding: 6 }}>{mode === 'reward' ? '敘獎' : '懲處'}</th>
+                <th style={{ textAlign: 'left', padding: 6 }}>次數</th>
+              </tr>
+            </thead>
+            <tbody>
+              {students.map((s) => {
+                const typeOptions: readonly string[] = mode === 'reward' ? REWARD_TYPES : PUNISHMENT_TYPES;
+                const defaultType = mode === 'reward' ? '嘉獎' : '警告';
+                return (
+                  <tr key={s.student_no} style={{ borderTop: '1px solid #eee' }}>
+                    <td style={{ padding: 6, textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        checked={!!rewardIncluded[s.student_no]}
+                        onChange={() => setRewardIncluded((prev) => ({ ...prev, [s.student_no]: !prev[s.student_no] }))}
+                      />
+                    </td>
+                    <td style={{ padding: 6 }}>{s.seat_no}</td>
+                    <td style={{ padding: 6 }}>{s.name}</td>
+                    <td style={{ padding: 6 }}>
+                      <select
+                        value={rewardType[s.student_no] ?? defaultType}
+                        onChange={(e) => setRewardType((prev) => ({ ...prev, [s.student_no]: e.target.value }))}
+                        style={{ padding: 4 }}
+                      >
+                        {typeOptions.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ padding: 6 }}>
+                      <select
+                        value={rewardCount[s.student_no] ?? 1}
+                        onChange={(e) => setRewardCount((prev) => ({ ...prev, [s.student_no]: Number(e.target.value) }))}
+                        style={{ padding: 4 }}
+                      >
+                        {COUNT_OPTIONS.map((n) => (
+                          <option key={n} value={n}>
+                            {n} 次
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {students.map((s) => (
-                    <tr key={s.student_no} style={{ borderTop: '1px solid #eee' }}>
-                      <td style={{ padding: 6, textAlign: 'center' }}>
-                        <input
-                          type="checkbox"
-                          checked={!!rewardIncluded[s.student_no]}
-                          onChange={() =>
-                            setRewardIncluded((prev) => ({ ...prev, [s.student_no]: !prev[s.student_no] }))
-                          }
-                        />
-                      </td>
-                      <td style={{ padding: 6 }}>{s.seat_no}</td>
-                      <td style={{ padding: 6 }}>{s.name}</td>
-                      <td style={{ padding: 6 }}>
-                        <select
-                          value={rewardType[s.student_no] ?? '嘉獎'}
-                          onChange={(e) =>
-                            setRewardType((prev) => ({ ...prev, [s.student_no]: e.target.value as (typeof REWARD_TYPES)[number] }))
-                          }
-                          style={{ padding: 4 }}
-                        >
-                          {REWARD_TYPES.map((t) => (
-                            <option key={t} value={t}>
-                              {t}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td style={{ padding: 6 }}>
-                        <select
-                          value={rewardCount[s.student_no] ?? 1}
-                          onChange={(e) => setRewardCount((prev) => ({ ...prev, [s.student_no]: Number(e.target.value) }))}
-                          style={{ padding: 4 }}
-                        >
-                          {COUNT_OPTIONS.map((n) => (
-                            <option key={n} value={n}>
-                              {n} 次
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                    </tr>
-                  ))}
-                  {students.length === 0 && (
-                    <tr>
-                      <td colSpan={5} style={{ padding: 12, textAlign: 'center', color: '#999' }}>
-                        這個班級目前沒有在學學生
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                );
+              })}
+              {students.length === 0 && (
+                <tr>
+                  <td colSpan={5} style={{ padding: 12, textAlign: 'center', color: '#999' }}>
+                    這個班級目前沒有在學學生
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
 
-              <div style={{ borderTop: '1px solid #eee', paddingTop: 12, maxWidth: 520 }}>
-                <p style={{ fontSize: 13, marginBottom: 8 }}>
-                  已勾選 <b>{rewardIncludedNos.length}</b> 位學生
-                </p>
-                <input
-                  type="date"
-                  value={eventDate}
-                  onChange={(e) => setEventDate(e.target.value)}
-                  style={{ padding: 8, marginBottom: 8 }}
-                />
-                <textarea
-                  placeholder="原因（必填，整批共用）"
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  rows={3}
-                  style={{ width: '100%', padding: 8, marginBottom: 8, display: 'block' }}
-                />
-                <button
-                  onClick={handleSubmitReward}
-                  disabled={busy}
-                  style={{ padding: '8px 18px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6 }}
-                >
-                  {busy ? '送出中…' : '批次登記'}
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 16 }}>
-                <thead>
-                  <tr>
-                    <th style={{ width: 36, padding: 6 }}>
-                      <input type="checkbox" checked={allPunishSelected} onChange={toggleAllPunish} title="全選／取消全選本班" />
-                    </th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>座號</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>姓名</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {students.map((s) => (
-                    <tr key={s.student_no} style={{ borderTop: '1px solid #eee' }}>
-                      <td style={{ padding: 6, textAlign: 'center' }}>
-                        <input type="checkbox" checked={s.student_no in punishSelected} onChange={() => togglePunishStudent(s)} />
-                      </td>
-                      <td style={{ padding: 6 }}>{s.seat_no}</td>
-                      <td style={{ padding: 6 }}>{s.name}</td>
-                    </tr>
-                  ))}
-                  {students.length === 0 && (
-                    <tr>
-                      <td colSpan={3} style={{ padding: 12, textAlign: 'center', color: '#999' }}>
-                        這個班級目前沒有在學學生
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-
-              <div style={{ borderTop: '1px solid #eee', paddingTop: 12, maxWidth: 520 }}>
-                <p style={{ fontSize: 13, marginBottom: 8 }}>
-                  已勾選 <b>{punishSelectedCount}</b> 位學生
-                </p>
-                <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                  <select value={punishType} onChange={(e) => setPunishType(e.target.value)} style={{ padding: 8 }}>
-                    {PUNISHMENT_TYPES.map((t) => (
-                      <option key={t} value={t}>
-                        {t}（{pointDefaults[t] ?? FALLBACK_POINTS[t]}）
-                      </option>
-                    ))}
-                  </select>
-                  <input type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} style={{ padding: 8 }} />
-                </div>
-                <textarea
-                  placeholder="原因（必填）"
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  rows={3}
-                  style={{ width: '100%', padding: 8, marginBottom: 8 }}
-                />
-                <button
-                  onClick={handleSubmitPunishment}
-                  disabled={busy}
-                  style={{ padding: '8px 18px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6 }}
-                >
-                  {busy ? '登記中…' : '批次登記'}
-                </button>
-              </div>
-            </>
-          )}
+          <div style={{ borderTop: '1px solid #eee', paddingTop: 12, maxWidth: 520 }}>
+            <p style={{ fontSize: 13, marginBottom: 8 }}>
+              已勾選 <b>{rewardIncludedNos.length}</b> 位學生
+            </p>
+            <input type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} style={{ padding: 8, marginBottom: 8 }} />
+            <textarea
+              placeholder="原因（必填，整批共用）"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              rows={3}
+              style={{ width: '100%', padding: 8, marginBottom: 8, display: 'block' }}
+            />
+            <button
+              onClick={() => {
+                if (mode === 'reward') handleSubmitRequest('敘獎');
+                else if (isFull) handleSubmitDirectPunishment();
+                else handleSubmitRequest('懲處');
+              }}
+              disabled={busy}
+              style={{ padding: '8px 18px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6 }}
+            >
+              {busy ? '送出中…' : mode === 'punishment' && isFull ? '批次登記' : '批次送出申請'}
+            </button>
+          </div>
 
           {recent.length > 0 && (
             <div style={{ marginTop: 24 }}>
