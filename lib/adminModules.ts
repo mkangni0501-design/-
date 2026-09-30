@@ -79,7 +79,8 @@ export const ALL_MODULES: AdminModule[] = [
   // ---- 訓導 ----
   { key: '/attendance/report', href: '/attendance/report', label: '學生出席紀錄查詢（月報／學期）', adminOnly: false },
   { key: '/reports/school-attendance', href: '/reports/school-attendance', label: '全校出缺席狀況總覽', adminOnly: false },
-  { key: '/discipline/rewards', href: '/discipline/rewards', label: '獎懲登記（大功／小功／嘉獎／大過／小過／警告，可批次；教師僅限自己教過的班級嘉獎／小功）', adminOnly: false },
+  { key: '/discipline/rewards', href: '/discipline/rewards', label: '獎懲登記（大功／小功／嘉獎／大過／小過／警告，可批次；教師僅限自己教過的班級）', adminOnly: false },
+  { key: '/discipline/rewards/history', href: '/discipline/rewards/history', label: '查看獎懲（登記時間、事由、類別、次數；導師本班＋自己登記過的，一般教師僅自己登記過的）', adminOnly: false },
   { key: '/reports/attendance-unlock-requests', href: '/reports/attendance-unlock-requests', label: '出缺勤修正／開放申請審核', adminOnly: false },
   { key: '/reports/profile-requests', href: '/reports/profile-requests', label: '學生資料修改申請審核', adminOnly: false },
   { key: '/admin/attendance-alert-settings', href: '/admin/attendance-alert-settings', label: '出缺席示警門檻設定', adminOnly: true },
@@ -135,6 +136,7 @@ export const DEFAULT_CATEGORIES: Record<string, ModuleCategory[]> = {
   '/attendance/report': ['discipline', 'teacher'],
   '/reports/school-attendance': ['discipline'],
   '/discipline/rewards': ['discipline', 'teacher'],
+  '/discipline/rewards/history': ['discipline', 'teacher'],
   '/reports/attendance-unlock-requests': ['discipline'],
   '/reports/profile-requests': ['discipline'],
   '/admin/attendance-alert-settings': ['discipline'],
