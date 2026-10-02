@@ -360,10 +360,39 @@ export default function ParentPortalPage() {
   // 特徵字串存起來（存在瀏覽器 localStorage，用學號當 key，換人登入或換瀏覽器不會
   // 互相干擾），之後只要內容沒有再變化，提醒就不會再出現，符合「看過就消除，除非有
   // 新內容才又出現」的預期。
+  // 【本輪新增】反映事項「獎懲被批准後要發送通知學生/家長」——conduct_events
+  // 的 read_conduct_events_for_history 政策（sql/98）已經開放
+  // is_linked_parent(student_no) 讀取。這個 app 本來就沒有寄信/推播的機制，
+  // 「通知」分頁一律是「打開時重新查一次目前有什麼，跟上次看過的內容比對」
+  // 這種模式（showAlert／editRequests／公佈欄都是這樣），獎懲核准通知也比照
+  // 辦理：改成跟 selected 一起載入（不限定要切到「獎懲」分頁才查），這樣下面
+  // notificationSignal／「通知」分頁頂端的提醒紅點才能把「有新核准的獎懲」也
+  // 算進去，不用使用者自己想到要點開「獎懲」分頁才會看到。這段要放在
+  // notificationSignal 前面宣告，下面才讀得到 rewardEvents。
+  const [rewardEvents, setRewardEvents] = useState<ConductEventRow[]>([]);
+  const [loadingRewards, setLoadingRewards] = useState(false);
+  useEffect(() => {
+    if (!selected?.student_no) {
+      setRewardEvents([]);
+      return;
+    }
+    (async () => {
+      setLoadingRewards(true);
+      const { data } = await supabase
+        .from('conduct_events')
+        .select('id, event_date, event_type, count, reason, created_at')
+        .eq('student_no', selected.student_no)
+        .order('event_date', { ascending: false });
+      setRewardEvents((data ?? []) as ConductEventRow[]);
+      setLoadingRewards(false);
+    })();
+  }, [selected?.student_no]);
+
   const notificationSignal = JSON.stringify({
     alert: showAlert,
     requests: editRequests.map((r) => `${r.id}:${r.status}`),
     posts: bulletinPosts.map((p) => p.id),
+    rewards: rewardEvents.map((r) => r.id), // 獎懲被核准，見上面的說明
   });
   const seenStorageKey = selected ? `portal_notifications_seen:${selected.student_no}` : null;
   const [seenSignal, setSeenSignal] = useState<string | null>(null);
@@ -393,27 +422,8 @@ export default function ParentPortalPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, seenStorageKey, notificationSignal]);
 
-  const hasUnseenNotification = (showAlert || editRequests.length > 0) && notificationSignal !== seenSignal;
-
-  // 【本輪新增】反映事項「增加查看獎懲頁面...家長及同學只能看到自己的」——
-  // conduct_events 的 read_conduct_events_for_history 政策（sql/98）已經開放
-  // is_linked_parent(student_no) 讀取，這裡跟其他分頁一樣，換小孩或切到這個
-  // 分頁才查一次。
-  const [rewardEvents, setRewardEvents] = useState<ConductEventRow[]>([]);
-  const [loadingRewards, setLoadingRewards] = useState(false);
-  useEffect(() => {
-    if (activeTab !== '獎懲' || !selected?.student_no) return;
-    (async () => {
-      setLoadingRewards(true);
-      const { data } = await supabase
-        .from('conduct_events')
-        .select('id, event_date, event_type, count, reason, created_at')
-        .eq('student_no', selected.student_no)
-        .order('event_date', { ascending: false });
-      setRewardEvents((data ?? []) as ConductEventRow[]);
-      setLoadingRewards(false);
-    })();
-  }, [activeTab, selected?.student_no]);
+  const hasUnseenNotification =
+    (showAlert || editRequests.length > 0 || rewardEvents.length > 0) && notificationSignal !== seenSignal;
 
   // 切到「教師/班級課表」分頁、或換了選到的小孩、或本學期班級變了，才查課表——
   // 不用每次切分頁都重查，同一個班級課表查過一次就夠。
@@ -824,6 +834,25 @@ export default function ParentPortalPage() {
 
           {activeTab === '通知' && (
             <>
+              {/* 【本輪新增】反映事項「獎懲被批准後要發送通知學生/家長」——這個 app
+                  沒有寄信/推播機制，比照這頁其他種類通知（出缺席提醒、公佈欄、
+                  修改申請狀態）的做法：打開「通知」分頁時直接把最近的獎懲列出來，
+                  配合上面提醒紅點（算進 notificationSignal），達到「有新核准的
+                  獎懲會被看到」的效果。只列最近30天，避免越滾越多、舊的獎懲
+                  已經不算是「通知」了。 */}
+              {rewardEvents.filter((r) => Date.now() - new Date(r.created_at).getTime() < 30 * 86400000).length > 0 && (
+                <section style={{ marginBottom: 24, padding: 16, background: '#F3F5EC', border: '1px solid #8FA876', borderRadius: 8 }}>
+                  <p style={{ fontSize: 15, fontWeight: 700, color: '#3F6B4A', marginBottom: 8 }}>🏅 最近的獎懲紀錄</p>
+                  {rewardEvents
+                    .filter((r) => Date.now() - new Date(r.created_at).getTime() < 30 * 86400000)
+                    .map((r) => (
+                      <p key={r.id} style={{ fontSize: 13, color: '#3F6B4A', marginBottom: 4 }}>
+                        {r.event_date}　{r.event_type} × {r.count}
+                        {r.reason ? `　（${r.reason}）` : ''}
+                      </p>
+                    ))}
+                </section>
+              )}
               {showAlert && (
                 <section
                   style={{

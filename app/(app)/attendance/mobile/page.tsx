@@ -88,6 +88,11 @@ export default function MobileAttendancePage() {
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [studentsLoading, setStudentsLoading] = useState(false);
   const [statusMap, setStatusMap] = useState<Record<string, string>>({});
+  // 【本輪新增】反映事項「一日登記表要有防呆機制：按下儲存後把目前登記非出席的
+  // 結果顯現、提醒教師是否確認儲存；尚未儲存要離開也要提醒」——savedStatusMap
+  // 記錄「資料庫目前真正存的狀態」（每次重新載入、或儲存成功後都會同步更新），
+  // statusMap 則是「畫面上目前的狀態」，兩者不一致就代表有還沒儲存的修改。
+  const [savedStatusMap, setSavedStatusMap] = useState<Record<string, string>>({});
   const [locked, setLocked] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState<number | null>(null);
   // 【2026-08-26 新增】見上面 DEFAULT_BACKDATE_GRACE_DAYS 的說明。
@@ -347,6 +352,7 @@ export default function MobileAttendancePage() {
       rows.forEach((r) => (map[r.student_no] = '出席'));
       (existing ?? []).forEach((e: any) => (map[e.student_no] = e.status));
       setStatusMap(map);
+      setSavedStatusMap(map);
 
       // 是否已鎖定：改成呼叫 submission_window_locked()，跟其他頁面一致
       // （班級 > 部別 > 全校 三層 fallback，且「手動鎖定」或「開放結束時間已過」任一成立即算鎖定）。
@@ -380,6 +386,27 @@ export default function MobileAttendancePage() {
 
   function setStatus(studentNo: string, status: string) {
     setStatusMap((prev) => ({ ...prev, [studentNo]: status }));
+  }
+
+  const isDirty = Object.keys(statusMap).some((no) => statusMap[no] !== savedStatusMap[no]);
+
+  // 離開頁面（關分頁、重新整理、輸入別的網址）還有未儲存的修改時提醒一次。
+  // 這個瀏覽器事件只攔得到「整頁離開」，攔不到 Next.js 內部的客戶端路由切換
+  // （例如點選上方導覽列的其他頁面連結）——那種情況見下面切換節次按鈕時的
+  // window.confirm()，是另外個別處理的。
+  useEffect(() => {
+    function handler(e: BeforeUnloadEvent) {
+      if (!isDirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    }
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isDirty]);
+
+  function selectPeriod(key: string) {
+    if (isDirty && !window.confirm('目前這一節還有尚未儲存的修改，切換節次會遺失這些修改，確定要離開嗎？')) return;
+    setSelectedKey(key);
   }
 
   useEffect(() => {
@@ -429,6 +456,20 @@ export default function MobileAttendancePage() {
 
   async function handleSave() {
     if (!selectedEntry) return;
+    // 【本輪新增】反映事項「按下儲存後把目前登記非出席的結果顯現，提醒教師是否
+    // 確認儲存」——存檔前先列出這一節「不是出席」的學生清單讓教師再核對一次，
+    // 跟「一週出缺勤」頁按儲存時的確認框是同樣的用意。全部都是出席的話（沒有
+    // 任何例外）就不用特別列清單，直接問一句是否確認即可。
+    const exceptions = Object.entries(statusMap).filter(([, status]) => status !== '出席');
+    const summary =
+      exceptions.length > 0
+        ? exceptions
+            .map(([no, status]) => `${students.find((s) => s.student_no === no)?.name ?? no}：${status}`)
+            .join('\n')
+        : '（這一節全部學生都是出席）';
+    const confirmed = window.confirm(`即將儲存「${selectedEntry.classLabel ?? ''} 第${selectedEntry.period_no}節」：\n\n${summary}\n\n確定要儲存嗎？`);
+    if (!confirmed) return;
+
     const rows = Object.entries(statusMap).map(([student_no, status]) => ({
       student_no,
       record_date: date,
@@ -442,6 +483,7 @@ export default function MobileAttendancePage() {
       alert('儲存失敗：' + error.message);
     } else {
       alert('已儲存');
+      setSavedStatusMap(statusMap);
       rows.forEach((r) => checkAndPromptNotify(r.student_no));
     }
   }
@@ -504,7 +546,7 @@ export default function MobileAttendancePage() {
           return (
             <button
               key={p.key}
-              onClick={() => setSelectedKey(p.key)}
+              onClick={() => selectPeriod(p.key)}
               style={{
                 padding: '8px 14px',
                 borderRadius: 999,

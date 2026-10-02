@@ -30,6 +30,11 @@ import {
 import ErrorBanner from '@/components/ErrorBanner';
 
 const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公假'] as const;
+// 【本輪新增】反映事項「每一天要用粗體線分開來」——原本每天第一節的左邊框只是
+// 1px 的淺灰細線，六天連在一起很難一眼看出「這一節是星期幾」，改成跟
+// ClassSummaryTab.tsx 的 SUBJECT_DIVIDER 同樣粗細／色調的粗體線，套在每天的
+// 表頭跟每一格資料的最左邊那一節。
+const DAY_DIVIDER = '2px solid #2C2C2A';
 // 【2026-08-26 依回饋修正】這裡原本是寫死的常數 BACKDATE_GRACE_DAYS = 7，跟「出缺席示警
 // 門檻設定」頁裡訓導處可以調整的「出缺席補登逾期天數」（attendance_alert_settings.
 // backfill_overdue_days）完全是兩回事——訓導處在後台改了那個數字，存進資料庫，但這裡
@@ -931,6 +936,11 @@ function WeeklyAttendancePageInner() {
       alert(`已套用，但有${notes.join('；')}。`);
     }
     Array.from(selectedStudents).forEach((studentNo) => checkAndPromptNotify(studentNo));
+    // 【本輪新增】反映事項「使用套用功能，按下套用後要自動回到未勾選狀態」——
+    // 避免套用完上面勾選的學生／日期還留著，使用者沒注意到就按了第二次套用，
+    // 誤把同一批人再套用一次（甚至套成不同的狀態）。套用成功後自動清空勾選。
+    setSelectedStudents(new Set());
+    setSelectedDates(new Set());
   }
 
   // 【本輪新增】反映事項「如有班級學生資料，請直接用班級名冊下載以順利填寫相關出缺
@@ -1464,7 +1474,7 @@ function WeeklyAttendancePageInner() {
                 學生
               </th>
               {weekDates.map((d, i) => (
-                <th key={i} colSpan={Math.max(periodCounts[i], 1)} style={{ padding: 6, borderLeft: '1px solid #eee' }}>
+                <th key={i} colSpan={Math.max(periodCounts[i], 1)} style={{ padding: 6, borderLeft: DAY_DIVIDER }}>
                   星期{WEEKDAY_LABELS[i]}　{toDateStr(d).slice(5)}
                 </th>
               ))}
@@ -1473,7 +1483,7 @@ function WeeklyAttendancePageInner() {
               {weekDates.map((d, i) =>
                 periodCounts[i] > 0 ? (
                   Array.from({ length: periodCounts[i] }).map((_, p) => (
-                    <th key={`${i}-${p}`} style={{ padding: '2px 4px', fontSize: 11, color: '#999', borderLeft: p === 0 ? '1px solid #eee' : undefined }}>
+                    <th key={`${i}-${p}`} style={{ padding: '2px 4px', fontSize: 11, color: '#999', borderLeft: p === 0 ? DAY_DIVIDER : undefined }}>
                       {p + 1}
                     </th>
                   ))
@@ -1528,7 +1538,7 @@ function WeeklyAttendancePageInner() {
                               ? '非任教科目：「曠課」的學生能改成事假／病假／公假；「出席」的學生能改成事假／病假／公假／遲到／曠課，其他狀態請洽該科任課教師'
                               : '非任教科目：只有「曠課」的學生能改成事假／病假／公假，其他狀態請洽該科任課教師'
                           }
-                          style={{ padding: 4, textAlign: 'center', color: '#999', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}
+                          style={{ padding: 4, textAlign: 'center', color: '#999', borderLeft: p === 0 ? DAY_DIVIDER : undefined }}
                         >
                           {status}
                         </td>
@@ -1545,7 +1555,7 @@ function WeeklyAttendancePageInner() {
                             ] as const)
                           : (['曠課', ...LEAVE_STATUSES] as const);
                       return (
-                        <td key={key} style={{ padding: 2, textAlign: 'center', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}>
+                        <td key={key} style={{ padding: 2, textAlign: 'center', borderLeft: p === 0 ? DAY_DIVIDER : undefined }}>
                           <select
                             value={status}
                             onChange={(e) => stageStatus(s.student_no, dateStr, period, e.target.value)}
@@ -1581,7 +1591,7 @@ function WeeklyAttendancePageInner() {
                         <td
                           key={key}
                           title="此班級出缺勤已鎖定，請使用上方「申請開放」"
-                          style={{ padding: 4, textAlign: 'center', color: '#ccc', borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined }}
+                          style={{ padding: 4, textAlign: 'center', color: '#ccc', borderLeft: p === 0 ? DAY_DIVIDER : undefined }}
                         >
                           {status}
                         </td>
@@ -1597,7 +1607,7 @@ function WeeklyAttendancePageInner() {
                           textAlign: 'center',
                           cursor: 'pointer',
                           color: '#999',
-                          borderLeft: p === 0 ? '1px solid #f2f2f2' : undefined,
+                          borderLeft: p === 0 ? DAY_DIVIDER : undefined,
                         }}
                       >
                         {status}

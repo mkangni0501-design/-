@@ -399,11 +399,19 @@ function AttendanceReportPageInner() {
                         <li key={`${r.date}|${r.period}`}>
                           {formatRecordDate(r.date)}　{r.date}　第 {r.period} 節
                           {classId && (
+                            // 【本輪修正】反映事項「點修正以後是另開新分頁或對話框，這樣修正完
+                            // 關閉還能繼續做同一個人其他筆的修正」——原本用一般連結會在原分頁
+                            // 跳走，這個明細視窗、班級/日期的查詢條件都會不見，修完一筆要重新
+                            // 整個查詢流程才能回來改下一筆。加上 target="_blank" 改成開新分頁，
+                            // 原本這個分頁（連同明細視窗）完全不受影響，改完關掉新分頁就能繼續
+                            // 點下一筆的「修正」。
                             <a
                               href={`/attendance/weekly?classId=${classId}&date=${r.date}&student=${detailStudent.student_no}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
                               style={{ marginLeft: 8, fontSize: 12, color: '#185FA5' }}
                             >
-                              修正
+                              修正 ↗
                             </a>
                           )}
                         </li>
