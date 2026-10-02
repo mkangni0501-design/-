@@ -151,20 +151,102 @@ async function fetchAllRows(admin: SupabaseClient, table: string): Promise<{ dat
   return { data: rows, error: null };
 }
 
+// 【本輪新增】反映事項「備份失敗：未知錯誤」——詳見 sql/97fix_backup_creation_unknown_error.sql
+// 的說明。超過這個門檻（字元數，約略對應位元組數）就不要把整包內容塞進單一 RPC
+// 參數，改成先上傳到 Storage，backups 這一列只存路徑。3MB 是留了相當大的安全
+// 邊際（一般常見的請求大小限制多半在數 MB 到數十 MB 之間），資料量還會持續
+// 成長，這個門檻本來就應該抓保守一點。
+const INLINE_SIZE_LIMIT = 3 * 1000 * 1000;
+
+/**
+ * 把 runBackup() 產生的快照寫進 backups 表——資料量小就直接存進 tables 欄位，
+ * 資料量大（超過 INLINE_SIZE_LIMIT）就先上傳到 Storage，欄位只存路徑
+ * （storage_path），兩種情況呼叫端完全不用關心，都是呼叫這支函式、拿到跟
+ * admin_insert_backup() 一樣的 { id, created_at }。
+ */
+export async function insertBackupSnapshot(
+  admin: SupabaseClient,
+  kind: '自動' | '手動' | '上傳',
+  createdBy: string | null,
+  tables: BackupSnapshot,
+  counts: BackupCounts
+): Promise<{ data: { id: string; created_at: string } | null; error: any }> {
+  const json = JSON.stringify(tables);
+
+  if (json.length <= INLINE_SIZE_LIMIT) {
+    const { data, error } = await admin
+      .rpc('admin_insert_backup', { p_kind: kind, p_created_by: createdBy, p_tables: tables, p_table_counts: counts })
+      .single();
+    return { data: data as { id: string; created_at: string } | null, error };
+  }
+
+  const path = `snapshots/${new Date().toISOString().slice(0, 10)}/${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+  // 用 Buffer 而不是 Blob：Node.js 的 Serverless Function 環境一定有 Buffer，
+  // 不用依賴這個執行環境是否提供全域 Blob。
+  const { error: uploadErr } = await admin.storage
+    .from('backup-uploads')
+    .upload(path, Buffer.from(json, 'utf-8'), { contentType: 'application/json' });
+  if (uploadErr) {
+    return { data: null, error: { message: '備份內容過大，上傳到儲存空間失敗：' + uploadErr.message } };
+  }
+  const { data, error } = await admin
+    .rpc('admin_insert_backup', { p_kind: kind, p_created_by: createdBy, p_tables: null, p_table_counts: counts, p_storage_path: path })
+    .single();
+  if (error) {
+    // 寫入 backups 這一列失敗的話，剛剛上傳的檔案就變孤兒了，清掉避免占空間。
+    await admin.storage.from('backup-uploads').remove([path]);
+  }
+  return { data: data as { id: string; created_at: string } | null, error };
+}
+
+/** 依 backups 這一列的 tables／storage_path，取出真正的快照內容——tables 有值就直接用，沒有的話（大檔案）從 Storage 讀出來。 */
+export async function loadBackupSnapshot(
+  admin: SupabaseClient,
+  row: { tables: BackupSnapshot | null; storage_path: string | null }
+): Promise<{ snapshot: BackupSnapshot | null; error: any }> {
+  if (row.tables) return { snapshot: row.tables, error: null };
+  if (!row.storage_path) return { snapshot: null, error: { message: '這筆備份沒有內容也沒有儲存路徑，資料可能已損毀' } };
+  const { data: fileBlob, error } = await admin.storage.from('backup-uploads').download(row.storage_path);
+  if (error || !fileBlob) return { snapshot: null, error: error ?? { message: '讀取備份檔案失敗' } };
+  try {
+    const snapshot = JSON.parse(await fileBlob.text());
+    return { snapshot, error: null };
+  } catch {
+    return { snapshot: null, error: { message: '備份檔案內容不是有效的 JSON' } };
+  }
+}
+
+// 【本輪修正】反映事項「開發人員的備份一樣發生備份失敗：未知錯誤」——這裡才是
+// 真正的根因：BACKUP_TABLES 現在有 65 張以上，原本是 for 迴圈一張一張依序
+// await，每張表自己再分頁撈到底——不管單張表多快，65 次「依序」的網路來回
+// 疊加起來，總時間很容易超過 Vercel 方案本身的執行時間上限（Hobby 方案常見
+// 是幾十秒等級，即使程式碼裡宣告 maxDuration=300 也一樣會被平台強制中止），
+// 一旦被平台中止，連線會被直接砍斷、回應不是正常 JSON，前端
+// `res.json().catch(() => ({}))` 接不到任何 `.error` 欄位，才會落回「未知
+// 錯誤」四個字——這個問題不管伺服器端 catch 區塊的錯誤訊息寫得再詳細都沒用，
+// 因為函式根本沒有機會跑到那段程式碼、也沒機會把回應送出去。
+// 修法：改成有限並行（同時最多 CONCURRENCY 張表一起撈），用 Promise.all 分批
+// 處理，大幅縮短總執行時間，不要讓 65 張表的網路延遲依序疊加。
+const BACKUP_CONCURRENCY = 8;
+
 export async function runBackup(admin: SupabaseClient): Promise<{ tables: BackupSnapshot; counts: BackupCounts }> {
   const tables: BackupSnapshot = {};
   const counts: BackupCounts = {};
 
-  for (const table of BACKUP_TABLES) {
-    const { data, error } = await fetchAllRows(admin, table);
-    if (error) {
-      // 資料表不存在（該專案沒執行過那個選擇性 SQL 檔）或其他讀取問題，略過但留紀錄
-      tables[table] = null;
-      counts[table] = null;
-      continue;
-    }
-    tables[table] = data ?? [];
-    counts[table] = (data ?? []).length;
+  for (let i = 0; i < BACKUP_TABLES.length; i += BACKUP_CONCURRENCY) {
+    const batch = BACKUP_TABLES.slice(i, i + BACKUP_CONCURRENCY);
+    const results = await Promise.all(batch.map((table) => fetchAllRows(admin, table)));
+    batch.forEach((table, idx) => {
+      const { data, error } = results[idx];
+      if (error) {
+        // 資料表不存在（該專案沒執行過那個選擇性 SQL 檔）或其他讀取問題，略過但留紀錄
+        tables[table] = null;
+        counts[table] = null;
+        return;
+      }
+      tables[table] = data ?? [];
+      counts[table] = (data ?? []).length;
+    });
   }
 
   return { tables, counts };

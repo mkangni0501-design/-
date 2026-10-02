@@ -38,6 +38,20 @@ export default function BackupRestorePanel() {
     setLoading(false);
   }
 
+  // 【本輪新增】反映事項「自動備份功能異常」——實際查過 vercel.json／
+  // app/api/cron/daily-backup/route.ts，每日自動備份本身的程式邏輯沒有問題，
+  // 最常見的原因是 Vercel 專案沒有設定 CRON_SECRET 環境變數，或這個環境變數
+  // 是部署「之後」才加上去、還沒有觸發過重新部署，導致 Vercel Cron Jobs
+  // 分頁裡根本沒有排上 /api/cron/daily-backup——這兩種情況都不會有任何前端畫面
+  // 顯示錯誤，只有「backups 表一直沒有出現『自動』類型的新紀錄」這個徵兆，
+  // 過去只能「找一天手動去 Supabase 後台檢查」才會發現，很容易不知不覺中斷。
+  // 這裡把這個檢查搬到畫面上自動做：一進頁面就算「最新一筆『自動』備份，距離
+  // 現在是不是超過 26 小時」（排程是每天一次，多留 2 小時緩衝），超過就直接
+  // 顯示警訊，不用再手動去資料庫查。
+  const latestAuto = rows.find((r) => r.kind === '自動');
+  const autoBackupStaleHours = latestAuto ? (Date.now() - new Date(latestAuto.created_at).getTime()) / 3600000 : null;
+  const autoBackupStale = rows.length > 0 && (!latestAuto || (autoBackupStaleHours !== null && autoBackupStaleHours > 26));
+
   useEffect(() => {
     (async () => {
       const appUser = await getCurrentAppUser();
@@ -63,9 +77,24 @@ export default function BackupRestorePanel() {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
-      const body = await res.json().catch(() => ({}));
+      // 【本輪修正】反映事項「備份失敗：未知錯誤」——真正的根因是 runBackup()
+      // 65 張表依序撈，總執行時間很容易超過平台的執行時間上限，一旦被平台
+      // 強制中止，連線直接斷掉、回應不是正常 JSON（可能是平台自己的錯誤頁面、
+      // 或根本沒有回應本文），`res.json()` 會丟出解析錯誤，被 `.catch(() => ({}))`
+      // 接住、body.error 自然是 undefined，才會一路退到「未知錯誤」——這裡已經
+      // 把 runBackup() 改成有限並行，大幅縮短總時間（見 lib/backupRestore.ts
+      // 的說明），但連線被平台中止的狀況還是有可能發生，所以這裡保留 HTTP
+      // 狀態碼當作最後一道資訊，至少不會又看到完全沒有線索的「未知錯誤」。
+      const body = await res.json().catch(() => null);
       if (!res.ok) {
-        alert('備份失敗：' + (body.error ?? '未知錯誤'));
+        alert(
+          '備份失敗：' +
+            (body?.error ?? `伺服器沒有回傳正常的錯誤內容（HTTP ${res.status}），很可能是備份執行時間過長被平台中止，可以稍後再試一次，或聯絡開發人員查看伺服器端的執行紀錄`)
+        );
+        return;
+      }
+      if (!body) {
+        alert('備份可能已經執行，但沒有收到正常的回應內容，請重新整理頁面確認備份清單裡是否已經多出一筆。');
         return;
       }
       alert('已完成備份');
@@ -75,13 +104,23 @@ export default function BackupRestorePanel() {
     }
   }
 
+  // 【本輪修正】反映事項「備份失敗：未知錯誤」順便修正：備份內容現在可能存在
+  // Storage 而不是 backups.tables 欄位（資料量大時，見 lib/backupRestore.ts
+  // 的說明），原本直接用登入者身分查 tables 欄位的做法讀不到這種備份的內容，
+  // 改成透過 /api/admin/backup/download 這支 API（service role）統一處理。
   async function handleDownload(row: BackupRow) {
-    const { data, error } = await supabase.from('backups').select('tables').eq('id', row.id).single();
-    if (error || !data) {
-      alert('讀取備份內容失敗：' + (error?.message ?? '未知錯誤'));
+    const token = await getToken();
+    if (!token) {
+      alert('請重新登入');
       return;
     }
-    const blob = new Blob([JSON.stringify(data.tables, null, 2)], { type: 'application/json' });
+    const res = await fetch(`/api/admin/backup/download?id=${row.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert('讀取備份內容失敗：' + (body.error ?? '未知錯誤'));
+      return;
+    }
+    const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -184,6 +223,17 @@ export default function BackupRestorePanel() {
   return (
     <div>
       <ErrorBanner message={loadError} />
+      {autoBackupStale && (
+        <p style={{ fontSize: 12, color: '#A32D2D', background: '#FBEFE9', padding: 8, borderRadius: 6, marginBottom: 12 }}>
+          ⚠ 每日自動備份可能沒有正常執行：
+          {latestAuto
+            ? `最新一筆「自動」備份是 ${new Date(latestAuto.created_at).toLocaleString()}（超過 26 小時前）。`
+            : '目前完全沒有任何「自動」類型的備份紀錄。'}
+          最常見原因是 Vercel 專案沒有設定 <code>CRON_SECRET</code> 環境變數、或設定後還沒重新部署過，
+          請到 Vercel 專案設定確認環境變數，並到「Cron Jobs」分頁確認 <code>/api/cron/daily-backup</code> 已排程，
+          必要時可先點下面「立即備份」手動備一份。
+        </p>
+      )}
       <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
         系統每天會自動備份一次校務資料（學生、班級、課表、成績、出缺勤...等），也可以在下面手動立即備份。
         備份不含登入帳號本身（帳號請到「帳號管理」頁處理），避免還原後造成無法登入的問題。

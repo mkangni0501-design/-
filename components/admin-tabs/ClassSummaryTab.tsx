@@ -6,6 +6,7 @@ import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { isDepartmentLead } from '@/lib/departments';
 import { downloadClassScoreExcel } from '@/lib/excelTemplates';
+import { estimateTermStart } from '@/lib/academicTerm';
 import { showPdfInWindow } from '@/lib/pdfPreview';
 
 type SubjectRow = { enrollment_id: string; subject: string; midterm: number | null; final: number | null; daily: number | null };
@@ -29,7 +30,9 @@ type GradeRankRow = {
   final_grade_rank?: number | null;
   daily_grade_rank?: number | null;
 };
-type EnrollRow = { id: string; seat_no: number; name: string };
+type EnrollRow = { id: string; seat_no: number; name: string; student_no: string };
+// 跟「獎懲登記」頁一致的六種類別，顯示順序固定（大功最重→警告最輕）
+const CONDUCT_TYPE_ORDER = ['大功', '小功', '嘉獎', '警告', '小過', '大過'];
 type ClassOption = { id: string; label: string; grade_level: string };
 
 const SUBJECT_DIVIDER = '2px solid #2C2C2A'; // 每一科分數中間：粗體間隔線
@@ -101,6 +104,8 @@ export default function ClassSummaryPage() {
   // 「全勤」／「出缺席」這個科目欄位改用這裡的值顯示，不用 subjectData 裡老師手動輸入
   // 的原始分數（那筆分數不會被排名/總分採用，見 sql/46wire_attendance_and_discipline_adjustments.sql）。
   const [attendanceAdjustments, setAttendanceAdjustments] = useState<Record<string, number>>({});
+  // student_no -> 這學期獎懲類別次數＋加總點數，見下面載入 conduct_events 那段的說明
+  const [conductByStudent, setConductByStudent] = useState<Record<string, { counts: Record<string, number>; adjustment: number }>>({});
   const [rankLoadError, setRankLoadError] = useState<string | null>(null);
   // 開發人員區「出缺席成績不含蓋在期中、期末、平時個別三部分分數」開關現況——
   // 只用來顯示提示文字，實際排除邏輯已經在資料庫端 scoped_student_totals() 做好
@@ -214,13 +219,56 @@ export default function ClassSummaryPage() {
       // RLS 擋掉，這裡是安全但多餘的二次確認）。
       const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
       const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
-      const enrolls: EnrollRow[] = (enrollRows ?? []).map((r: any) => ({ id: r.id, seat_no: r.seat_no, name: r.students.name }));
+      const enrolls: EnrollRow[] = (enrollRows ?? []).map((r: any) => ({
+        id: r.id,
+        seat_no: r.seat_no,
+        name: r.students.name,
+        student_no: r.student_no,
+      }));
       setEnrollments(enrolls);
       const enrollIds = enrolls.map((e) => e.id);
       let currentTerm: string | null = null;
       if (enrollRows && enrollRows.length > 0) {
         currentTerm = (enrollRows[0] as any).term;
         setTerm(currentTerm);
+      }
+
+      // 【本輪新增】反映事項「檢視/列印範圍【全部】的全勤紀錄右邊增加一欄
+      // 『獎懲』...『平時總分／排名』右邊增加一欄『綜合表現』」——這裡一次查好
+      // 這學期（依班級所在學年度＋currentTerm，開學日沒填就用 estimateTermStart
+      // 的保守估計，理由同 attendance/report 頁）這個班每位學生的 conduct_events，
+      // 同時算出：(a) 依類別分組的次數（給「獎懲」欄顯示用），(b) 加總點數
+      // （給「綜合表現」欄顯示用，就是 sql/46 discipline_adjustment() 同一套
+      // 「這學期 conduct_events.points 加總」邏輯，這裡直接前端算一次、不用再
+      // 對每個學生各自呼叫一次 RPC）。
+      if (yearForQuery && currentTerm) {
+        const { data: termRow } = await supabase
+          .from('academic_terms')
+          .select('term_start_date, term_end_date')
+          .eq('academic_year', yearForQuery)
+          .eq('term', currentTerm)
+          .maybeSingle();
+        const start = termRow?.term_start_date ?? estimateTermStart(yearForQuery, currentTerm);
+        const end = termRow?.term_end_date ?? undefined;
+        const studentNos = enrolls.map((e) => e.student_no);
+        if (studentNos.length > 0) {
+          let ceQuery = supabase
+            .from('conduct_events')
+            .select('student_no, event_type, count, points')
+            .in('student_no', studentNos)
+            .gte('event_date', start);
+          if (end) ceQuery = ceQuery.lte('event_date', end);
+          const { data: ceRows } = await ceQuery;
+          const map: Record<string, { counts: Record<string, number>; adjustment: number }> = {};
+          (ceRows ?? []).forEach((r: any) => {
+            const rec = (map[r.student_no] = map[r.student_no] ?? { counts: {}, adjustment: 0 });
+            rec.counts[r.event_type] = (rec.counts[r.event_type] ?? 0) + (r.count ?? 1);
+            rec.adjustment += Number(r.points) || 0;
+          });
+          setConductByStudent(map);
+        } else {
+          setConductByStudent({});
+        }
       }
 
       // 各科明細：任課教師只會看到自己教的科目那幾列（RLS在資料庫層級自然過濾，非前端隱藏）
@@ -696,8 +744,15 @@ export default function ClassSummaryPage() {
                     )}
                   </th>
                 ))}
+                {/* 【本輪新增】反映事項「檢視/列印範圍【全部】的全勤紀錄右邊增加一欄『獎懲』」 */}
+                {viewMode === 'all' && (
+                  <th rowSpan={2} style={{ padding: 6, borderLeft: '1px solid #eee' }}>
+                    獎懲
+                    <span style={{ display: 'block', fontSize: 10, fontWeight: 'normal', color: '#999' }}>（本學期）</span>
+                  </th>
+                )}
                 {visibleExamTypes.map((et) => (
-                  <th key={'grp-' + et} colSpan={4} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER }}>
+                  <th key={'grp-' + et} colSpan={et === '平時分' ? 5 : 4} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER }}>
                     {EXAM_TYPE_LABEL[et]}總分／排名
                     {/* 反映事項：勾選排除出缺席時，期中/期末/平時三個總分／排名的標題要補上
                         「(未含出缺席加扣分)」，讓老師一眼看出這三欄現在不含出缺席，跟
@@ -733,6 +788,9 @@ export default function ClassSummaryPage() {
                     <th key={et + '-avg'}>平均(*比重)</th>
                     <th key={et + '-crank'}>班排名</th>
                     <th key={et + '-grank'}>年級排名</th>
+                    {/* 【本輪新增】反映事項「『平時總分／排名』右邊增加一欄『綜合表現』」——
+                        內容是獎懲累積換算出來的加扣分（sql/46 discipline_adjustment() 同一套算法）。 */}
+                    {et === '平時分' && <th key={et + '-conduct'}>綜合表現</th>}
                   </Fragment>
                 ))}
                 {viewMode === 'all' && (
@@ -772,6 +830,17 @@ export default function ClassSummaryPage() {
                       </td>
                     ));
                   })}
+                  {/* 【本輪新增】獎懲欄內容：只列出有登記、次數>0 的類別，次數=0的類別不顯示，
+                      例如「嘉獎2支、小功1支」；這學期完全沒有紀錄就顯示—。 */}
+                  {viewMode === 'all' && (
+                    <td style={{ padding: 6, textAlign: 'center', borderLeft: '1px solid #eee', fontSize: 12 }}>
+                      {(() => {
+                        const counts = conductByStudent[en.student_no]?.counts ?? {};
+                        const parts = CONDUCT_TYPE_ORDER.filter((t) => counts[t] > 0).map((t) => `${t}${counts[t]}支`);
+                        return parts.length > 0 ? parts.join('、') : '—';
+                      })()}
+                    </td>
+                  )}
                   {visibleExamTypes.map((et) => (
                     <Fragment key={en.id + et}>
                       <td key={en.id + et + '-total'} style={{ padding: 6, textAlign: 'center', borderLeft: SUBJECT_DIVIDER }}>
@@ -786,6 +855,17 @@ export default function ClassSummaryPage() {
                       <td key={en.id + et + '-grank'} style={{ padding: 6, textAlign: 'center' }}>
                         {gradeRank[en.id]?.[EXAM_TYPE_GRADE_RANK_FIELD[et]] ?? '—'}
                       </td>
+                      {/* 【本輪新增】綜合表現：獎懲累積換算出來的加扣分（sql/46
+                          discipline_adjustment() 同一套算法，這裡用 conductByStudent
+                          已經前端算好的加總，不用再對每個學生各呼叫一次 RPC）。 */}
+                      {et === '平時分' && (
+                        <td key={en.id + et + '-conduct'} style={{ padding: 6, textAlign: 'center' }}>
+                          {(() => {
+                            const adj = conductByStudent[en.student_no]?.adjustment ?? 0;
+                            return adj === 0 ? '—' : adj > 0 ? `+${adj}` : `${adj}`;
+                          })()}
+                        </td>
+                      )}
                     </Fragment>
                   ))}
                   {viewMode === 'all' && (
