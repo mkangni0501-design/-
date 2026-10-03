@@ -195,22 +195,45 @@ export default function ConductScoresTab() {
 
       {!loading && rows.length > 0 && (
         <>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: '#f5f5f5' }}>
-                {['座號', '姓名', '禮貌', '衣著', '服務', '紀律', '操行成績（自動平均）'].map((h) => (
-                  <th key={h} style={{ border: '1px solid #ddd', padding: 6, textAlign: 'left' }}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, rowIndex) => (
-                <tr key={r.enrollment_id}>
-                  <td style={{ border: '1px solid #eee', padding: 6 }}>{r.seat_no}</td>
-                  <td style={{ border: '1px solid #eee', padding: 6 }}>{r.name}</td>
-                  {FIELDS.map((field, fieldIndex) => (
+          {/* 【本輪新增】反映事項「操行分數輸入頁...學生名稱、項目兩個都要固定不受
+              滾軸調整畫面而被消失」——學生一多，表格往下捲動時，最上面的「項目」
+              標題列（禮貌／衣著／服務／紀律…）會捲走，捲到後面已經不知道現在在
+              填哪一欄；外層包一個有固定高度、可以自己垂直捲動的容器，標題列用
+              position:sticky 釘在容器頂端。「姓名」欄（連同左邊的「座號」）也一樣
+              用 sticky 釘在最左邊，橫向捲動時不會跟著不見。 */}
+          <div style={{ maxHeight: '70vh', overflow: 'auto', border: '1px solid #ddd' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5' }}>
+                  {['座號', '姓名', '禮貌', '衣著', '服務', '紀律', '操行成績（自動平均）'].map((h, i) => (
+                    <th
+                      key={h}
+                      style={{
+                        border: '1px solid #ddd',
+                        padding: 6,
+                        textAlign: 'left',
+                        position: 'sticky',
+                        top: 0,
+                        left: i === 0 ? 0 : i === 1 ? 40 : undefined,
+                        background: '#f5f5f5',
+                        zIndex: i <= 1 ? 3 : 2,
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, rowIndex) => (
+                  <tr key={r.enrollment_id}>
+                    <td style={{ border: '1px solid #eee', padding: 6, position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>
+                      {r.seat_no}
+                    </td>
+                    <td style={{ border: '1px solid #eee', padding: 6, position: 'sticky', left: 40, background: '#fff', zIndex: 1, whiteSpace: 'nowrap' }}>
+                      {r.name}
+                    </td>
+                    {FIELDS.map((field, fieldIndex) => (
                     <td key={field} style={{ border: '1px solid #eee', padding: 4 }}>
                       <input
                         type="number"
@@ -234,8 +257,9 @@ export default function ConductScoresTab() {
                   <td style={{ border: '1px solid #eee', padding: 6, color: '#666' }}>{average(r)}</td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
           <button
             onClick={handleSaveAll}
             disabled={saving}

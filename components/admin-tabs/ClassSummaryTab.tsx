@@ -289,6 +289,18 @@ export default function ClassSummaryPage() {
       // 各科目佔比（顯示在科目欄位上方）：curriculum.weight 存的就是 0~1 的小數（0.2＝20%）
       // 科目欄位順序：依比重高到低排列，且比重=0（已停開/停用）的科目不顯示——
       // 跟「成績登錄」頁（ScoresEntryTab）的排序、隱藏規則一致。
+      //
+      // 【本輪修正】反映事項「班級成績總表中很多年級跟班級的才藝課沒有顯示」——
+      // 根因：上面 subjSet 只收集了 subject_weighted_scores「已經有分數列」的科目，
+      // 這張表只有老師實際輸入過至少一筆分數才會有列。才藝課這類排課節數少、
+      // 可能還沒有老師登錄過任何一筆分數的班級/年級，subjSet 裡根本不會出現這個
+      // 科目，欄位就整欄消失——不是分數算錯，是這個科目欄位從一開始就沒有被
+      // 列進去，連「0分」或空白格都看不到，更別說進去登錄。
+      // 修法：科目清單改成「curriculum（學校排定這個年級這學期該上的科目）」跟
+      // 「subjSet（已經有分數列的科目，防止 curriculum 漏列或科目名稱對不上時
+      // 整科不見）」兩者的聯集，不要只靠 subjSet 單獨決定——這樣即使還沒有人
+      // 登錄過任何一筆才藝課分數，只要 curriculum 裡有排這個科目，欄位依然會
+      // 出現（分數顯示空白，等老師登錄）。
       if (yearForQuery && currentTerm && gradeLevelForQuery) {
         const { data: curriculumRows } = await supabase
           .from('curriculum')
@@ -299,8 +311,9 @@ export default function ClassSummaryPage() {
         const weightMap: Record<string, number> = {};
         (curriculumRows ?? []).forEach((r: any) => (weightMap[r.subject] = Number(r.weight)));
         setSubjectWeights(weightMap);
-        const sortedSubjects = Array.from(subjSet)
-          .filter((s) => weightMap[s] !== 0)
+        const unionSubjects = new Set<string>([...Array.from(subjSet), ...Object.keys(weightMap)]);
+        const sortedSubjects = Array.from(unionSubjects)
+          .filter((s) => weightMap[s] !== 0) // weight===0 代表已停開/停用；不在 weightMap 裡（curriculum沒設定過）的視為要顯示
           .sort((a, b) => {
             const wa = weightMap[a];
             const wb = weightMap[b];
@@ -611,7 +624,23 @@ export default function ClassSummaryPage() {
         )}
       </p>
 
-      <style>{`@media print { .no-print { display: none !important; } }`}</style>
+      {/* 【本輪新增】反映事項「檢視/列印範圍的列印本頁功能，請把超出的左右寬濃縮為
+          一張紙」——這張表欄位很多（尤其「全部」範圍：每科 3 個考試類別 × 4 欄，
+          加上獎懲／綜合表現），原本列印用的是直向 A4、字體大小沒有特別為列印調整，
+          欄位一多整頁寬度塞不下，右邊會被印到下一張紙去。這裡改成：(1) 用
+          @page 把列印方向強制改成橫向（landscape），並把邊界縮小，先爭取到最大
+          可用寬度；(2) 印表格的這個 class（print-compact）在列印時把字體、
+          padding 都縮小，並用 table-layout:fixed 搭配較小的最小字體，讓瀏覽器
+          的自動縮放（大多數瀏覽器列印對話框預設會勾選「縮放至頁面大小」）更容易
+          把整張表收進同一頁寬度，不會再被攔腰印到第二張紙。 */}
+      <style>{`
+        @media print {
+          .no-print { display: none !important; }
+          @page { size: landscape; margin: 8mm; }
+          .print-compact table { font-size: 9px !important; table-layout: auto; }
+          .print-compact th, .print-compact td { padding: 2px 3px !important; white-space: nowrap; }
+        }
+      `}</style>
 
       {enrollments.length > 0 && (
         <button onClick={handleDownloadExcel} className="no-print" style={{ fontSize: 12, padding: '4px 12px', marginBottom: 12 }}>
@@ -729,6 +758,7 @@ export default function ClassSummaryPage() {
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
       ) : (
         classId && (
+          <div className="print-compact">
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr>
@@ -920,6 +950,7 @@ export default function ClassSummaryPage() {
               )}
             </tbody>
           </table>
+          </div>
         )
       )}
     </div>

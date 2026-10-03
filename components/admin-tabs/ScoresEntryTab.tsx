@@ -952,8 +952,26 @@ export default function ScoreEntryPage() {
             </div>
           )}
 
+          {/* 【本輪新增】反映事項「成績輸入頁...項目要固定不受滾軸調整畫面而被消失」
+              ——這頁是一次顯示一個科目的學生名單（姓名已經跟每一列排在一起，不是
+              獨立表頭，所以不需要另外固定），最接近「項目」標題列的是這個「全選」
+              列；學生一多、往下捲動時原本會捲走，看不出目前是在勾選哪個範圍，
+              改成 sticky 釘在捲動容器頂端。 */}
           {rows.length > 0 && (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#666', padding: '4px 0' }}>
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 12,
+                color: '#666',
+                padding: '4px 0',
+                position: 'sticky',
+                top: 0,
+                background: '#fff',
+                zIndex: 2,
+              }}
+            >
               <input type="checkbox" checked={selected.size === rows.length} onChange={toggleSelectAll} />
               全選
             </label>
