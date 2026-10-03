@@ -35,6 +35,9 @@ const STATUS_OPTIONS = ['出席', '曠課', '遲到', '病假', '事假', '公�
 // ClassSummaryTab.tsx 的 SUBJECT_DIVIDER 同樣粗細／色調的粗體線，套在每天的
 // 表頭跟每一格資料的最左邊那一節。
 const DAY_DIVIDER = '2px solid #2C2C2A';
+// 第一列標題列（星期幾／日期）的高度估計值，第二列標題（節次）用這個當 top
+// 位移，才會緊接在第一列正下方，不會被第一列蓋住或留空隙。
+const HEADER_ROW1_HEIGHT = 33;
 // 【2026-08-26 依回饋修正】這裡原本是寫死的常數 BACKDATE_GRACE_DAYS = 7，跟「出缺席示警
 // 門檻設定」頁裡訓導處可以調整的「出缺席補登逾期天數」（attendance_alert_settings.
 // backfill_overdue_days）完全是兩回事——訓導處在後台改了那個數字，存進資料庫，但這裡
@@ -1467,14 +1470,28 @@ function WeeklyAttendancePageInner() {
               </button>
             </div>
           )}
+          {/* 【本輪新增】反映事項「出缺登記表的學生名稱、項目兩個都要固定不受滾軸
+              調整畫面而被消失」——「學生」這欄原本就有用 position:sticky 釘在最
+              左邊（橫向捲動不會不見），但最上面「星期幾／第幾節」這兩列標題列
+              沒有同樣處理，學生一多、往下捲動時標題列會捲走，捲到後面已經看不出
+              現在是星期幾、第幾節。這裡補上 top 方向的 sticky，HEADER_ROW1_HEIGHT
+              是第一列標題列的高度估計值，讓第二列標題可以接在第一列正下方、不被
+              第一列蓋住。 */}
           <table style={{ borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr>
-              <th rowSpan={2} style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, background: '#fff' }}>
+              <th
+                rowSpan={2}
+                style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, top: 0, background: '#fff', zIndex: 4 }}
+              >
                 學生
               </th>
               {weekDates.map((d, i) => (
-                <th key={i} colSpan={Math.max(periodCounts[i], 1)} style={{ padding: 6, borderLeft: DAY_DIVIDER }}>
+                <th
+                  key={i}
+                  colSpan={Math.max(periodCounts[i], 1)}
+                  style={{ padding: 6, borderLeft: DAY_DIVIDER, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}
+                >
                   星期{WEEKDAY_LABELS[i]}　{toDateStr(d).slice(5)}
                 </th>
               ))}
@@ -1483,12 +1500,27 @@ function WeeklyAttendancePageInner() {
               {weekDates.map((d, i) =>
                 periodCounts[i] > 0 ? (
                   Array.from({ length: periodCounts[i] }).map((_, p) => (
-                    <th key={`${i}-${p}`} style={{ padding: '2px 4px', fontSize: 11, color: '#999', borderLeft: p === 0 ? DAY_DIVIDER : undefined }}>
+                    <th
+                      key={`${i}-${p}`}
+                      style={{
+                        padding: '2px 4px',
+                        fontSize: 11,
+                        color: '#999',
+                        borderLeft: p === 0 ? DAY_DIVIDER : undefined,
+                        position: 'sticky',
+                        top: HEADER_ROW1_HEIGHT,
+                        background: '#fff',
+                        zIndex: 3,
+                      }}
+                    >
                       {p + 1}
                     </th>
                   ))
                 ) : (
-                  <th key={`${i}-none`} style={{ padding: '2px 4px', fontSize: 11, color: '#999' }}>
+                  <th
+                    key={`${i}-none`}
+                    style={{ padding: '2px 4px', fontSize: 11, color: '#999', position: 'sticky', top: HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 3 }}
+                  >
                     —
                   </th>
                 )
@@ -1501,7 +1533,7 @@ function WeeklyAttendancePageInner() {
                 key={s.student_no}
                 style={{ borderTop: '1px solid #eee', background: s.student_no === focusStudentNo ? '#FFF6D9' : undefined }}
               >
-                <td style={{ padding: 6, position: 'sticky', left: 0, background: s.student_no === focusStudentNo ? '#FFF6D9' : '#fff', whiteSpace: 'nowrap' }}>
+                <td style={{ padding: 6, position: 'sticky', left: 0, zIndex: 1, background: s.student_no === focusStudentNo ? '#FFF6D9' : '#fff', whiteSpace: 'nowrap' }}>
                   {s.seat_no} {s.name}
                 </td>
                 {weekDates.map((d, i) => {
