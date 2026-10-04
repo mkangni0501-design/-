@@ -269,6 +269,10 @@ function WeeklyAttendancePageInner() {
   const searchParams = useSearchParams();
   const focusClassId = searchParams.get('classId');
   const focusStudentNo = searchParams.get('student');
+  // 【本輪新增】反映事項「點擊按鈕後那一橫排會亮起，讓我知道現在操作節次是哪位
+  // 學生」——學生一多、節次一多，橫向很寬又要往下捲動，很容易點錯格、改錯人。
+  // 點（或選取）任何一格的下拉選單時，記住這個學生，整列背景跟著亮起來。
+  const [activeRowStudentNo, setActiveRowStudentNo] = useState<string | null>(null);
   const [me, setMe] = useState<{ id: string; name: string; role: string } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isHomeroom, setIsHomeroom] = useState(false);
@@ -1528,12 +1532,12 @@ function WeeklyAttendancePageInner() {
             </tr>
           </thead>
           <tbody>
-            {students.map((s) => (
-              <tr
-                key={s.student_no}
-                style={{ borderTop: '1px solid #eee', background: s.student_no === focusStudentNo ? '#FFF6D9' : undefined }}
-              >
-                <td style={{ padding: 6, position: 'sticky', left: 0, zIndex: 1, background: s.student_no === focusStudentNo ? '#FFF6D9' : '#fff', whiteSpace: 'nowrap' }}>
+            {students.map((s) => {
+                const rowHighlighted = s.student_no === focusStudentNo || s.student_no === activeRowStudentNo;
+                const rowBg = rowHighlighted ? '#FFF6D9' : undefined;
+                return (
+              <tr key={s.student_no} style={{ borderTop: '1px solid #eee', background: rowBg }}>
+                <td style={{ padding: 6, position: 'sticky', left: 0, zIndex: 1, background: rowHighlighted ? '#FFF6D9' : '#fff', whiteSpace: 'nowrap' }}>
                   {s.seat_no} {s.name}
                 </td>
                 {weekDates.map((d, i) => {
@@ -1590,7 +1594,12 @@ function WeeklyAttendancePageInner() {
                         <td key={key} style={{ padding: 2, textAlign: 'center', borderLeft: p === 0 ? DAY_DIVIDER : undefined }}>
                           <select
                             value={status}
-                            onChange={(e) => stageStatus(s.student_no, dateStr, period, e.target.value)}
+                            onFocus={() => setActiveRowStudentNo(s.student_no)}
+                            onClick={() => setActiveRowStudentNo(s.student_no)}
+                            onChange={(e) => {
+                              setActiveRowStudentNo(s.student_no);
+                              stageStatus(s.student_no, dateStr, period, e.target.value);
+                            }}
                             title={
                               hasPending
                                 ? '尚未儲存：按下方「儲存」按鈕才會真正寫入'
@@ -1648,7 +1657,8 @@ function WeeklyAttendancePageInner() {
                   });
                 })}
               </tr>
-            ))}
+                );
+              })}
             {students.length === 0 && (
               <tr>
                 <td colSpan={99} style={{ padding: 16, textAlign: 'left', color: '#A36A2D' }}>

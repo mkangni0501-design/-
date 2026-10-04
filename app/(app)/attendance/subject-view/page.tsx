@@ -6,6 +6,7 @@ import { useIsMobile } from '@/lib/useIsMobile';
 import { getSiteContentMap } from '@/lib/siteContent';
 import { resolveCurrentTerm, estimateTermStart } from '@/lib/academicTerm';
 import { fetchAttendanceForStudents } from '@/lib/attendanceQueries';
+import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 
 type ClassSubjectOption = { class_id: string; subject: string; label: string; periodNos: number[]; slots: { weekday: number; period_no: number }[] };
 type StudentRow = { student_no: string; seat_no: number; name: string };
@@ -178,11 +179,20 @@ export default function SubjectAttendanceViewPage() {
         setLoading(false);
         return;
       }
-      const rows: StudentRow[] = (enrollRows ?? []).map((r: any) => ({
-        student_no: r.student_no,
-        seat_no: r.seat_no,
-        name: r.students?.name ?? r.student_no,
-      }));
+      // 【本輪新增】反映事項「已登記為休學、轉學、退學的同學，仍出現在導師與任課
+      // 老師的點名冊、成績輸入等頁面」——這頁（任課班級出席查詢）原本完全沒有套用
+      // getHiddenStudentNos()，attendance/weekly、ScoresEntryTab.tsx 等其他頁面
+      // 很早就有這層過濾，這頁當時漏加了，任課老師查自己教的班級，休學/轉學/退學
+      // 的學生還是會顯示在名單裡。這頁本來就只給任課教師自己看自己教的節次，沒有
+      // 管理員視角這回事，所以不用像其他頁面那樣額外判斷 isAdmin，一律套用過濾。
+      const hiddenNos = await getHiddenStudentNos((enrollRows ?? []).map((r: any) => r.student_no));
+      const rows: StudentRow[] = (enrollRows ?? [])
+        .filter((r: any) => !hiddenNos.has(r.student_no))
+        .map((r: any) => ({
+          student_no: r.student_no,
+          seat_no: r.seat_no,
+          name: r.students?.name ?? r.student_no,
+        }));
       setStudents(rows);
       const studentNos = rows.map((r) => r.student_no);
 
