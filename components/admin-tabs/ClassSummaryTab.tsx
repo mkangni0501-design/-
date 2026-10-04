@@ -37,6 +37,8 @@ type ClassOption = { id: string; label: string; grade_level: string };
 
 const SUBJECT_DIVIDER = '2px solid #2C2C2A'; // 每一科分數中間：粗體間隔線
 const EXAMTYPE_DIVIDER = '1px dotted #ccc'; // 科目項下的期中/期末/平時：細線間隔
+// 第一列標題列的高度估計值，第二列標題用這個當 top 位移，固定在第一列正下方。
+const CS_HEADER_ROW1_HEIGHT = 33;
 const EXAM_TYPE_FIELD: Record<'期中考' | '期末考' | '平時分', 'midterm' | 'final' | 'daily'> = {
   期中考: 'midterm',
   期末考: 'final',
@@ -758,14 +760,21 @@ export default function ClassSummaryPage() {
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
       ) : (
         classId && (
-          <div className="print-compact">
+          // 【本輪新增】反映事項「成績總表中名字、科目都要固定不受滾軸調整畫面而
+          // 被消失」——這張表欄位非常多（每科 x 幾個考試類別），橫向捲動時「座號／
+          // 姓名」用 position:sticky 釘在最左邊；學生一多，往下捲動時最上面兩列
+          // 標題（科目名稱／總分排名這些）用 position:sticky 釘在頂端，跟
+          // attendance/weekly 頁同樣的做法，top 用 CS_HEADER_ROW1_HEIGHT 當第二列
+          // 的位移量，接在第一列正下方。overflowX:'auto' 讓橫向捲動只發生在這個
+          // 容器裡，不會把整個頁面往右推。
+          <div className="print-compact" style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr>
-                <th style={{ textAlign: 'left', padding: 6 }}>座號</th>
-                <th style={{ textAlign: 'left', padding: 6 }}>姓名</th>
+                <th style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, top: 0, background: '#fff', zIndex: 4 }}>座號</th>
+                <th style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 40, top: 0, background: '#fff', zIndex: 4 }}>姓名</th>
                 {subjects.map((s) => (
-                  <th key={s} colSpan={visibleExamTypes.length} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER }}>
+                  <th key={s} colSpan={visibleExamTypes.length} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>
                     {s}
                     {subjectWeights[s] !== undefined && (
                       <span style={{ display: 'block', fontSize: 11, fontWeight: 'normal', color: '#999' }}>
@@ -776,13 +785,13 @@ export default function ClassSummaryPage() {
                 ))}
                 {/* 【本輪新增】反映事項「檢視/列印範圍【全部】的全勤紀錄右邊增加一欄『獎懲』」 */}
                 {viewMode === 'all' && (
-                  <th rowSpan={2} style={{ padding: 6, borderLeft: '1px solid #eee' }}>
+                  <th rowSpan={2} style={{ padding: 6, borderLeft: '1px solid #eee', position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>
                     獎懲
                     <span style={{ display: 'block', fontSize: 10, fontWeight: 'normal', color: '#999' }}>（本學期）</span>
                   </th>
                 )}
                 {visibleExamTypes.map((et) => (
-                  <th key={'grp-' + et} colSpan={et === '平時分' ? 5 : 4} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER }}>
+                  <th key={'grp-' + et} colSpan={4} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>
                     {EXAM_TYPE_LABEL[et]}總分／排名
                     {/* 反映事項：勾選排除出缺席時，期中/期末/平時三個總分／排名的標題要補上
                         「(未含出缺席加扣分)」，讓老師一眼看出這三欄現在不含出缺席，跟
@@ -795,50 +804,93 @@ export default function ClassSummaryPage() {
                   </th>
                 ))}
                 {viewMode === 'all' && (
-                  <th colSpan={3} style={{ padding: 6, borderLeft: '1px solid #eee' }}>
+                  <th colSpan={3} style={{ padding: 6, borderLeft: '1px solid #eee', position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>
                     總表（期中*比例＋期末*比例＋平時*比例）
+                    {/* 反映事項「總表的分數與排名只有計算期中、期末、平時，不包括敘獎分數」——
+                        資料庫這裡本來就只有 subject_weighted_scores（各科加權分數）＋
+                        attendance_adjustment（出缺席自動加扣分），沒有把 conduct_events／
+                        敘獎點數算進來（見 sql/3calculations.sql student_total_scores、
+                        sql/46 的 student_adjustments），這裡額外標註清楚，不用再另外猜。 */}
+                    <span style={{ display: 'block', fontSize: 10, fontWeight: 'normal', color: '#999' }}>
+                      (不含敘獎分數)
+                    </span>
                   </th>
                 )}
-                {canSeeRemarks && <th style={{ textAlign: 'left', padding: 6 }}>導師評語</th>}
-                {canSeeRemarks && <th style={{ padding: 6 }}>成績單</th>}
+                {/* 【本輪修正】反映事項「綜合表現放在導師評語左側獨立一行，計算方式為
+                    敘獎分數+學業分數，並提示『此分數為升級依據，不參與排名』」——原本
+                    放在「平時」那組底下當第5欄，這裡移出來，變成總表（學業分數）跟
+                    導師評語中間自己獨立的一欄。 */}
+                {viewMode === 'all' && (
+                  <th
+                    style={{ padding: 6, borderLeft: '1px solid #eee', position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}
+                    title="此分數為升級依據，不參與排名"
+                  >
+                    綜合表現
+                    <span style={{ display: 'block', fontSize: 10, fontWeight: 'normal', color: '#999' }}>
+                      （敘獎分數+學業分數，此分數為升級依據，不參與排名）
+                    </span>
+                  </th>
+                )}
+                {canSeeRemarks && (
+                  <th style={{ textAlign: 'left', padding: 6, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>導師評語</th>
+                )}
+                {canSeeRemarks && <th style={{ padding: 6, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>成績單</th>}
               </tr>
               <tr style={{ fontSize: 11, color: '#999' }}>
-                <th></th>
-                <th></th>
+                <th style={{ position: 'sticky', left: 0, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4 }}></th>
+                <th style={{ position: 'sticky', left: 40, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4 }}></th>
                 {subjects.map((s) =>
                   visibleExamTypes.map((et, eti) => (
-                    <th key={s + et} style={{ borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER }}>
+                    <th
+                      key={s + et}
+                      style={{
+                        borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER,
+                        position: 'sticky',
+                        top: CS_HEADER_ROW1_HEIGHT,
+                        background: '#fff',
+                        zIndex: 2,
+                      }}
+                    >
                       {EXAM_TYPE_LABEL[et]}
                     </th>
                   ))
                 )}
                 {visibleExamTypes.map((et) => (
                   <Fragment key={et}>
-                    <th key={et + '-total'}>總分</th>
-                    <th key={et + '-avg'}>平均(*比重)</th>
-                    <th key={et + '-crank'}>班排名</th>
-                    <th key={et + '-grank'}>年級排名</th>
-                    {/* 【本輪新增】反映事項「『平時總分／排名』右邊增加一欄『綜合表現』」——
-                        內容是獎懲累積換算出來的加扣分（sql/46 discipline_adjustment() 同一套算法）。 */}
-                    {et === '平時分' && <th key={et + '-conduct'}>綜合表現</th>}
+                    {/* 反映事項「期中、期末、平時項下的『總分』改為『原始分數總分』」——
+                        跟右邊「總表」、「綜合表現」區分清楚：這裡是單一考試類別、單純
+                        科目加權後的分數，不含出缺席／敘獎這些額外加扣分。 */}
+                    <th key={et + '-total'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                      原始分數總分
+                    </th>
+                    <th key={et + '-avg'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                      平均(*比重)
+                    </th>
+                    <th key={et + '-crank'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                      班排名
+                    </th>
+                    <th key={et + '-grank'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                      年級排名
+                    </th>
                   </Fragment>
                 ))}
                 {viewMode === 'all' && (
                   <>
-                    <th>總分</th>
-                    <th>班排名</th>
-                    <th>年級排名</th>
+                    <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>總分</th>
+                    <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>班排名</th>
+                    <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>年級排名</th>
                   </>
                 )}
-                {canSeeRemarks && <th></th>}
-                {canSeeRemarks && <th></th>}
+                {viewMode === 'all' && <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}></th>}
+                {canSeeRemarks && <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}></th>}
+                {canSeeRemarks && <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}></th>}
               </tr>
             </thead>
             <tbody>
               {enrollments.map((en) => (
                 <tr key={en.id} style={{ borderTop: '1px solid #eee' }}>
-                  <td style={{ padding: 6 }}>{en.seat_no}</td>
-                  <td style={{ padding: 6 }}>{en.name}</td>
+                  <td style={{ padding: 6, position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>{en.seat_no}</td>
+                  <td style={{ padding: 6, position: 'sticky', left: 40, background: '#fff', zIndex: 1, whiteSpace: 'nowrap' }}>{en.name}</td>
                   {subjects.map((s) => {
                     const row = subjectData[en.id]?.[s];
                     const isAttendanceSubject = ATTENDANCE_SUBJECT_NAMES.includes(s);
@@ -885,17 +937,6 @@ export default function ClassSummaryPage() {
                       <td key={en.id + et + '-grank'} style={{ padding: 6, textAlign: 'center' }}>
                         {gradeRank[en.id]?.[EXAM_TYPE_GRADE_RANK_FIELD[et]] ?? '—'}
                       </td>
-                      {/* 【本輪新增】綜合表現：獎懲累積換算出來的加扣分（sql/46
-                          discipline_adjustment() 同一套算法，這裡用 conductByStudent
-                          已經前端算好的加總，不用再對每個學生各呼叫一次 RPC）。 */}
-                      {et === '平時分' && (
-                        <td key={en.id + et + '-conduct'} style={{ padding: 6, textAlign: 'center' }}>
-                          {(() => {
-                            const adj = conductByStudent[en.student_no]?.adjustment ?? 0;
-                            return adj === 0 ? '—' : adj > 0 ? `+${adj}` : `${adj}`;
-                          })()}
-                        </td>
-                      )}
                     </Fragment>
                   ))}
                   {viewMode === 'all' && (
@@ -904,6 +945,21 @@ export default function ClassSummaryPage() {
                       <td style={{ padding: 6, textAlign: 'center' }}>{classRank[en.id]?.class_rank ?? '—'}</td>
                       <td style={{ padding: 6, textAlign: 'center' }}>{gradeRank[en.id]?.grade_rank ?? '—'}</td>
                     </>
+                  )}
+                  {/* 【本輪修正】綜合表現＝敘獎分數（conductByStudent 前端算好的本學期
+                      conduct_events 加總，跟 sql/46 discipline_adjustment() 同一套算法）
+                      ＋學業分數（這裡用總表的 total_score，也就是期中/期末/平時依比例
+                      加權後的總分，不含敘獎）。學業分數還沒算出來（例如還沒三個類別都
+                      鎖定）就先顯示—，不要顯示只有敘獎分數、沒有學業分數的半套數字。 */}
+                  {viewMode === 'all' && (
+                    <td style={{ padding: 6, textAlign: 'center', borderLeft: '1px solid #eee' }} title="此分數為升級依據，不參與排名">
+                      {(() => {
+                        const academic = classRank[en.id]?.total_score;
+                        if (academic === undefined || academic === null) return '—';
+                        const conduct = conductByStudent[en.student_no]?.adjustment ?? 0;
+                        return (Number(academic) + conduct).toFixed(2);
+                      })()}
+                    </td>
                   )}
                   {canSeeRemarks && <td style={{ padding: 6 }}>{remarks[en.id] ?? ''}</td>}
                   {canSeeRemarks && (
