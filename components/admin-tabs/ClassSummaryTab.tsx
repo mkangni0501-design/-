@@ -760,19 +760,51 @@ export default function ClassSummaryPage() {
         <p style={{ fontSize: 13, color: '#999' }}>載入中…</p>
       ) : (
         classId && (
-          // 【本輪新增】反映事項「成績總表中名字、科目都要固定不受滾軸調整畫面而
-          // 被消失」——這張表欄位非常多（每科 x 幾個考試類別），橫向捲動時「座號／
-          // 姓名」用 position:sticky 釘在最左邊；學生一多，往下捲動時最上面兩列
-          // 標題（科目名稱／總分排名這些）用 position:sticky 釘在頂端，跟
-          // attendance/weekly 頁同樣的做法，top 用 CS_HEADER_ROW1_HEIGHT 當第二列
-          // 的位移量，接在第一列正下方。overflowX:'auto' 讓橫向捲動只發生在這個
-          // 容器裡，不會把整個頁面往右推。
-          <div className="print-compact" style={{ overflowX: 'auto' }}>
+          // 【本輪修正】反映事項「科目往下滑動看不見」「名字蓋到第一科期中考分數」
+          // 「左右移動的移動軸不是在最外面的視窗，像內嵌了一個表格」——
+          // 上一輪在這裡包了一層 overflowX:'auto' 的 div，這是真正的根因：CSS
+          // 規定只要一個元素的 overflow-x 不是 visible，overflow-y 就算沒特別設，
+          // 瀏覽器也會自動把它當成 auto——等於這個 div 變成「自己的捲動容器」，
+          // 裡面所有 position:sticky 的元素，捲動的參考基準就變成「這個 div 的
+          // 捲動範圍」而不是整個頁面，但這個 div 本身沒有限制高度、不會真的在
+          // 垂直方向產生自己的捲軸，結果就是：上面「科目」那兩列標題的 sticky
+          // 完全失效（往下滑就看不到了）；橫向捲軸則變成只存在於這個 div 自己
+          // 窄窄的範圍裡，使用者得先往下滑到表格那裡才摸得到，才會覺得「移動軸
+          // 不在最外面的視窗、像內嵌了一個表格」。
+          // 修法：整個拿掉這層 overflowX，讓表格內容直接在頁面裡自然往右超出、
+          // 由瀏覽器最外層視窗本身的橫向捲軸處理（跟 attendance/weekly 頁同一種
+          // 做法）——這樣 position:sticky 的參考基準就是整個頁面，上方標題列、
+          // 最左邊座號/姓名欄，橫向、縱向捲動都會正確固定住，捲軸也只有瀏覽器
+          // 最外層那一條，不會有「表格裡又有一層」的感覺。
+          //
+          // 「姓名蓋到第一科分數」的根因則是：座號／姓名這兩個 sticky 欄位原本
+          // 用猜的 left 值（0、40），沒有同時明確鎖定欄寬，學生姓名字數不同、
+          // 瀏覽器實際算出來的欄寬跟猜的不一樣，才會蓋到旁邊。這裡把兩欄的寬度
+          // 明確鎖死（座號48px、姓名92px），sticky 的 left 位移直接對齊這個鎖死
+          // 的寬度，兩者一定對得起來，不會再因為姓名字數不同而跑位、互相蓋到。
+          <div className="print-compact">
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr>
-                <th style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, top: 0, background: '#fff', zIndex: 4 }}>座號</th>
-                <th style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 40, top: 0, background: '#fff', zIndex: 4 }}>姓名</th>
+                <th style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, top: 0, background: '#fff', zIndex: 4, width: 48, minWidth: 48, maxWidth: 48 }}>
+                  座號
+                </th>
+                <th
+                  style={{
+                    textAlign: 'left',
+                    padding: 6,
+                    position: 'sticky',
+                    left: 48,
+                    top: 0,
+                    background: '#fff',
+                    zIndex: 4,
+                    width: 92,
+                    minWidth: 92,
+                    maxWidth: 92,
+                  }}
+                >
+                  姓名
+                </th>
                 {subjects.map((s) => (
                   <th key={s} colSpan={visibleExamTypes.length} style={{ padding: 6, borderLeft: SUBJECT_DIVIDER, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>
                     {s}
@@ -837,8 +869,8 @@ export default function ClassSummaryPage() {
                 {canSeeRemarks && <th style={{ padding: 6, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>成績單</th>}
               </tr>
               <tr style={{ fontSize: 11, color: '#999' }}>
-                <th style={{ position: 'sticky', left: 0, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4 }}></th>
-                <th style={{ position: 'sticky', left: 40, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4 }}></th>
+                <th style={{ position: 'sticky', left: 0, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4, width: 48, minWidth: 48, maxWidth: 48 }}></th>
+                <th style={{ position: 'sticky', left: 48, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4, width: 92, minWidth: 92, maxWidth: 92 }}></th>
                 {subjects.map((s) =>
                   visibleExamTypes.map((et, eti) => (
                     <th
@@ -889,8 +921,25 @@ export default function ClassSummaryPage() {
             <tbody>
               {enrollments.map((en) => (
                 <tr key={en.id} style={{ borderTop: '1px solid #eee' }}>
-                  <td style={{ padding: 6, position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>{en.seat_no}</td>
-                  <td style={{ padding: 6, position: 'sticky', left: 40, background: '#fff', zIndex: 1, whiteSpace: 'nowrap' }}>{en.name}</td>
+                  <td style={{ padding: 6, position: 'sticky', left: 0, background: '#fff', zIndex: 1, width: 48, minWidth: 48, maxWidth: 48 }}>{en.seat_no}</td>
+                  <td
+                    style={{
+                      padding: 6,
+                      position: 'sticky',
+                      left: 48,
+                      background: '#fff',
+                      zIndex: 1,
+                      whiteSpace: 'nowrap',
+                      width: 92,
+                      minWidth: 92,
+                      maxWidth: 92,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                    title={en.name}
+                  >
+                    {en.name}
+                  </td>
                   {subjects.map((s) => {
                     const row = subjectData[en.id]?.[s];
                     const isAttendanceSubject = ATTENDANCE_SUBJECT_NAMES.includes(s);

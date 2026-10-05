@@ -598,14 +598,29 @@ export default function ScoreEntryPage() {
       return { successCount: 0, errors: ['讀不到年度/學期/年級/班級，請確認檔案格式'] };
     }
 
-    const { data: classRow } = await supabase
+    // 【本輪修正】反映事項「下載成績範本提供的班級區域有錯誤，導致無法上傳」——
+    // 根因：這裡原本額外用 departmentForGrade(header.gradeLevel) 猜一次「部別」
+    // 當篩選條件，這個函式（lib/gradeMapping.ts）是一份寫死的年級文字清單
+    // （初一/初二/初三、高一/高二/高三、1年~6年、幼甲/幼乙），只要學校實際存在
+    // classes.department 的部別、或 grade_level 的寫法跟這份清單對不起來
+    // （例如這所學校的某些年級/部別命名方式不在清單裡），猜出來的部別就會是
+    // 「其他」，根本查不到真正的班級，上傳就會一律報「找不到對應班級」失敗。
+    // 改成直接用「學年度＋年級＋班級名稱」查，不要另外猜部別——grade_level＋
+    // class_name 在同一個學年度裡原則上已經足夠識別出班級；如果真的查到一筆以上
+    // （理論上少見：不同部別剛好用了同樣的年級文字＋班級名稱），才退回用
+    // departmentForGrade() 當輔助判斷，盡量從中選出最符合的一筆，而不是一開始
+    // 就用它直接篩掉所有真正符合的班級。
+    const { data: classRows } = await supabase
       .from('classes')
-      .select('id')
+      .select('id, department')
       .eq('academic_year', header.academicYear)
-      .eq('department', departmentForGrade(header.gradeLevel))
       .eq('grade_level', header.gradeLevel)
-      .eq('class_name', header.className)
-      .maybeSingle();
+      .eq('class_name', header.className);
+    let classRow = (classRows ?? [])[0] ?? null;
+    if ((classRows ?? []).length > 1) {
+      const guessedDept = departmentForGrade(header.gradeLevel);
+      classRow = (classRows ?? []).find((c: any) => c.department === guessedDept) ?? classRow;
+    }
     if (!classRow) {
       return { successCount: 0, errors: [`找不到對應班級：${header.academicYear} ${header.gradeLevel}${header.className}，請先在「班級與導師設定」建立`] };
     }
@@ -666,7 +681,7 @@ export default function ScoreEntryPage() {
     const classInfo = classOptions.find((c) => c.id === classId);
     const { data: enrollRows, error } = await supabase
       .from('enrollments')
-      .select('seat_no, student_no, term')
+      .select('id, seat_no, student_no, term')
       .eq('class_id', classId)
       .order('seat_no');
     if (error) {
@@ -679,6 +694,31 @@ export default function ScoreEntryPage() {
       .select('student_no, name')
       .in('student_no', studentNos.length > 0 ? studentNos : ['__none__']);
     const nameByStudentNo = new Map((studentRows ?? []).map((s: any) => [s.student_no, s.name]));
+
+    // 【本輪新增】反映事項「我希望能檔案能一併下載本學期目前系統中保存的成績，
+    // 目前為空白」——downloadScoreAttendanceTemplateForClass() 本來就支援
+    // currentScores 這個參數（見 lib/excelTemplates.ts），之前只是這裡沒有查、
+    // 沒有帶進去，範本才會永遠是空白的。這裡補上：查這個班每位學生在 scores
+    // 表（用 enrollment_id 對應）目前已經存的每個考試類別、每個科目的分數，
+    // 組成 currentScores 傳進去，下載下來的範本就會直接帶出目前系統裡已經有
+    // 的分數，不用再對照畫面重新謄寫一次。
+    const enrollIds = (enrollRows ?? []).map((r: any) => r.id);
+    const studentNoByEnrollId = new Map((enrollRows ?? []).map((r: any) => [r.id, r.student_no]));
+    const currentScores: Record<string, Record<string, Record<string, number>>> = {};
+    if (enrollIds.length > 0) {
+      const { data: scoreRows } = await supabase
+        .from('scores')
+        .select('enrollment_id, exam_type, subject, score')
+        .in('enrollment_id', enrollIds);
+      (scoreRows ?? []).forEach((r: any) => {
+        const studentNo = studentNoByEnrollId.get(r.enrollment_id);
+        if (!studentNo || r.score == null) return;
+        const byExam = (currentScores[studentNo] = currentScores[studentNo] ?? {});
+        const bySubj = (byExam[r.exam_type] = byExam[r.exam_type] ?? {});
+        bySubj[r.subject] = Number(r.score);
+      });
+    }
+
     await downloadScoreAttendanceTemplateForClass({
       academicYear: classInfo?.academic_year ?? new Date().getFullYear(),
       term: (enrollRows ?? [])[0]?.term ?? '上學期',
@@ -690,6 +730,7 @@ export default function ScoreEntryPage() {
         studentNo: r.student_no,
         name: nameByStudentNo.get(r.student_no) ?? '（找不到姓名）',
       })),
+      currentScores,
     });
   }
 
