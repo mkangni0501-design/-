@@ -10,6 +10,7 @@ import { departmentForGrade } from '@/lib/gradeMapping';
 import { getEffectivePeriodCount, WEEKDAY_LABELS } from '@/lib/periodConfig';
 import { resolveCurrentTerm } from '@/lib/academicTerm';
 import { fetchAllPaged } from '@/lib/schoolWideDataQueries';
+import { fetchAttendanceForStudents } from '@/lib/attendanceQueries';
 import {
   readWorkbook,
   readAllClassSheets,
@@ -188,23 +189,18 @@ async function fetchCurrentAttendanceForRange(
   endStr: string
 ): Promise<CurrentAttendanceByStudent> {
   if (studentNos.length === 0) return {};
-  const CHUNK = 200; // .in('student_no', [...]) 的陣列大小，避免單一請求網址過長
+  // 【本輪修正，根因已確認】原本用「一大串 .in('student_no', 200 人)」查整個學期，
+  // 而且完全沒有檢查 error：查詢逾時（statement timeout）或被 RLS 擋下時 data 是
+  // null，被 `data ?? []` 當成「沒有任何紀錄」，下載下來的活頁簿就整份空白、
+  // 也沒有任何錯誤提示。改成跟「學期統計表」同一套 fetchAttendanceForStudents()
+  // （逐學生、單一學號相等條件、固定排序、分頁撈到底），並且查詢失敗時直接丟出
+  // 錯誤，由下載按鈕顯示真正的失敗原因，不再默默輸出空白檔案。
+  const { data, error } = await fetchAttendanceForStudents(studentNos, startStr, endStr);
+  if (error) throw new Error('讀取出缺勤紀錄失敗：' + (error.message ?? String(error)));
   const attMapFlat: Record<string, string> = {};
-  for (let i = 0; i < studentNos.length; i += CHUNK) {
-    const chunk = studentNos.slice(i, i + CHUNK);
-    const { data } = await fetchAllPaged((from, to) =>
-      supabase
-        .from('attendance')
-        .select('student_no, record_date, period_no, status')
-        .in('student_no', chunk)
-        .gte('record_date', startStr)
-        .lte('record_date', endStr)
-        .range(from, to)
-    );
-    (data ?? []).forEach((r: any) => {
-      attMapFlat[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
-    });
-  }
+  data.forEach((r) => {
+    attMapFlat[`${r.student_no}|${r.record_date}|${r.period_no}`] = r.status;
+  });
   return attMapToCurrentAttendance(attMapFlat);
 }
 
@@ -240,10 +236,16 @@ async function fetchSubjectsAndScoresForClass(
   const enrollmentIds = (enrollRows ?? []).map((r: any) => r.id);
   if (enrollmentIds.length === 0) return { subjects, currentScores: {} };
 
-  const { data: scoreRows } = await supabase
-    .from('scores')
-    .select('enrollment_id, exam_type, subject, score')
-    .in('enrollment_id', enrollmentIds);
+  const { data: scoreRows } = await fetchAllPaged<any>((from, to) =>
+    supabase
+      .from('scores')
+      .select('enrollment_id, exam_type, subject, score')
+      .in('enrollment_id', enrollmentIds)
+      .order('enrollment_id')
+      .order('exam_type')
+      .order('subject')
+      .range(from, to)
+  );
 
   const currentScores: CurrentScoresByStudent = {};
   (scoreRows ?? []).forEach((r: any) => {
@@ -554,12 +556,24 @@ function WeeklyAttendancePageInner() {
       const endStr = toDateStr(weekDates[5]);
       const studentNos = rows.map((r) => r.student_no);
       if (studentNos.length > 0) {
-        const { data: attRows, error: attErr } = await supabase
-          .from('attendance')
-          .select('student_no, record_date, period_no, status')
-          .in('student_no', studentNos)
-          .gte('record_date', startStr)
-          .lte('record_date', endStr);
+        // 【本輪修正，根因已確認】原本這裡沒有分頁：一個班 40 位學生 × 6 天 × 每天
+        // 6~8 節，一週就有 1500~2000 筆紀錄，超過 PostgREST 單次回傳上限（1000 筆），
+        // 超出的部分被「靜默截斷」——被截掉的格子在畫面上就變成預設的「出席」。
+        // 這就是「儲存後重新整理又回到原樣」「一週跟當天（手機版只查單一節次）數據
+        // 對不起來」的真正原因：資料其實有存進資料庫，只是這個查詢沒把它讀回來。
+        // 改用 fetchAllPaged() 撈到底，並加上固定排序，避免分頁之間漏列/重複。
+        const { data: attRows, error: attErr } = await fetchAllPaged<any>((from, to) =>
+          supabase
+            .from('attendance')
+            .select('student_no, record_date, period_no, status')
+            .in('student_no', studentNos)
+            .gte('record_date', startStr)
+            .lte('record_date', endStr)
+            .order('student_no')
+            .order('record_date')
+            .order('period_no')
+            .range(from, to)
+        );
         if (attErr) setLoadError('讀取出缺勤紀錄失敗：' + attErr.message);
         const map: Record<string, string> = {};
         (attRows ?? []).forEach((r: any) => {
@@ -956,6 +970,14 @@ function WeeklyAttendancePageInner() {
   // 只是這裡之前一直沒用到），不用再讓老師自己key學號；完全沒有名冊時才退回原本
   // 的空白範本（downloadScoreAttendanceTemplate），版面才不會一片空白看起來像壞掉。
   async function handleDownloadTemplate() {
+    try {
+      await handleDownloadTemplateInner();
+    } catch (e: any) {
+      alert('下載失敗：' + (e?.message ?? String(e)));
+    }
+  }
+
+  async function handleDownloadTemplateInner() {
     if (students.length === 0 || !classId) {
       downloadScoreAttendanceTemplate();
       return;
@@ -1010,6 +1032,14 @@ function WeeklyAttendancePageInner() {
   // 全校所有班級的真實名冊，組成一個活頁簿、一班一個分頁，管理員填完直接整批
   // 上傳回去（見下面 handleUploadFile 的多分頁處理）。
   async function handleDownloadAllClassesTemplate() {
+    try {
+      await handleDownloadAllClassesTemplateInner();
+    } catch (e: any) {
+      alert('下載全校出缺席輸入表失敗：' + (e?.message ?? String(e)));
+    }
+  }
+
+  async function handleDownloadAllClassesTemplateInner() {
     const currentTerm = await resolveCurrentTerm();
     if (!currentTerm) {
       alert('讀不到目前生效的學年度／學期，請先在「學年學期設定」確認。');
@@ -1036,14 +1066,19 @@ function WeeklyAttendancePageInner() {
     const attendanceDates = buildMonToSatDateRange(termStart ?? weekDates[0], weekDates[5]);
     const startStr = toDateStr(attendanceDates[0]);
     const endStr = toDateStr(attendanceDates[attendanceDates.length - 1]);
-    const classesData = await Promise.all(
-      allClasses.map(async (c: any) => {
-        const { data: enrollRows } = await supabase
+    // 【本輪修正】原本是 Promise.all 同時對「全部班級」各自發出多個查詢（整個學校
+    // 幾十個班同時查整學期出缺勤），瞬間壓力過大容易逾時，而且逾時的錯誤被吞掉變成
+    // 空白。改成「一班一班依序處理」，任何一班查詢失敗就整個停下來並顯示原因。
+    const classesData: any[] = [];
+    const buildOneClass = async (c: any) => {
+      {
+        const { data: enrollRows, error: enrollErr } = await supabase
           .from('enrollments')
           .select('seat_no, student_no')
           .eq('class_id', c.id)
           .eq('is_current', true)
           .order('seat_no');
+        if (enrollErr) throw new Error(`讀取 ${c.grade_level}${c.class_name} 名冊失敗：` + enrollErr.message);
         const studentNos = (enrollRows ?? []).map((r: any) => r.student_no);
         const dept = departmentForGrade(c.grade_level);
         const [{ data: studentRows }, currentAttendance, { subjects, currentScores }, periodCountsByWeekday] = await Promise.all([
@@ -1071,9 +1106,12 @@ function WeeklyAttendancePageInner() {
           currentAttendance,
           currentScores,
         };
-      })
-    );
-    downloadScoreAttendanceTemplateForClasses(classesData);
+      }
+    };
+    for (const c of allClasses) {
+      classesData.push(await buildOneClass(c));
+    }
+    await downloadScoreAttendanceTemplateForClasses(classesData);
   }
 
   async function handleUploadFile(file: File) {
@@ -1094,14 +1132,22 @@ function WeeklyAttendancePageInner() {
           allErrors.push(`分頁「${sheetName}」讀不到年度/年級/班級，已略過這個分頁`);
           continue;
         }
-        const { data: classRow } = await supabase
+        // 【本輪修正】反映事項「下載成績範本提供的班級區域有錯誤，導致無法上傳」——
+        // departmentForGrade() 是一份寫死的年級文字清單，學校實際的部別／年級
+        // 命名方式對不上這份清單時，猜出來的部別會是「其他」，查不到真正的班級。
+        // 改成直接用「學年度＋年級＋班級名稱」查，查到一筆以上才用
+        // departmentForGrade() 當輔助判斷、盡量選最符合的一筆。
+        const { data: classRows } = await supabase
           .from('classes')
-          .select('id')
+          .select('id, department')
           .eq('academic_year', header.academicYear)
-          .eq('department', departmentForGrade(header.gradeLevel))
           .eq('grade_level', header.gradeLevel)
-          .eq('class_name', header.className)
-          .maybeSingle();
+          .eq('class_name', header.className);
+        let classRow = (classRows ?? [])[0] ?? null;
+        if ((classRows ?? []).length > 1) {
+          const guessedDept = departmentForGrade(header.gradeLevel);
+          classRow = (classRows ?? []).find((c: any) => c.department === guessedDept) ?? classRow;
+        }
         if (!classRow) {
           allErrors.push(`分頁「${sheetName}」找不到對應班級：${header.academicYear} ${header.gradeLevel}${header.className}，已略過這個分頁`);
           continue;
@@ -1176,14 +1222,20 @@ function WeeklyAttendancePageInner() {
       return { successCount: 0, errors: ['讀不到年度/年級/班級，請確認檔案格式'] };
     }
 
-    const { data: classRow } = await supabase
+    // 【本輪修正】反映事項「下載成績範本提供的班級區域有錯誤，導致無法上傳」——
+    // 理由同上面多分頁那段：不要單靠 departmentForGrade() 猜部別去篩，改成
+    // 「學年度＋年級＋班級名稱」查，查到一筆以上才用它輔助挑選。
+    const { data: classRows } = await supabase
       .from('classes')
-      .select('id')
+      .select('id, department')
       .eq('academic_year', header.academicYear)
-      .eq('department', departmentForGrade(header.gradeLevel))
       .eq('grade_level', header.gradeLevel)
-      .eq('class_name', header.className)
-      .maybeSingle();
+      .eq('class_name', header.className);
+    let classRow = (classRows ?? [])[0] ?? null;
+    if ((classRows ?? []).length > 1) {
+      const guessedDept = departmentForGrade(header.gradeLevel);
+      classRow = (classRows ?? []).find((c: any) => c.department === guessedDept) ?? classRow;
+    }
     if (!classRow) {
       return { successCount: 0, errors: [`找不到對應班級：${header.academicYear} ${header.gradeLevel}${header.className}，請先在「班級與導師設定」建立`] };
     }

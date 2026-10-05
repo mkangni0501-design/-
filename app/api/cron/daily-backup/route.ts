@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runBackup, insertBackupSnapshot } from '@/lib/backupRestore';
+import { startBackupJob, findResumableJob, stepBackupJob } from '@/lib/backupJob';
 
-// 理由同 app/api/admin/backup/create/route.ts：全校資料撈取＋寫入備份紀錄，
-// 資料量大時需要比預設更久的執行時間。
-export const maxDuration = 300;
+// 【本輪修正】跟手動備份同一個根因（一次請求撈完全校資料，超過平台單次請求時間上限
+// 被切斷）：改成分段備份（見 lib/backupJob.ts）。排程每次被呼叫只做一段（約 4 分鐘內），
+// 沒做完的進度存在 Storage，下一次排程自動接續——所以 vercel.json 把排程設成
+// 相隔 30 分鐘觸發兩次（見該檔）；已經有今天的自動備份就直接略過，不會重複備份。
+export const maxDuration = 300; // 排程沒有人在等回應，可以一次做久一點（專案原本就已經宣告 300 並部署成功）
 
-// 每天自動備份：由排程服務（例如 Vercel Cron，見專案根目錄 vercel.json）呼叫，
+const CRON_STEP_BUDGET_MS = 240000;
+
+// 每日自動備份：由排程服務（例如 Vercel Cron，見專案根目錄 vercel.json）呼叫，
 // 不是使用者登入觸發，所以用 CRON_SECRET 這組共用密鑰驗證，而不是使用者的登入憑證。
 // 請在部署環境的環境變數設定 CRON_SECRET（一組自訂的長亂數字串）。
 export async function GET(req: NextRequest) {
@@ -20,15 +24,18 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const { tables, counts } = await runBackup(supabaseAdmin);
-    // 改用 insertBackupSnapshot()：理由同「手動備份」route（見該檔案與
-    // sql/97fix_backup_creation_unknown_error.sql 的說明）——資料量大時改走
-    // Storage，避免整包塞進單一 RPC 請求在網路層失敗。
-    const { data: inserted, error: insertErr } = await insertBackupSnapshot(supabaseAdmin, '自動', null, tables, counts);
-    if (insertErr || !inserted) {
-      return NextResponse.json({ error: '備份完成但寫入紀錄失敗：' + (insertErr?.message ?? '未知錯誤') }, { status: 500 });
+    let state = await findResumableJob(supabaseAdmin);
+    if (!state) {
+      // 沒有做到一半的：如果最近 12 小時內已經有一份自動備份了，這次排程就略過
+      const since = new Date(Date.now() - 12 * 3600 * 1000).toISOString();
+      const { data: recent } = await supabaseAdmin.from('backups').select('id').eq('kind', '自動').gte('created_at', since).limit(1);
+      if (recent && recent.length > 0) {
+        return NextResponse.json({ success: true, skipped: true, reason: '最近 12 小時內已有自動備份' });
+      }
+      state = await startBackupJob(supabaseAdmin, '自動', null);
     }
-    return NextResponse.json({ success: true, id: inserted.id, created_at: inserted.created_at, counts });
+    const progress = await stepBackupJob(supabaseAdmin, state, CRON_STEP_BUDGET_MS);
+    return NextResponse.json({ success: true, ...progress });
   } catch (e: any) {
     console.error('[cron/daily-backup] failed:', e);
     const detail =

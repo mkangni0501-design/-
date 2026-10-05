@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runBackup, insertBackupSnapshot } from '@/lib/backupRestore';
+import { startBackupJob, loadJob, stepBackupJob, findResumableJob } from '@/lib/backupJob';
 
-// 全校資料撈取＋寫入備份紀錄，資料量大時可能需要比預設更久的執行時間，
-// 拉長這支 route 的執行時間上限（實際上限仍受 Vercel 方案本身的執行時間
-// 上限限制，Hobby 方案可能無法真的跑到這麼久，如果方案上限比較低可以調低這個值）。
-export const maxDuration = 300;
+// 【本輪修正，根因已確認】備份原本是「一次請求」把全校所有資料表撈完，資料量
+// （尤其 attendance）成長後，單次請求的總時間超過平台上限，連線被平台切斷（HTTP 504）。
+// 改成「分段備份」：前端反覆呼叫這支 API，每次只做約 20 秒就回傳進度，下一次接續，
+// 詳見 lib/backupJob.ts 開頭的說明。這樣不管資料量多大、平台單次上限多短都不會 504。
+//
+// 請求格式（POST，JSON）：
+//   { action: 'start' }            → 開始（或接續尚未完成的自動備份）新的備份，回傳 jobId＋第一段進度
+//   { action: 'step', jobId }      → 接續執行一段，回傳進度；done=true 時附上 id/created_at/counts
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,25 +28,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '沒有權限執行備份' }, { status: 403 });
     }
 
-    const { tables, counts } = await runBackup(supabaseAdmin);
+    const body = await req.json().catch(() => ({} as any));
+    const action: string = body?.action ?? 'start';
 
-    // 改用 insertBackupSnapshot()（見 lib/backupRestore.ts、sql/97fix_backup_creation_unknown_error.sql
-    // 的說明）：資料量小就跟以前一樣直接存進 tables 欄位；資料量大就先上傳到
-    // Storage、backups 這一列只存路徑，避免整包塞進單一 RPC 請求，超過大小
-    // 限制在網路層直接失敗、前端只看得到「未知錯誤」。
-    const { data: inserted, error: insertErr } = await insertBackupSnapshot(supabaseAdmin, '手動', callerAuth.user.id, tables, counts);
-    if (insertErr || !inserted) {
-      return NextResponse.json({ error: '備份完成但寫入紀錄失敗：' + (insertErr?.message ?? '未知錯誤') }, { status: 500 });
+    if (action === 'start') {
+      // 如果有「每日自動備份」做到一半的 job，直接接手做完，不用重頭再撈一次
+      let resumable = await findResumableJob(supabaseAdmin);
+      // 前端記著上次中斷的 jobId，帶回來就接續（只接續「手動」且還沒做完的 job）
+      if (!resumable && body?.resumeJobId) {
+        const prev = await loadJob(supabaseAdmin, String(body.resumeJobId));
+        if (prev && !prev.finished && prev.kind === '手動') resumable = prev;
+      }
+      const state = resumable ?? (await startBackupJob(supabaseAdmin, '手動', callerAuth.user.id));
+      const progress = await stepBackupJob(supabaseAdmin, state);
+      return NextResponse.json({ success: true, ...progress });
     }
 
-    return NextResponse.json({ success: true, id: inserted.id, created_at: inserted.created_at, counts });
+    if (action === 'step') {
+      const jobId = String(body?.jobId ?? '');
+      const state = await loadJob(supabaseAdmin, jobId);
+      if (!state) {
+        return NextResponse.json({ error: '找不到這個備份工作（可能已過期或 jobId 不正確），請重新開始備份' }, { status: 404 });
+      }
+      const progress = await stepBackupJob(supabaseAdmin, state);
+      return NextResponse.json({ success: true, ...progress });
+    }
+
+    return NextResponse.json({ error: '不認得的 action：' + action }, { status: 400 });
   } catch (e: any) {
-    // 【本輪修正】反映事項「備份失敗：未知錯誤」——原本 catch 到的例外如果沒有
-    // `.message`（例如網路層直接中斷連線拋出的例外、或某個第三方套件拋出的
-    // 非標準物件），使用者只會看到「未知錯誤」四個字，完全沒有線索可以往下查。
-    // 這裡把能拿到的資訊盡量都塞進錯誤訊息、同時印到伺服器端 log，之後真的再
-    // 發生時，開發人員到 Vercel 的 Logs 至少看得到完整內容，不用只靠使用者
-    // 回報的這四個字去猜。
     console.error('[backup/create] failed:', e);
     const detail =
       e?.message || e?.error_description || e?.details || e?.hint || (typeof e === 'string' ? e : null) || JSON.stringify(e) || '未知錯誤';

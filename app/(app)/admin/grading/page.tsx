@@ -81,8 +81,12 @@ function GradingHubPageInner() {
 
   return (
     <main style={{ maxWidth: 1080, margin: '0 auto', padding: 24 }}>
-      <h1 style={{ fontSize: 16, marginBottom: 12 }}>成績相關設定及查詢</h1>
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', borderBottom: '1px solid #eee', marginBottom: 20 }}>
+      {/* 【本輪新增】反映事項「列印目前頁面我想直接鎖定選定頁的表格本身」——標題
+          跟分頁切換列原本沒有排除在列印範圍外，加上 no-print（規則由
+          ClassSummaryTab.tsx 等各分頁自己的 <style> 定義，這個分頁有掛載才會
+          生效）。 */}
+      <h1 className="no-print" style={{ fontSize: 16, marginBottom: 12 }}>成績相關設定及查詢</h1>
+      <div className="no-print" style={{ display: 'flex', gap: 4, flexWrap: 'wrap', borderBottom: '1px solid #eee', marginBottom: 20 }}>
         {visibleTabs.map((t) => (
           <button
             key={t.key}

@@ -79,7 +79,7 @@ export default function SubjectAttendanceViewPage() {
       if (currentTerm) {
         const { data: termRow } = await supabase
           .from('academic_terms')
-          .select('term_start_date')
+          .select('term_start_date, term_end_date')
           .eq('academic_year', currentTerm.academic_year)
           .eq('term', currentTerm.term)
           .maybeSingle();
@@ -94,8 +94,17 @@ export default function SubjectAttendanceViewPage() {
         // 項目都查不到統計」的根因，不是這個科目真的沒有資料。改成開學日沒填時，
         // 用「學年度＋學期」估出一個合理的開學日下限（estimateTermStart），
         // 不再讓查詢範圍退化成不限制。
+        //
+        // 【本輪再修正】反映事項「學期日期到了以後不會自動停止計算，目前仍在
+        // 進行統計中」——這裡原本不管 term_end_date、一律用「今天」當統計上限，
+        // 學期結束日期過了以後還是會繼續往「今天」累計，不會在學期結束那天停住。
+        // 改成比照 attendance/report 頁同樣的規則：有填 term_end_date、而且已經
+        // 過了，就固定用 term_end_date 當上限，不再往後累計；還沒到期末日，才用
+        // 今天當上限。
         const start = termRow?.term_start_date ?? estimateTermStart(currentTerm.academic_year, currentTerm.term);
-        setTermDateRange({ start, end: todayStr });
+        const termEnd = termRow?.term_end_date ?? null;
+        const end = termEnd && termEnd < todayStr ? termEnd : todayStr;
+        setTermDateRange({ start, end });
       }
       let scheduleQuery = supabase
         .from('class_schedule')
