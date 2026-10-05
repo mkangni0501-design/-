@@ -208,12 +208,37 @@ export async function loadBackupSnapshot(
   if (!row.storage_path) return { snapshot: null, error: { message: '這筆備份沒有內容也沒有儲存路徑，資料可能已損毀' } };
   const { data: fileBlob, error } = await admin.storage.from('backup-uploads').download(row.storage_path);
   if (error || !fileBlob) return { snapshot: null, error: error ?? { message: '讀取備份檔案失敗' } };
+  let parsed: any;
   try {
-    const snapshot = JSON.parse(await fileBlob.text());
-    return { snapshot, error: null };
+    parsed = JSON.parse(await fileBlob.text());
   } catch {
     return { snapshot: null, error: { message: '備份檔案內容不是有效的 JSON' } };
   }
+  // 分段備份（見 lib/backupJob.ts）：storage_path 指向的是一個很小的 manifest
+  // （各資料表的分段檔清單），把分段檔逐個讀回來合併成一份完整快照。
+  if (parsed && parsed.format === 'parts' && parsed.parts && typeof parsed.parts === 'object') {
+    const snapshot: BackupSnapshot = {};
+    for (const [table, paths] of Object.entries(parsed.parts as Record<string, string[] | null>)) {
+      if (paths === null) {
+        snapshot[table] = null;
+        continue;
+      }
+      const rows: any[] = [];
+      for (const partPath of paths) {
+        const { data: partBlob, error: partErr } = await admin.storage.from('backup-uploads').download(partPath);
+        if (partErr || !partBlob) return { snapshot: null, error: { message: `備份分段檔遺失或讀取失敗：${partPath}` } };
+        try {
+          const part = JSON.parse(await partBlob.text());
+          for (const r of part) rows.push(r);
+        } catch {
+          return { snapshot: null, error: { message: `備份分段檔內容損毀：${partPath}` } };
+        }
+      }
+      snapshot[table] = rows;
+    }
+    return { snapshot, error: null };
+  }
+  return { snapshot: parsed, error: null };
 }
 
 // 【本輪修正】反映事項「開發人員的備份一樣發生備份失敗：未知錯誤」——這裡才是

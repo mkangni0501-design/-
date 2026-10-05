@@ -22,6 +22,7 @@ export default function BackupRestorePanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [backupProgress, setBackupProgress] = useState<string | null>(null);
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const [uploadRestoring, setUploadRestoring] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -65,6 +66,31 @@ export default function BackupRestorePanel() {
     return data.session?.access_token ?? null;
   }
 
+  // 【本輪修正，根因已確認】備份改成「分段執行」：這裡反覆呼叫 /api/admin/backup/create，
+  // 每次伺服器只做約 20 秒就回傳進度（做到第幾張表），前端接著再呼叫下一段，直到
+  // done=true。原本一次請求做完全部，資料量大了以後超過平台單次請求時間上限就會
+  // 504（見 lib/backupJob.ts 開頭的說明）。每一段請求都很短，不會再被平台中止；
+  // 中途如果網路斷掉，重新按一次「備份」也不用從頭來，伺服器端會記得進度。
+  async function callBackupApi(token: string, payload: Record<string, unknown>) {
+    const res = await fetch('/api/admin/backup/create', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || !body) {
+      throw new Error(body?.error ?? `伺服器沒有回傳正常的內容（HTTP ${res.status}），請稍後再試一次，或聯絡開發人員查看伺服器端的執行紀錄`);
+    }
+    return body as {
+      jobId: string;
+      done: boolean;
+      tableIdx: number;
+      totalTables: number;
+      currentTable: string | null;
+      rowsInCurrentTable: number;
+    };
+  }
+
   async function handleRunBackup() {
     const token = await getToken();
     if (!token) {
@@ -72,35 +98,42 @@ export default function BackupRestorePanel() {
       return;
     }
     setRunning(true);
+    setBackupProgress('準備中…');
     try {
-      const res = await fetch('/api/admin/backup/create', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      // 【本輪修正】反映事項「備份失敗：未知錯誤」——真正的根因是 runBackup()
-      // 65 張表依序撈，總執行時間很容易超過平台的執行時間上限，一旦被平台
-      // 強制中止，連線直接斷掉、回應不是正常 JSON（可能是平台自己的錯誤頁面、
-      // 或根本沒有回應本文），`res.json()` 會丟出解析錯誤，被 `.catch(() => ({}))`
-      // 接住、body.error 自然是 undefined，才會一路退到「未知錯誤」——這裡已經
-      // 把 runBackup() 改成有限並行，大幅縮短總時間（見 lib/backupRestore.ts
-      // 的說明），但連線被平台中止的狀況還是有可能發生，所以這裡保留 HTTP
-      // 狀態碼當作最後一道資訊，至少不會又看到完全沒有線索的「未知錯誤」。
-      const body = await res.json().catch(() => null);
-      if (!res.ok) {
-        alert(
-          '備份失敗：' +
-            (body?.error ?? `伺服器沒有回傳正常的錯誤內容（HTTP ${res.status}），很可能是備份執行時間過長被平台中止，可以稍後再試一次，或聯絡開發人員查看伺服器端的執行紀錄`)
+      // 上次中斷的手動備份 jobId 記在瀏覽器裡，再按一次就接續，不用重頭撈
+      let resumeJobId: string | null = null;
+      try {
+        resumeJobId = window.localStorage.getItem('backupJobId');
+      } catch {}
+      let progress = await callBackupApi(token, { action: 'start', resumeJobId });
+      try {
+        window.localStorage.setItem('backupJobId', progress.jobId);
+      } catch {}
+      let failures = 0;
+      while (!progress.done) {
+        setBackupProgress(
+          `備份中… ${progress.tableIdx}/${progress.totalTables} 張資料表` +
+            (progress.currentTable ? `（目前：${progress.currentTable}，已讀 ${progress.rowsInCurrentTable.toLocaleString()} 筆）` : '')
         );
-        return;
+        try {
+          progress = await callBackupApi(token, { action: 'step', jobId: progress.jobId });
+          failures = 0;
+        } catch (e: any) {
+          // 單一段落偶發失敗（網路抖動）自動重試，進度都存在伺服器端，不會丟失；連續失敗才放棄
+          failures++;
+          if (failures >= 3) throw e;
+        }
       }
-      if (!body) {
-        alert('備份可能已經執行，但沒有收到正常的回應內容，請重新整理頁面確認備份清單裡是否已經多出一筆。');
-        return;
-      }
+      try {
+        window.localStorage.removeItem('backupJobId');
+      } catch {}
       alert('已完成備份');
       load();
+    } catch (e: any) {
+      alert('備份失敗：' + (e?.message ?? '未知錯誤') + '\n（進度已保留，再按一次「備份」可以從中斷處接續，不用重頭開始。）');
     } finally {
       setRunning(false);
+      setBackupProgress(null);
     }
   }
 
@@ -249,7 +282,7 @@ export default function BackupRestorePanel() {
         disabled={running}
         style={{ padding: '8px 16px', background: '#2C2C2A', color: '#fff', border: 'none', borderRadius: 6, fontSize: 13, marginBottom: 20, marginRight: 8 }}
       >
-        {running ? '備份中…' : '立即備份'}
+        {running ? (backupProgress ?? '備份中…') : '立即備份'}
       </button>
 
       {isSystemAdminS && (

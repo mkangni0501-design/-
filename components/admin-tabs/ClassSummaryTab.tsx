@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { supabase, getCurrentAppUser, isAdminInCurrentView } from '@/lib/supabaseClient';
 import { getHiddenStudentNos } from '@/lib/hiddenStudents';
 import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
@@ -38,7 +38,7 @@ type ClassOption = { id: string; label: string; grade_level: string };
 const SUBJECT_DIVIDER = '2px solid #2C2C2A'; // 每一科分數中間：粗體間隔線
 const EXAMTYPE_DIVIDER = '1px dotted #ccc'; // 科目項下的期中/期末/平時：細線間隔
 // 第一列標題列的高度估計值，第二列標題用這個當 top 位移，固定在第一列正下方。
-const CS_HEADER_ROW1_HEIGHT = 33;
+const CS_HEADER_ROW1_DEFAULT_HEIGHT = 33;
 const EXAM_TYPE_FIELD: Record<'期中考' | '期末考' | '平時分', 'midterm' | 'final' | 'daily'> = {
   期中考: 'midterm',
   期末考: 'final',
@@ -616,8 +616,32 @@ export default function ClassSummaryPage() {
     }
   }
 
+  // 【本輪修正，根因已確認】「科目與 % 那兩列沒有固定」有兩個原因：
+  // 1. 最外層 div 還留著 overflowX:'auto'（上一輪只拿掉了表格外面那層）——只要
+  //    祖先元素的 overflow 不是 visible，position:sticky 的捲動參考就變成那個 div，
+  //    而它並沒有自己的垂直捲軸，sticky 等於完全失效，往下捲標題就跟著走了。已移除。
+  // 2. 第二列標題的 top 位移原本寫死 33px，但第一列的科目欄有「科目名＋百分比」兩行
+  //    （約 46px 以上），第二列固定在 33px 就會被第一列蓋住一截、或兩列中間露出
+  //    縫隙，學生資料捲上來時會從縫隙穿出來。改成實際量測第一列高度，字型、
+  //    科目名稱換行、手機縮放都會自動跟著對。
+  const headRow1Ref = useRef<HTMLTableRowElement | null>(null);
+  const [headRow1Height, setHeadRow1Height] = useState(CS_HEADER_ROW1_DEFAULT_HEIGHT);
+  useEffect(() => {
+    const el = headRow1Ref.current;
+    if (!el) return;
+    const measure = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height);
+      if (h > 0) setHeadRow1Height((prev) => (prev === h ? prev : h));
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
   return (
-    <div style={{ maxWidth: 960, margin: '0 auto', padding: 24, overflowX: 'auto' }}>
+    <div style={{ maxWidth: 960, margin: '0 auto', padding: 24 }}>
       <h1 style={{ fontSize: 16, marginBottom: 4 }}>{className || '班級'} 成績總表</h1>
       <p style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
         任課教師登入本頁時，只會看到自己授課科目的欄位；總分、排名、評語僅導師與管理員可見。
@@ -785,7 +809,7 @@ export default function ClassSummaryPage() {
           <div className="print-compact">
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
-              <tr>
+              <tr ref={headRow1Ref}>
                 <th style={{ textAlign: 'left', padding: 6, position: 'sticky', left: 0, top: 0, background: '#fff', zIndex: 4, width: 48, minWidth: 48, maxWidth: 48 }}>
                   座號
                 </th>
@@ -869,8 +893,8 @@ export default function ClassSummaryPage() {
                 {canSeeRemarks && <th style={{ padding: 6, position: 'sticky', top: 0, background: '#fff', zIndex: 3 }}>成績單</th>}
               </tr>
               <tr style={{ fontSize: 11, color: '#999' }}>
-                <th style={{ position: 'sticky', left: 0, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4, width: 48, minWidth: 48, maxWidth: 48 }}></th>
-                <th style={{ position: 'sticky', left: 48, top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 4, width: 92, minWidth: 92, maxWidth: 92 }}></th>
+                <th style={{ position: 'sticky', left: 0, top: headRow1Height, background: '#fff', zIndex: 4, width: 48, minWidth: 48, maxWidth: 48 }}></th>
+                <th style={{ position: 'sticky', left: 48, top: headRow1Height, background: '#fff', zIndex: 4, width: 92, minWidth: 92, maxWidth: 92 }}></th>
                 {subjects.map((s) =>
                   visibleExamTypes.map((et, eti) => (
                     <th
@@ -878,7 +902,7 @@ export default function ClassSummaryPage() {
                       style={{
                         borderLeft: eti === 0 ? SUBJECT_DIVIDER : EXAMTYPE_DIVIDER,
                         position: 'sticky',
-                        top: CS_HEADER_ROW1_HEIGHT,
+                        top: headRow1Height,
                         background: '#fff',
                         zIndex: 2,
                       }}
@@ -892,30 +916,30 @@ export default function ClassSummaryPage() {
                     {/* 反映事項「期中、期末、平時項下的『總分』改為『原始分數總分』」——
                         跟右邊「總表」、「綜合表現」區分清楚：這裡是單一考試類別、單純
                         科目加權後的分數，不含出缺席／敘獎這些額外加扣分。 */}
-                    <th key={et + '-total'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                    <th key={et + '-total'} style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>
                       原始分數總分
                     </th>
-                    <th key={et + '-avg'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                    <th key={et + '-avg'} style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>
                       平均(*比重)
                     </th>
-                    <th key={et + '-crank'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                    <th key={et + '-crank'} style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>
                       班排名
                     </th>
-                    <th key={et + '-grank'} style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>
+                    <th key={et + '-grank'} style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>
                       年級排名
                     </th>
                   </Fragment>
                 ))}
                 {viewMode === 'all' && (
                   <>
-                    <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>總分</th>
-                    <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>班排名</th>
-                    <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}>年級排名</th>
+                    <th style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>總分</th>
+                    <th style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>班排名</th>
+                    <th style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}>年級排名</th>
                   </>
                 )}
-                {viewMode === 'all' && <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}></th>}
-                {canSeeRemarks && <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}></th>}
-                {canSeeRemarks && <th style={{ position: 'sticky', top: CS_HEADER_ROW1_HEIGHT, background: '#fff', zIndex: 2 }}></th>}
+                {viewMode === 'all' && <th style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}></th>}
+                {canSeeRemarks && <th style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}></th>}
+                {canSeeRemarks && <th style={{ position: 'sticky', top: headRow1Height, background: '#fff', zIndex: 2 }}></th>}
               </tr>
             </thead>
             <tbody>

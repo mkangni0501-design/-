@@ -44,7 +44,8 @@ export async function fetchAttendanceForStudents(
             .eq('student_no', studentNo);
           if (rangeStart) q = q.gte('record_date', rangeStart);
           q = q.lte('record_date', rangeEnd);
-          return q.range(from, to);
+          // 分頁撈取一定要有固定排序，否則頁與頁之間可能漏列或重複。
+          return q.order('record_date').order('period_no').range(from, to);
         })
       )
     );
