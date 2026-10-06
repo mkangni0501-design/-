@@ -23,7 +23,7 @@ type GradeTopRow = {
 type ClassLabel = { id: string; label: string };
 
 // 全校排行榜：各班前三名、各年級前三名。
-// 資料來源是 class_rankings / grade_rankings 這兩個資料庫view（已經套用加扣分規則計算好加權總分），
+// 資料來源是 class_rankings_for_class() / grade_rankings_for_class() 這兩支資料庫函式（已經套用加扣分規則計算好加權總分，每次只算單班/單年級），
 // 只有該班「期中考／期末考／平時分」三項都已鎖定，才會出現在這裡的總分排名裡
 // （總分本身就是三項加權後的結果，任何一項還沒鎖定，加權總分就還不完整，不能拿來排名）。
 export default function SchoolRankingsPage() {
@@ -35,40 +35,84 @@ export default function SchoolRankingsPage() {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // 逐班呼叫 class_rankings_for_class()／grade_rankings_for_class()（sql/50、88），
+  // 每次只算「一個班」或「同部別同年級」的學生，不再查全校範圍的
+  // class_rankings／grade_rankings view（一次算 1300+ 位學生，會 statement timeout）。
+  async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let next = 0;
+    async function worker() {
+      while (next < items.length) {
+        const i = next++;
+        results[i] = await fn(items[i]);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    return results;
+  }
+
   async function load() {
     setLoading(true);
     setLoadError(null);
 
-    const { data: classRows } = await supabase.from('classes').select('id, grade_level, class_name');
+    const { data: classRows, error: classListErr } = await supabase
+      .from('classes')
+      .select('id, academic_year, department, grade_level, class_name');
+    if (classListErr) {
+      setLoadError('讀取全校排行榜失敗：' + classListErr.message);
+      setLoading(false);
+      return;
+    }
     const labelMap: Record<string, string> = {};
     (classRows ?? []).forEach((c: any) => {
       labelMap[c.id] = `${c.grade_level}${c.class_name}`;
     });
     setClassLabels(labelMap);
 
-    const { data: classTopRows, error: classErr } = await supabase
-      .from('class_rankings')
-      .select('class_id, name, seat_no, total_score, class_rank')
-      .eq('academic_year', academicYear)
-      .eq('term', term)
-      .lte('class_rank', 3)
-      .order('class_id')
-      .order('class_rank');
+    const yearClasses = (classRows ?? []).filter((c: any) => c.academic_year === academicYear);
 
-    const { data: gradeTopRows, error: gradeErr } = await supabase
-      .from('grade_rankings')
-      .select('class_id, department, grade_level, name, seat_no, total_score, grade_rank')
-      .eq('academic_year', academicYear)
-      .eq('term', term)
-      .lte('grade_rank', 3)
-      .order('department')
-      .order('grade_level')
-      .order('grade_rank');
+    let firstError: string | null = null;
 
-    const firstError = classErr ?? gradeErr;
-    setLoadError(firstError ? '讀取全校排行榜失敗：' + firstError.message : null);
-    setClassTop((classTopRows ?? []) as ClassTopRow[]);
-    setGradeTop((gradeTopRows ?? []) as GradeTopRow[]);
+    // 各班前三名：每班呼叫一次
+    const classResults = await mapWithLimit(yearClasses, 4, async (c: any) => {
+      const { data, error } = await supabase.rpc('class_rankings_for_class', { p_class_id: c.id, p_term: term });
+      if (error && !firstError) firstError = error.message;
+      return ((data ?? []) as any[])
+        .filter((r) => r.class_rank != null && r.total_score != null && Number(r.class_rank) <= 3)
+        .map((r) => ({
+          class_id: r.class_id,
+          name: r.name,
+          seat_no: r.seat_no,
+          total_score: r.total_score,
+          class_rank: Number(r.class_rank),
+        })) as ClassTopRow[];
+    });
+
+    // 各年級前三名：同部別＋同年級只需呼叫一次（任選其中一個班當代表，函式會算整個年級）
+    const gradeReps = new Map<string, any>();
+    yearClasses.forEach((c: any) => {
+      const key = `${c.department}|${c.grade_level}`;
+      if (!gradeReps.has(key)) gradeReps.set(key, c);
+    });
+    const gradeResults = await mapWithLimit(Array.from(gradeReps.values()), 4, async (c: any) => {
+      const { data, error } = await supabase.rpc('grade_rankings_for_class', { p_class_id: c.id, p_term: term });
+      if (error && !firstError) firstError = error.message;
+      return ((data ?? []) as any[])
+        .filter((r) => r.grade_rank != null && r.total_score != null && Number(r.grade_rank) <= 3)
+        .map((r) => ({
+          class_id: r.class_id,
+          department: r.department,
+          grade_level: r.grade_level,
+          name: r.name,
+          seat_no: r.seat_no,
+          total_score: r.total_score,
+          grade_rank: Number(r.grade_rank),
+        })) as GradeTopRow[];
+    });
+
+    setLoadError(firstError ? '讀取全校排行榜失敗：' + firstError : null);
+    setClassTop(classResults.flat());
+    setGradeTop(gradeResults.flat());
     setLoading(false);
   }
 
