@@ -192,6 +192,7 @@ export default function ClassSummaryPage() {
   // 每次 classId 變動：重新載入該班的完整資料
   useEffect(() => {
     if (!classId) return;
+    let cancelled = false;
     (async () => {
       setLoading(true);
       setLocksLoaded(false);
@@ -200,122 +201,141 @@ export default function ClassSummaryPage() {
         if (opt) setClassName(opt.label);
       }
 
-      // 學年度／年級：不管管理員或導師，都直接查一次 classes 拿到最新值（本地變數立刻可用，
-      // 不用等 setState 生效後的下一次 render，後面查「科目與比重」要馬上用到這兩個值）
-      const { data: clsRow } = await supabase.from('classes').select('academic_year, grade_level').eq('id', classId).maybeSingle();
+      // 【效能改寫】原本這裡是十幾個查詢「一個等一個」串行執行（每個都要一趟網路往返）。
+      // 現在改成：第一批「班級資料＋學籍名單」並行；拿到學期後，把互不依賴的查詢
+      // （排名、年級排名、出缺席、鎖定、科目比重、學期日期）一起送出，只有真的需要
+      // 學籍名單的（成績、評語、獎懲）等隱藏名單過濾完才送。結果與原本完全相同。
+      const [clsRes, enrollRes] = await Promise.all([
+        supabase.from('classes').select('academic_year, grade_level').eq('id', classId).maybeSingle(),
+        supabase
+          .from('enrollments')
+          .select('id, seat_no, term, student_no, students(name)')
+          .eq('class_id', classId)
+          .eq('is_current', true)
+          .order('seat_no'),
+      ]);
+      const clsRow = clsRes.data;
+      const enrollRowsRaw = enrollRes.data;
+      // 學年度／年級：用本地變數，不等 setState 生效（理由同原本說明）
       const yearForQuery = clsRow?.academic_year ?? academicYear;
       const gradeLevelForQuery = clsRow?.grade_level ?? gradeLevel;
-      if (clsRow?.academic_year) setAcademicYear(clsRow.academic_year);
-      if (clsRow?.grade_level) setGradeLevel(clsRow.grade_level);
+      const currentTerm: string | null = enrollRowsRaw && enrollRowsRaw.length > 0 ? (enrollRowsRaw[0] as any).term : null;
 
-      const { data: enrollRowsRaw } = await supabase
-        .from('enrollments')
-        .select('id, seat_no, term, student_no, students(name)')
-        .eq('class_id', classId)
-        .eq('is_current', true)
-        .order('seat_no');
-      // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到，
-      // 其他視角皆無法顯示」——管理員切換成「教師視角」預覽時，資料庫查詢仍然
-      // 用管理員的真實身分執行，RLS 不會把隱藏名單的學生擋掉，這裡在前端再補
-      // 一層過濾，詳見 lib/hiddenStudents.ts 的說明（真教師帳號本來就已經被
-      // RLS 擋掉，這裡是安全但多餘的二次確認）。
+      // ---- 不依賴學生名單的查詢：立刻一起送出 ----
+      // 總分/班排名／年級排名：class_rankings_for_class() / grade_rankings_for_class()
+      // （見 sql/44、88、102）；有錯誤要顯示出來，不能吞掉（2026-08-19 的教訓）。
+      const rankP = supabase.rpc('class_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
+      const gradeP = supabase.rpc('grade_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
+      // 出缺席（全勤）自動分數：class_attendance_adjustment_batch() 一次查完全班
+      const attP = currentTerm
+        ? supabase.rpc('class_attendance_adjustment_batch', { p_class_id: classId, p_term: currentTerm })
+        : Promise.resolve({ data: null as any[] | null });
+      // 期中/期末/平時三個有效鎖定狀態（含部別/全校 fallback 與 closes_at 自動鎖定）
+      const lockP =
+        yearForQuery && currentTerm
+          ? supabase
+              .rpc('class_lock_status', { p_class_id: classId, p_academic_year: yearForQuery, p_term: currentTerm })
+              .maybeSingle()
+          : Promise.resolve({ data: null as any });
+      // 各科目佔比
+      const curriculumP =
+        yearForQuery && currentTerm && gradeLevelForQuery
+          ? supabase
+              .from('curriculum')
+              .select('subject, weight')
+              .eq('academic_year', yearForQuery)
+              .eq('term', currentTerm)
+              .eq('grade_level', gradeLevelForQuery)
+          : Promise.resolve({ data: null as any[] | null });
+      // 學期起訖日（獎懲統計用）
+      const termRowP =
+        yearForQuery && currentTerm
+          ? supabase
+              .from('academic_terms')
+              .select('term_start_date, term_end_date')
+              .eq('academic_year', yearForQuery)
+              .eq('term', currentTerm)
+              .maybeSingle()
+          : Promise.resolve({ data: null as any });
+
+      // 【本輪新增】反映事項「休學/轉學/退學的學生，只能在管理者視角下看到」——
+      // 非管理員視角再對照一次隱藏名單（詳見 lib/hiddenStudents.ts）。
       const hiddenNos = isAdmin ? new Set<string>() : await getHiddenStudentNos((enrollRowsRaw ?? []).map((r: any) => r.student_no));
       const enrollRows = (enrollRowsRaw ?? []).filter((r: any) => !hiddenNos.has(r.student_no));
-      const enrolls: EnrollRow[] = (enrollRows ?? []).map((r: any) => ({
+      const enrolls: EnrollRow[] = enrollRows.map((r: any) => ({
         id: r.id,
         seat_no: r.seat_no,
         name: r.students.name,
         student_no: r.student_no,
       }));
-      setEnrollments(enrolls);
       const enrollIds = enrolls.map((e) => e.id);
-      let currentTerm: string | null = null;
-      if (enrollRows && enrollRows.length > 0) {
-        currentTerm = (enrollRows[0] as any).term;
-        setTerm(currentTerm);
-      }
+      const idsForQuery = enrollIds.length > 0 ? enrollIds : ['00000000-0000-0000-0000-000000000000'];
 
-      // 【本輪新增】反映事項「檢視/列印範圍【全部】的全勤紀錄右邊增加一欄
-      // 『獎懲』...『平時總分／排名』右邊增加一欄『綜合表現』」——這裡一次查好
-      // 這學期（依班級所在學年度＋currentTerm，開學日沒填就用 estimateTermStart
-      // 的保守估計，理由同 attendance/report 頁）這個班每位學生的 conduct_events，
-      // 同時算出：(a) 依類別分組的次數（給「獎懲」欄顯示用），(b) 加總點數
-      // （給「綜合表現」欄顯示用，就是 sql/46 discipline_adjustment() 同一套
-      // 「這學期 conduct_events.points 加總」邏輯，這裡直接前端算一次、不用再
-      // 對每個學生各自呼叫一次 RPC）。
-      if (yearForQuery && currentTerm) {
-        const { data: termRow } = await supabase
-          .from('academic_terms')
-          .select('term_start_date, term_end_date')
-          .eq('academic_year', yearForQuery)
-          .eq('term', currentTerm)
-          .maybeSingle();
+      // ---- 需要學生名單的查詢：一起送出 ----
+      // 各科明細：任課教師只會看到自己教的科目那幾列（RLS 在資料庫層級過濾）
+      const subjectP = supabase
+        .from('subject_weighted_scores')
+        .select('enrollment_id, subject, midterm, final, daily')
+        .in('enrollment_id', idsForQuery);
+      const remarkP =
+        canSeeRemarks || isAdmin
+          ? supabase.from('student_remarks').select('enrollment_id, comment').in('enrollment_id', idsForQuery)
+          : Promise.resolve({ data: null as any[] | null });
+      // 獎懲：這學期 conduct_events 依類別分組次數＋加總點數（同 sql/46 discipline_adjustment 邏輯）
+      const conductP = (async () => {
+        const map: Record<string, { counts: Record<string, number>; adjustment: number }> = {};
+        if (!(yearForQuery && currentTerm)) return null;
+        const { data: termRow } = await termRowP;
         const start = termRow?.term_start_date ?? estimateTermStart(yearForQuery, currentTerm);
         const end = termRow?.term_end_date ?? undefined;
         const studentNos = enrolls.map((e) => e.student_no);
-        if (studentNos.length > 0) {
-          let ceQuery = supabase
-            .from('conduct_events')
-            .select('student_no, event_type, count, points')
-            .in('student_no', studentNos)
-            .gte('event_date', start);
-          if (end) ceQuery = ceQuery.lte('event_date', end);
-          const { data: ceRows } = await ceQuery;
-          const map: Record<string, { counts: Record<string, number>; adjustment: number }> = {};
-          (ceRows ?? []).forEach((r: any) => {
-            const rec = (map[r.student_no] = map[r.student_no] ?? { counts: {}, adjustment: 0 });
-            rec.counts[r.event_type] = (rec.counts[r.event_type] ?? 0) + (r.count ?? 1);
-            rec.adjustment += Number(r.points) || 0;
-          });
-          setConductByStudent(map);
-        } else {
-          setConductByStudent({});
-        }
-      }
+        if (studentNos.length === 0) return map;
+        let ceQuery = supabase
+          .from('conduct_events')
+          .select('student_no, event_type, count, points')
+          .in('student_no', studentNos)
+          .gte('event_date', start);
+        if (end) ceQuery = ceQuery.lte('event_date', end);
+        const { data: ceRows } = await ceQuery;
+        (ceRows ?? []).forEach((r: any) => {
+          const rec = (map[r.student_no] = map[r.student_no] ?? { counts: {}, adjustment: 0 });
+          rec.counts[r.event_type] = (rec.counts[r.event_type] ?? 0) + (r.count ?? 1);
+          rec.adjustment += Number(r.points) || 0;
+        });
+        return map;
+      })();
 
-      // 各科明細：任課教師只會看到自己教的科目那幾列（RLS在資料庫層級自然過濾，非前端隱藏）
-      const { data: subjectRows } = await supabase
-        .from('subject_weighted_scores')
-        .select('enrollment_id, subject, midterm, final, daily')
-        .in('enrollment_id', enrollIds.length > 0 ? enrollIds : ['00000000-0000-0000-0000-000000000000']);
+      const [subjectRes, curriculumRes, rankRes, gradeRes, attRes, remarkRes, lockRes, conductMap] = await Promise.all([
+        subjectP, curriculumP, rankP, gradeP, attP, remarkP, lockP, conductP,
+      ]);
+      if (cancelled) return; // 已經切換到別的班級，丟掉這份過期結果
+
+      // ---- 整理結果（跟原本邏輯相同）----
+      if (clsRow?.academic_year) setAcademicYear(clsRow.academic_year);
+      if (clsRow?.grade_level) setGradeLevel(clsRow.grade_level);
+      setEnrollments(enrolls);
+      if (currentTerm) setTerm(currentTerm);
+      if (conductMap) setConductByStudent(conductMap);
+      else if (yearForQuery && currentTerm) setConductByStudent({});
 
       const subjSet = new Set<string>();
       const subjMap: Record<string, Record<string, SubjectRow>> = {};
-      (subjectRows ?? []).forEach((r: any) => {
+      ((subjectRes.data ?? []) as any[]).forEach((r: any) => {
         subjSet.add(r.subject);
         subjMap[r.enrollment_id] = subjMap[r.enrollment_id] ?? {};
         subjMap[r.enrollment_id][r.subject] = r;
       });
       setSubjectData(subjMap);
 
-      // 各科目佔比（顯示在科目欄位上方）：curriculum.weight 存的就是 0~1 的小數（0.2＝20%）
-      // 科目欄位順序：依比重高到低排列，且比重=0（已停開/停用）的科目不顯示——
-      // 跟「成績登錄」頁（ScoresEntryTab）的排序、隱藏規則一致。
-      //
-      // 【本輪修正】反映事項「班級成績總表中很多年級跟班級的才藝課沒有顯示」——
-      // 根因：上面 subjSet 只收集了 subject_weighted_scores「已經有分數列」的科目，
-      // 這張表只有老師實際輸入過至少一筆分數才會有列。才藝課這類排課節數少、
-      // 可能還沒有老師登錄過任何一筆分數的班級/年級，subjSet 裡根本不會出現這個
-      // 科目，欄位就整欄消失——不是分數算錯，是這個科目欄位從一開始就沒有被
-      // 列進去，連「0分」或空白格都看不到，更別說進去登錄。
-      // 修法：科目清單改成「curriculum（學校排定這個年級這學期該上的科目）」跟
-      // 「subjSet（已經有分數列的科目，防止 curriculum 漏列或科目名稱對不上時
-      // 整科不見）」兩者的聯集，不要只靠 subjSet 單獨決定——這樣即使還沒有人
-      // 登錄過任何一筆才藝課分數，只要 curriculum 裡有排這個科目，欄位依然會
-      // 出現（分數顯示空白，等老師登錄）。
+      // 科目欄位＝curriculum（學校排定該年級該學期要上的科目）∪ 已有分數列的科目；
+      // 依比重高到低排序，比重=0（停開）的不顯示。（2026 才藝課整欄消失問題的修法，見原說明）
       if (yearForQuery && currentTerm && gradeLevelForQuery) {
-        const { data: curriculumRows } = await supabase
-          .from('curriculum')
-          .select('subject, weight')
-          .eq('academic_year', yearForQuery)
-          .eq('term', currentTerm)
-          .eq('grade_level', gradeLevelForQuery);
         const weightMap: Record<string, number> = {};
-        (curriculumRows ?? []).forEach((r: any) => (weightMap[r.subject] = Number(r.weight)));
+        ((curriculumRes.data ?? []) as any[]).forEach((r: any) => (weightMap[r.subject] = Number(r.weight)));
         setSubjectWeights(weightMap);
         const unionSubjects = new Set<string>([...Array.from(subjSet), ...Object.keys(weightMap)]);
         const sortedSubjects = Array.from(unionSubjects)
-          .filter((s) => weightMap[s] !== 0) // weight===0 代表已停開/停用；不在 weightMap 裡（curriculum沒設定過）的視為要顯示
+          .filter((s) => weightMap[s] !== 0)
           .sort((a, b) => {
             const wa = weightMap[a];
             const wb = weightMap[b];
@@ -329,27 +349,11 @@ export default function ClassSummaryPage() {
         setSubjects(Array.from(subjSet));
       }
 
-      // 總分/班排名／年級排名：改呼叫 class_rankings_for_class() / grade_rankings_for_class()
-      // （sql/44fix_report_card_and_ranking_performance.sql）——原本直接查 class_rankings/
-      // grade_rankings 這兩個 view，要等全校排名都算完才篩選，這次用真實資料量測試
-      // （9000多筆成績、1300多位學生）在【班級成績結果與排名】頁已經直接跳出
-      // statement timeout；改成呼叫這兩支函式後，只會計算「這個班」／「這個班同年級
-      // 同部別」的範圍，不會被全校資料量拖慢。可見範圍限制（只有導師/管理員查得到）
-      // 維持不變，任課教師呼叫一樣會得到空結果。
-      // 【2026-08-19】原本這裡只解構 data、完全沒檢查 error——如果這支函式呼叫本身
-      // 出錯（不是「權限篩選後是空的」，是真的執行失敗，例如函式簽名對不上、SQL執行
-      // 階段出錯），畫面上會沒有任何提示，只會看到總分/排名整欄空白，很難跟「單純看
-      // 不到」的情況分開，管理員S反映的狀況已經連續好幾輪查不出原因，可能就是這種
-      // 「其實有錯誤，但被吃掉了」的情形——這裡改成有錯誤就存起來顯示，下次再發生
-      // 同樣的狀況，畫面上會直接看到實際的錯誤訊息，不用再用猜的排查。
-      const { data: rankRows, error: rankErr } = await supabase.rpc('class_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
       const rankMap: Record<string, RankRow> = {};
-      (rankRows ?? []).forEach((r: any) => (rankMap[r.enrollment_id] = r));
+      ((rankRes.data ?? []) as any[]).forEach((r: any) => (rankMap[r.enrollment_id] = r));
       setClassRank(rankMap);
-
-      const { data: gradeRows, error: gradeErr } = await supabase.rpc('grade_rankings_for_class', { p_class_id: classId, p_term: currentTerm });
       const gradeMap: Record<string, GradeRankRow> = {};
-      (gradeRows ?? []).forEach(
+      ((gradeRes.data ?? []) as any[]).forEach(
         (r: any) =>
           (gradeMap[r.enrollment_id] = {
             grade_rank: r.grade_rank,
@@ -359,54 +363,26 @@ export default function ClassSummaryPage() {
           })
       );
       setGradeRank(gradeMap);
+      const rankErr = rankRes.error;
+      const gradeErr = gradeRes.error;
       setRankLoadError(
         rankErr || gradeErr
           ? `讀取總分/排名時發生錯誤：${[rankErr?.message, gradeErr?.message].filter(Boolean).join('；')}`
           : null
       );
 
-      // 出缺席（全勤）自動加扣分：sql/47ranking_average_discipline_access_partial_report_card.sql
-      // 新增的 class_attendance_adjustment_batch()，一次查完全班，不用每個學生各自呼叫一次。
-      // 用途：科目欄位裡「全勤」／「出缺席」那一欄，改成顯示這裡查到的真實計算結果，取代
-      // 老師手動輸入、但實際上不會被排名/總分採用的原始分數（見下面 render 那段的說明；
-      // 對應這次反映「高三忠1號的分數欄位都是100」──那其實是老師手動輸入的舊分數，
-      // 不是系統沒有計算扣分，只是畫面上一直顯示著沒被採用的那個數字，容易讓人誤會）。
-      if (currentTerm) {
-        const { data: attAdjRows } = await supabase.rpc('class_attendance_adjustment_batch', { p_class_id: classId, p_term: currentTerm });
-        const attAdjMap: Record<string, number> = {};
-        (attAdjRows ?? []).forEach((r: any) => (attAdjMap[r.enrollment_id] = Number(r.attendance_score)));
-        setAttendanceAdjustments(attAdjMap);
-      } else {
-        setAttendanceAdjustments({});
-      }
+      const attAdjMap: Record<string, number> = {};
+      ((attRes.data ?? []) as any[]).forEach((r: any) => (attAdjMap[r.enrollment_id] = Number(r.attendance_score)));
+      setAttendanceAdjustments(attAdjMap);
 
       if (canSeeRemarks || isAdmin) {
-        const { data: remarkRows } = await supabase
-          .from('student_remarks')
-          .select('enrollment_id, comment')
-          .in('enrollment_id', enrollIds.length > 0 ? enrollIds : ['00000000-0000-0000-0000-000000000000']);
         const remarkMap: Record<string, string> = {};
-        (remarkRows ?? []).forEach((r: any) => (remarkMap[r.enrollment_id] = r.comment ?? ''));
+        ((remarkRes.data ?? []) as any[]).forEach((r: any) => (remarkMap[r.enrollment_id] = r.comment ?? ''));
         setRemarks(remarkMap);
       }
 
-      // 期中考／期末考／平時分：一次查完三個「有效鎖定狀態」（含 部別/全校 fallback、
-      // 含 closes_at 時間到自動鎖定），決定要不要顯示對應的鎖定按鈕。改呼叫
-      // class_lock_status()（sql/44fix_report_card_and_ranking_performance.sql）一次
-      // 拿三個結果，不再各自分開呼叫三次——減少網路往返次數，同時避免「三個按鈕的
-      // 狀態各自獨立回來、看起來卻像是綁在一起同步跳動」的觀感。
-      // 注意：這裡要用上面剛查好的 yearForQuery（本地變數，立刻可用），不能用
-      // academicYear 這個 state——setAcademicYear() 是非同步的，在同一次 effect
-      // 執行期間讀 state 變數還是舊值（第一次載入時甚至是 null），會讓這段判斷
-      // 永遠跳過、鎖定狀態查不到，導致畫面一直顯示「可以點的鎖定按鈕」，
-      // 即使實際上已經鎖定了。
       if (yearForQuery && currentTerm) {
-        const { data: lockRowRaw } = await supabase
-          .rpc('class_lock_status', { p_class_id: classId, p_academic_year: yearForQuery, p_term: currentTerm })
-          .maybeSingle();
-        // class_lock_status() 的回傳型別沒有納入這個專案的 Supabase 型別產生流程，
-        // 所以 .rpc(...).maybeSingle() 推斷出來的是 unknown，這裡明確標註實際欄位型別。
-        const lockRow = lockRowRaw as { mid_locked: boolean; fin_locked: boolean; day_locked: boolean } | null;
+        const lockRow = lockRes.data as { mid_locked: boolean; fin_locked: boolean; day_locked: boolean } | null;
         setLockedByType({
           期中考: !!lockRow?.mid_locked,
           期末考: !!lockRow?.fin_locked,
@@ -416,6 +392,9 @@ export default function ClassSummaryPage() {
       setLocksLoaded(true);
       setLoading(false);
     })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [classId]);
 
