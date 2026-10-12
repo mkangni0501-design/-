@@ -6,6 +6,7 @@ import { useDepartmentPermissions } from '@/lib/useDepartmentPermissions';
 import { isDepartmentLead } from '@/lib/departments';
 import CurriculumSettingsTab from '@/components/admin-tabs/CurriculumSettingsTab';
 import GradingRulesTab from '@/components/admin-tabs/GradingRulesTab';
+import OrphanSubjectsPanel from '@/components/admin-tabs/OrphanSubjectsPanel';
 import ScoresEntryTab from '@/components/admin-tabs/ScoresEntryTab';
 import ConductScoresTab from '@/components/admin-tabs/ConductScoresTab';
 import ReportCardStyleTab from '@/components/admin-tabs/ReportCardStyleTab';
@@ -115,6 +116,10 @@ function GradingHubPageInner() {
           <section style={{ borderTop: '1px solid #eee', paddingTop: 24 }}>
             <h2 style={{ fontSize: 14, color: '#666', marginBottom: 8 }}>整體佔比與加扣分規則</h2>
             <GradingRulesTab />
+          </section>
+          <section style={{ borderTop: '1px solid #eee', paddingTop: 24 }}>
+            <h2 style={{ fontSize: 14, color: '#666', marginBottom: 8 }}>殘留科目清理（成績表有分數、科目設定裡卻沒有的科目）</h2>
+            <OrphanSubjectsPanel />
           </section>
         </div>
       )}
