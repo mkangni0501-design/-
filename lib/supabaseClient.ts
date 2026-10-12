@@ -38,8 +38,7 @@ export function isAdminInCurrentView(role: string | null | undefined): boolean {
   return true;
 }
 
-/** 取得目前登入使用者的角色資料，尚未登入回傳 null */
-export async function getCurrentAppUser() {
+async function fetchCurrentAppUser() {
   const { data: authData } = await supabase.auth.getUser();
   if (!authData.user) return null;
 
@@ -56,6 +55,28 @@ export async function getCurrentAppUser() {
   // 附上目前登入信箱：同一個人如果先前被建立過兩個不同帳號（例如導師帳號 + 後來另外建立的管理員帳號），
   // 光看名字容易誤以為是同一筆資料，附上信箱才看得出目前登入的到底是哪一個帳號。
   return { ...data, email: authData.user.email ?? null };
+}
+
+// 【效能】一個頁面通常有好幾個元件（分頁、權限 hook…）各自呼叫 getCurrentAppUser()，
+// 每次都要打一趟 Auth 伺服器＋一趟 app_users。這裡把同一時間的呼叫合併成一次，
+// 並短暫快取 30 秒；登入/登出/換 token/改信箱等任何驗證狀態變化都會立刻清掉快取。
+let appUserCache: { at: number; promise: ReturnType<typeof fetchCurrentAppUser> } | null = null;
+if (typeof window !== 'undefined') {
+  supabase.auth.onAuthStateChange(() => {
+    appUserCache = null;
+  });
+}
+
+/** 取得目前登入使用者的角色資料，尚未登入回傳 null */
+export function getCurrentAppUser() {
+  const now = Date.now();
+  if (appUserCache && now - appUserCache.at < 30_000) return appUserCache.promise;
+  const promise = fetchCurrentAppUser();
+  appUserCache = { at: now, promise };
+  promise.then((u) => {
+    if (!u && appUserCache?.promise === promise) appUserCache = null; // 沒登入/查詢失敗不要快取
+  });
+  return promise;
 }
 
 /**

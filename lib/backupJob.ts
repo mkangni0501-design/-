@@ -45,6 +45,8 @@ export type BackupJobState = {
   backupId?: string;
   backupCreatedAt?: string;
   finished?: boolean;
+  // 排程用的「租約」：有一個排程實例正在跑這個 job 時，其他排程實例先不要重複接手
+  leaseUntil?: string | null;
 };
 
 export type BackupJobProgress = {
@@ -78,6 +80,11 @@ async function getJson<T>(admin: SupabaseClient, path: string): Promise<T | null
   } catch {
     return null;
   }
+}
+
+/** 把 job 進度存回儲存空間（排程釋放租約用） */
+export async function putState(admin: SupabaseClient, state: BackupJobState) {
+  await putJson(admin, statePath(state.jobId), state);
 }
 
 export async function startBackupJob(admin: SupabaseClient, kind: '自動' | '手動', createdBy: string | null): Promise<BackupJobState> {
@@ -138,6 +145,10 @@ export async function stepBackupJob(admin: SupabaseClient, state: BackupJobState
       ts.parts.push(path);
       ts.offset += buffer.length;
       buffer = [];
+      // 【自動備份修正】每寫完一個分段檔就立刻把進度存起來。原本進度只在「整段結束」才存，
+      // 排程那一段又長達數分鐘，只要中途被平台切斷／逾時，已經撈好的資料全部算沒做，
+      // 下一次排程又從頭來，永遠做不完。
+      await putJson(admin, statePath(state.jobId), state);
     };
 
     while (!reachedEnd && !failed && Date.now() < deadline) {
@@ -185,6 +196,7 @@ export async function stepBackupJob(admin: SupabaseClient, state: BackupJobState
       ts.done = true;
       state.counts[table] = ts.offset;
       state.tableIdx++;
+      await putJson(admin, statePath(state.jobId), state); // 一張表完成也立刻存
     }
     // 沒到結尾就是時間用完了，外層 while 會因為 deadline 結束
   }
