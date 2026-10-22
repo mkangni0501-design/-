@@ -73,6 +73,7 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/admin/substitute-teaching', href: '/admin/substitute-teaching', label: '代課安排', adminOnly: true },
   { key: '/admin/exam-seating', href: '/admin/exam-seating', label: '考試分班（考場編排、梅花座位表、發送考場表）', adminOnly: true },
   { key: '/admin/clubs', href: '/admin/clubs', label: '社團／才藝課管理（含開課、成績登錄權限、選社時間設定）', adminOnly: true },
+  { key: '/admin/staff-clock', href: '/admin/staff-clock', label: '教職員打卡管理（全校出席總覽、人員對照、班別與放假日、補卡更正、匯入打卡機資料；僅教務處、系統管理員S/A）', adminOnly: true },
   { key: '/clubs/roster', href: '/clubs/roster', label: '社團點名冊', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/clubs/grading', href: '/clubs/grading', label: '社團成績輸入', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/schedule-lookup', href: '/schedule-lookup', label: '查詢教師/班級課表（選教師或班級直接看整週課表）', adminOnly: false },
@@ -98,6 +99,7 @@ export const ALL_MODULES: AdminModule[] = [
   { key: '/attendance/mobile', href: '/attendance/mobile', label: '學生出缺席登錄（每日／手機版）', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/attendance/subject-view', href: '/attendance/subject-view', label: '任課班級出席查詢（僅顯示自己任教科目/節次）', adminOnly: false, requiresTeachingAssignment: true },
   { key: '/notifications', href: '/notifications', label: '通知', adminOnly: false },
+  { key: '/staff-clock', href: '/staff-clock', label: '我的打卡紀錄（自己查每日上下班打卡、遲到早退、漏打卡）', adminOnly: false },
   { key: '/exam-rosters', href: '/exam-rosters', label: '輸入考場名單（依考場通知填入本班學生座位）', adminOnly: false, requiresTeachingAssignment: true },
 
   // ---- 家長／學生 ----
@@ -129,6 +131,7 @@ export const DEFAULT_CATEGORIES: Record<string, ModuleCategory[]> = {
   '/admin/substitute-teaching': ['academic'],
   '/admin/exam-seating': ['academic'],
   '/admin/clubs': ['academic'],
+  '/admin/staff-clock': ['academic'],
   '/clubs/roster': ['academic', 'teacher'],
   '/clubs/grading': ['academic', 'teacher'],
   '/schedule-lookup': ['academic', 'teacher'],
@@ -151,6 +154,7 @@ export const DEFAULT_CATEGORIES: Record<string, ModuleCategory[]> = {
   '/attendance/mobile': ['teacher'],
   '/attendance/subject-view': ['teacher'],
   '/notifications': ['teacher'],
+  '/staff-clock': ['teacher'],
   '/exam-rosters': ['teacher'],
 
   '/admin/students/portal-accounts': ['parent_student', 'dev'],

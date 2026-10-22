@@ -1,0 +1,7 @@
+{
+  "apiBase": "https://請填您的校務系統網址.vercel.app",
+  "token": "請填和 Vercel 環境變數 CLOCK_SYNC_TOKEN 一模一樣的字串",
+  "csvPath": "請填打卡機匯出檔的完整路徑，例如 C:\\打卡機\\匯出\\打卡.csv（也可以只填資料夾，會自動用最新的 .csv）",
+  "lookbackDays": 3,
+  "batchLines": 3000
+}

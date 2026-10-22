@@ -81,6 +81,12 @@ export const BACKUP_TABLES = [
   'club_selection_windows',
   'club_preferences',
   'conduct_event_requests', // 敘獎分層審核（管理員B→A→S）的申請/審核紀錄（sql/95）
+  // 教職員打卡（sql/104）：clock_import_log 只是匯入流水帳，不列入備份
+  'clock_shifts',
+  'clock_holidays',
+  'clock_employee_map',
+  'clock_records',
+  'clock_day_overrides',
 ] as const;
 
 // 大部分資料表拿 id（uuid）當「符合全部列」的比對欄位；少數是複合主鍵或文字主鍵，這裡特別列出。
@@ -88,6 +94,8 @@ export const BACKUP_TABLES = [
 const MATCH_ALL_COLUMN: Record<string, string> = {
   grading_rules: 'academic_year',
   conduct_point_defaults: 'item',
+  clock_employee_map: 'device_code', // 主鍵是打卡機代碼（int），沒有 id 欄
+  clock_holidays: 'holiday_date', // 主鍵是日期，沒有 id 欄
 };
 
 function matchAllColumn(table: string) {
