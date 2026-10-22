@@ -115,3 +115,13 @@ docs/
 | admin_b | 設定開放時間/鎖定、基礎資料；可自行新增同角色帳號 |
 | homeroom_teacher | 導師，對自己班級可直接修正 |
 | subject_teacher | 任課教師，僅能操作課表指定的班級/節次/科目 |
+
+## 【教職員打卡系統】
+
+- `sql/104staff_clock.sql` — 打卡資料表、班別、放假日、人員對照、RLS（自己只查得到自己；教務處／系統管理員S／A 可查全部與設定）
+- `lib/staffClock.ts` — CSV 解碼解析（泰文 Windows-874）、每日上下班／遲到／早退／漏打卡判定、月統計
+- `app/api/clock/import/route.ts` — 匯入 API（本機同步程式用 `CLOCK_SYNC_TOKEN`；後台手動上傳用登入身分）
+- `app/(app)/staff-clock/page.tsx` — 我的打卡紀錄（管理權限者可切換查看他人）
+- `app/(app)/admin/staff-clock/page.tsx` — 教職員打卡管理（出席總覽／人員對照／班別與放假日／補卡更正／匯入與同步）
+- `tools/clock-sync/` — 學校電腦上每天自動讀 CSV 並上傳的程式（見該資料夾 README.md）
+- 環境變數：`CLOCK_SYNC_TOKEN`
