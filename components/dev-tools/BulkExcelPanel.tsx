@@ -83,7 +83,20 @@ import {
   uploadAllConductSheet,
   inviteAccountsSheet,
 } from '@/lib/bulkHandlers';
-import { fetchAllScoresSheet, fetchAllAttendanceSheet, fetchAllConductSheet } from '@/lib/schoolWideDataQueries';
+import { fetchAllScoresSheet, fetchAllAttendanceSheet, fetchAllConductSheet, fetchHistoricalScoresSheet } from '@/lib/schoolWideDataQueries';
+import {
+  loadRosterContext,
+  fetchStudentsMasterSheet,
+  fetchTeachersSheet,
+  buildEnrollmentHistorySheet,
+  fetchRemarksAllSheet,
+  fetchConductScoresAllSheet,
+  fetchGuardiansSheet,
+  fetchScoreAdjustmentsSheet,
+  fetchStatusChangesSheet,
+  buildIntegritySheet,
+  type IntegrityItem,
+} from '@/lib/currentDataSheetsMore';
 import { buildSchedulerExportSheetData } from '@/lib/schedulerExcelExport';
 import { importScheduleExcel } from '@/lib/schedulerBridge';
 import type { SchedulerProjectData } from '@/lib/schedulerBackupClient';
@@ -121,6 +134,13 @@ function allowedRolesFor(role: string | undefined): string[] {
   if (role === 'admin_a') return ['admin_a', 'homeroom_teacher', 'subject_teacher'];
   if (role === 'admin_b') return ['admin_b', 'homeroom_teacher', 'subject_teacher'];
   return [];
+}
+
+// 一張工作表實際輸出幾筆資料列（扣掉表頭；「讀取失敗：…」那種只有一列錯誤訊息的表視為 0 筆）
+function dataRowCount(sheet: { aoa: any[][] }, headerRows = 1): number {
+  const first = sheet.aoa[0]?.[0];
+  if (typeof first === 'string' && first.startsWith('讀取')) return 0;
+  return Math.max(0, sheet.aoa.length - headerRows);
 }
 
 export default function BulkExcelPanel({ myRole }: { myRole: string | undefined }) {
@@ -210,13 +230,31 @@ export default function BulkExcelPanel({ myRole }: { myRole: string | undefined 
       }
 
       // 全校成績/出缺勤/獎懲現況
-      const [scoresSheet, attendanceSheet, conductSheet] = await Promise.all([
-        fetchAllScoresSheet(),
-        fetchAllAttendanceSheet(),
-        fetchAllConductSheet(),
-      ]);
+      // 依序查詢，避免大查詢同時送出造成資料庫逾時（出缺勤／獎懲就是因此隨機「讀取失敗」）
+      const scoresSheet = await fetchAllScoresSheet();
+      const attendanceSheet = await fetchAllAttendanceSheet();
+      const conductSheet = await fetchAllConductSheet();
       [scoresSheet, attendanceSheet, conductSheet].forEach((s) => {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s.aoa), s.name);
+      });
+
+      // 【2026-10 補齊】原本快照缺的資料：歷史學期成績、學生基本資料、教師名單、所有學期學籍、
+      // 導師評語、操行成績（全部學期）、監護人、成績加扣分設定、學籍異動紀錄。
+      // 「全校成績(現況)」只含現行學籍，學期轉換/升級後舊學期成績就不在裡面——這是新學期開學時最容易漏掉的。
+      const roster = await loadRosterContext();
+      // 依序查詢（不要 8 個大查詢同時送出）：同時送出會讓資料庫負載瞬間過高、觸發逾時，
+      // 結果是出缺勤、操行成績這類大表隨機「讀取失敗」。
+      const historicalScoresSheet = await fetchHistoricalScoresSheet();
+      const studentsMaster = await fetchStudentsMasterSheet();
+      const teachersSheet = await fetchTeachersSheet();
+      const remarksAll = await fetchRemarksAllSheet(roster);
+      const conductAll = await fetchConductScoresAllSheet(roster);
+      const guardiansSheet = await fetchGuardiansSheet(roster);
+      const adjustmentsSheet = await fetchScoreAdjustmentsSheet();
+      const statusChangesSheet = await fetchStatusChangesSheet(roster);
+      const enrollmentHistory = buildEnrollmentHistorySheet(roster);
+      [historicalScoresSheet, studentsMaster, teachersSheet, enrollmentHistory, remarksAll, conductAll, guardiansSheet, adjustmentsSheet, statusChangesSheet].forEach((s) => {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s.aoa), s.name.slice(0, 31));
       });
 
       // 訓導／總務／開發人員現況——原本「完整資料快照」完全沒有涵蓋這三個部門的資料，
@@ -241,9 +279,50 @@ export default function BulkExcelPanel({ myRole }: { myRole: string | undefined 
       ]);
       deptSheets.forEach(({ name, aoa }) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name.slice(0, 31)));
 
+      // 【完整性核對】資料庫實際筆數 vs 這份檔案輸出筆數，放在第一張工作表。
+      // 只要有不一致，下載完就跳出提醒——不要等到新學期出問題、要還原時才發現檔案不完整。
+      const [accountsSheet, , , , timetableSheet, periodConfigSheet] = setupSheets;
+      const [, conductDefaultsSheet, invItemsSheet, invTxSheet, maintSheet, utilSheet, termsSheet] = deptSheets;
+      const integrityItems: IntegrityItem[] = [
+        { label: '全校成績（現行＋歷史學期）', table: 'scores', exported: dataRowCount(scoresSheet) + dataRowCount(historicalScoresSheet) },
+        { label: '全校出缺勤', table: 'attendance', exported: dataRowCount(attendanceSheet) },
+        { label: '全校獎懲', table: 'conduct_events', exported: dataRowCount(conductSheet) },
+        { label: '學生基本資料', table: 'students', exported: dataRowCount(studentsMaster) },
+        { label: '教師名單', table: 'teachers', exported: dataRowCount(teachersSheet) },
+        { label: '學籍（全部學期）', table: 'enrollments', exported: dataRowCount(enrollmentHistory) },
+        { label: '導師評語（全部學期）', table: 'student_remarks', exported: dataRowCount(remarksAll) },
+        { label: '操行成績（全部學期）', table: 'conduct_scores', exported: dataRowCount(conductAll) },
+        { label: '監護人資料', table: 'guardians', exported: dataRowCount(guardiansSheet) },
+        { label: '成績加扣分設定', table: 'score_adjustments', exported: dataRowCount(adjustmentsSheet) },
+        { label: '學籍異動紀錄', table: 'student_status_changes', exported: dataRowCount(statusChangesSheet) },
+        { label: '帳號名單', table: 'app_users', exported: dataRowCount(accountsSheet) },
+        { label: `學校課表（${academicYear}學年度${term}）`, table: 'class_schedule', exported: dataRowCount(timetableSheet), filter: { academic_year: academicYear, term } },
+        { label: '節次設定', table: 'period_config', exported: dataRowCount(periodConfigSheet) },
+        { label: '出缺勤獎懲加扣分參考值', table: 'conduct_point_defaults', exported: dataRowCount(conductDefaultsSheet) },
+        { label: '總務庫存品項', table: 'general_inventory_items', exported: dataRowCount(invItemsSheet) },
+        { label: '總務庫存進出紀錄', table: 'general_inventory_transactions', exported: dataRowCount(invTxSheet) },
+        { label: '總務修繕登記', table: 'maintenance_tickets', exported: dataRowCount(maintSheet) },
+        { label: '總務水電網路費用', table: 'utility_bills', exported: dataRowCount(utilSheet) },
+        { label: '學年學期設定', table: 'academic_terms', exported: dataRowCount(termsSheet) },
+      ];
+      const { sheet: integritySheet, problems } = await buildIntegritySheet(integrityItems);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(integritySheet.aoa), integritySheet.name);
+      wb.SheetNames.unshift(wb.SheetNames.pop() as string); // 移到第一張
+
       const ts = new Date();
       const pad = (n: number) => (n < 10 ? '0' : '') + n;
       XLSX.writeFile(wb, `校務系統完整資料快照_${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}.xlsx`);
+      if (problems.length > 0) {
+        alert(
+          '⚠️ 下載完成，但這份檔案「不完整」，請不要當作唯一備份：\n\n' +
+            problems.map((p) => '・' + p).join('\n') +
+            '\n\n詳情請看檔案第一張工作表「完整性核對」。建議稍後重新下載，或改用「備份與還原」頁面的備份。'
+        );
+      } else {
+        alert('✓ 下載完成：完整性核對全部一致（詳見第一張工作表「完整性核對」）。');
+      }
+    } catch (err: any) {
+      alert('下載完整資料快照失敗：' + (err?.message ?? '未知錯誤') + '\n請稍後重試，不要使用不完整的檔案。');
     } finally {
       setSnapshotBusy(false);
     }
