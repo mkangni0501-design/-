@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runBackup } from '@/lib/backupRestore';
+import { runBackup, insertBackupSnapshot } from '@/lib/backupRestore';
 
 // 一鍵清空前一定會先跑一次「全校全部資料表」的完整備份（見下方 runBackup），
 // 資料量大時（尤其 attendance／scores 累積一整個學年度）光是備份就可能超過
@@ -50,12 +50,21 @@ export async function POST(req: NextRequest) {
     // 本來就不需要保留備份的情境來說反而變成阻礙。這裡讓呼叫端可以明確傳 skipBackup:true
     // 跳過這個步驟，直接執行刪除，加快速度、也更不容易逾時；正式資料清空仍建議保留預設的備份。
     if (!skipBackup) {
-      const { tables, counts } = await runBackup(supabaseAdmin);
-      const { error: backupErr } = await supabaseAdmin
-        .from('backups')
-        .insert({ kind: '手動', created_by: callerAuth.user.id, tables, table_counts: counts });
+      const { tables, counts, failedTables, mismatches } = await runBackup(supabaseAdmin);
+      // 【2026-10 修正】備份有任何一張表讀取失敗、或筆數跟資料庫對不上，一律中止、不刪任何資料。
+      // 原本 runBackup 遇到錯誤會把那張表默默記成 null 繼續往下跑，這裡照樣刪除——
+      // 等於「備份沒有成績，卻把成績刪了」，資料就再也找不回來。
+      if (failedTables.length > 0 || mismatches.length > 0) {
+        const detail = [
+          ...failedTables.map((f) => `${f.table} 讀取失敗（${f.message}）`),
+          ...mismatches.map((m) => `${m.table} 備份 ${m.backedUp} 筆／資料庫 ${m.inDatabase} 筆`),
+        ].join('；');
+        return NextResponse.json({ error: '清空前的安全備份不完整，已中止、沒有刪除任何資料：' + detail }, { status: 500 });
+      }
+      // 用 insertBackupSnapshot：資料量大時自動改存 Storage，不會因為單一請求過大而失敗
+      const { error: backupErr } = await insertBackupSnapshot(supabaseAdmin, '手動', callerAuth.user.id, tables, counts);
       if (backupErr) {
-        return NextResponse.json({ error: '清空前的安全備份失敗，已中止、沒有刪除任何資料：' + backupErr.message }, { status: 500 });
+        return NextResponse.json({ error: '清空前的安全備份失敗，已中止、沒有刪除任何資料：' + (backupErr.message ?? '未知錯誤') }, { status: 500 });
       }
     }
 
