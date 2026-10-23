@@ -61,13 +61,17 @@ export async function fetchCurrentAccountsSheet(accessToken?: string): Promise<S
 
 /** 班級與導師設定（目前現況） */
 export async function fetchCurrentClassesSheet(academicYear: number): Promise<SheetRows> {
-  const { data, error } = await supabase
-    .from('classes')
-    .select('grade_level, class_name, department, teachers(name)')
-    .eq('academic_year', academicYear)
-    .order('grade_level')
-    .order('class_name');
-  if (error || !data) return { name: '班級與導師設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase
+      .from('classes')
+      .select('grade_level, class_name, department, teachers(name)')
+      .eq('academic_year', academicYear)
+      .order('grade_level')
+      .order('class_name')
+      .order('id')
+      .range(from, to)
+  );
+  if (error) return { name: '班級與導師設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
   const rows = data.map((c: any) => ['', c.grade_level, c.class_name, '', '', '', '', '', c.teachers?.name ?? '']);
   const hintRow = [
     `⚠️ 改完重新上傳前請確認「部別(年級)」欄位是照下面這份清單「照字打」：${SPECIFIC_GRADE_LEVELS.join('、')}` +
@@ -82,12 +86,18 @@ export async function fetchCurrentClassesSheet(academicYear: number): Promise<Sh
 
 /** 任課教師設定（目前現況）：class_schedule 依「班級+科目+老師」去重（不看星期/節次） */
 export async function fetchCurrentTeacherAssignmentsSheet(academicYear: number, term: string): Promise<SheetRows> {
-  const { data, error } = await supabase
-    .from('class_schedule')
-    .select('subject, classes(grade_level, class_name), teachers(name)')
-    .eq('academic_year', academicYear)
-    .eq('term', term);
-  if (error || !data) return { name: '任課教師設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  // 【2026-10 修正】原本沒有分頁：class_schedule 每班每週每節一列，全校很容易超過1000列，
+  // 超過的部分被靜默截斷，「任課教師設定」就會少班級/科目，重新上傳還會把少掉的設定覆蓋掉。
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase
+      .from('class_schedule')
+      .select('subject, classes(grade_level, class_name), teachers(name)')
+      .eq('academic_year', academicYear)
+      .eq('term', term)
+      .order('id')
+      .range(from, to)
+  );
+  if (error) return { name: '任課教師設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
   const seen = new Set<string>();
   const rows: any[][] = [];
   for (const r of data as any[]) {
@@ -114,6 +124,7 @@ export async function fetchCurrentSchoolTimetableSheet(academicYear: number, ter
       .eq('term', term)
       .order('weekday')
       .order('period_no')
+      .order('id')
       .range(from, to)
   );
   if (error) return { name: '學校課表(現況)', aoa: [['讀取失敗：' + error.message]] };
@@ -174,6 +185,7 @@ export async function fetchCurrentStudentsSheet(academicYear: number, term: stri
       .select('seat_no, students(student_no, name), classes(academic_year, grade_level, class_name)')
       .eq('term', term)
       .eq('is_current', true)
+      .order('id')
       .range(from, to)
   );
   if (error) return { name: '既有學生快速建檔(現況)', aoa: [['讀取失敗：' + error.message]] };
@@ -222,12 +234,16 @@ export async function fetchCurrentStudentsSheet(academicYear: number, term: stri
  *  其他年級（即使上傳時仍然支援把好幾個年級填進同一列，那是使用者自己選擇的
  *  精簡寫法，不是這裡下載時的預設行為）。 */
 export async function fetchCurrentCurriculumSheet(academicYear: number, term: string): Promise<SheetRows> {
-  const { data, error } = await supabase
-    .from('curriculum')
-    .select('grade_level, subject, weight, periods')
-    .eq('academic_year', academicYear)
-    .eq('term', term);
-  if (error || !data) return { name: '科目與比重設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
+  const { data, error } = await fetchAllPaged((from, to) =>
+    supabase
+      .from('curriculum')
+      .select('grade_level, subject, weight, periods')
+      .eq('academic_year', academicYear)
+      .eq('term', term)
+      .order('id')
+      .range(from, to)
+  );
+  if (error) return { name: '科目與比重設定(現況)', aoa: [['讀取失敗：' + (error?.message ?? '未知錯誤')]] };
 
   const groups = new Map<string, any[]>(); // key = grade_level|weight|periods
   for (const r of data as any[]) {

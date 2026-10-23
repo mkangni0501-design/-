@@ -6,14 +6,11 @@
 
 ```
 sql/
-  schema.sql        -- 資料庫結構（角色、學生、班級、課程、登錄、稽核、鎖定）
-  policies.sql       -- Row-Level Security 權限政策
-  calculations.sql   -- 【第二階段】成績計算引擎（加權總分、排名，皆為 view）
-  registration.sql   -- 【新生註冊模組】students擴充欄位、監護人、學籍狀態歷程、佐證附件
-  portal.sql         -- 【家長/學生入口】帳號綁定、基本資料修改審核、收緊students/enrollments權限
-  promotion.sql      -- 【升級/轉班】年級升級對照表、enrollments加入is_current標記
-  conduct_defaults.sql -- 出缺勤/獎懲預設加扣分參考值（僅供參考，不影響總成績計算）
-  module_categories.sql -- 【首頁改版】管理後台首頁「教務／訓導／總務」自訂分類（系統管理員S用拖曳調整的儲存表）
+  01_schema.sql                  -- 【全新安裝】列舉型別、79 張資料表、函式、View
+  02_constraints_indexes.sql     -- 【全新安裝】主鍵／外鍵／唯一／CHECK／索引
+  03_triggers_rls_policies.sql   -- 【全新安裝】觸發器、啟用 RLS、186 條權限政策、函式執行權限
+  04_seed_and_storage.sql        -- 【全新安裝】系統預設設定、獎懲預設分數、打卡班別、Storage 儲存桶與政策
+  archive/                       -- 舊的 1～104 份遷移檔（已合併進上面 4 份，僅供查歷史，全新安裝不需要執行）
 app/
   page.tsx                        -- 【首頁改版】校務行政系統首頁：管理者／教師／家長 三卡片選擇 → 依卡片身分登入
   (app)/layout.tsx                -- 頂部導覽列（回首頁／登出），套用在下面所有已登入頁面
@@ -74,9 +71,11 @@ docs/
 ## 建置步驟
 
 1. **建立 Supabase 專案**（https://supabase.com），取得 Project URL 與 anon key。
-2. 在 Supabase SQL Editor 依序執行 `sql/schema.sql`、`sql/policies.sql`、`sql/calculations.sql`、`sql/registration.sql`、`sql/promotion.sql`、`sql/portal.sql`、`sql/conduct_defaults.sql`，之後依檔名數字順序執行 `sql/` 資料夾其餘檔案（含新增的 `sql/90exam_seating.sql`、`sql/91exam_seating_exclude_classes.sql`、`sql/92exam_seating_admin_access.sql`〔考試分班／考場編排，需要先執行過 `8attendance_alerts_and_guardian_edit.sql` 的 `staff_notifications`、以及 `19`/`26` 的 `is_system_admin()`/`has_department()`〕）。
-   `registration.sql` 需要用到檔案儲存，請在 Supabase 後台 Storage 建立一個名為 `student-documents` 的 bucket（私有即可，不需公開），用來存放學籍狀態變更的佐證資料。
-   `portal.sql` 的家長/學生登入**不需要額外申請 Google OAuth**，用的是 Supabase 內建的信箱驗證連結（Magic Link），預設就會用，不用去 Google Cloud Console 申請任何東西。
+2. 在 Supabase SQL Editor **依序執行 4 份檔案**（全新、空的專案才需要）：
+   `sql/01_schema.sql` → `sql/02_constraints_indexes.sql` → `sql/03_triggers_rls_policies.sql` → `sql/04_seed_and_storage.sql`。
+   （舊的 `sql/archive/` 內 104 份已合併進這 4 份，**不需要**再逐份執行。日後新增的變更請從 `sql/105_xxx.sql` 開始編號，已上線的資料庫只需執行新增的那份。）
+   學籍狀態變更的佐證附件需要檔案儲存，請在 Supabase 後台 Storage 建立一個名為 `student-documents` 的 bucket（私有即可，不需公開），用來存放學籍狀態變更的佐證資料。
+   家長/學生入口的登入**不需要額外申請 Google OAuth**，用的是 Supabase 內建的信箱驗證連結（Magic Link），預設就會用，不用去 Google Cloud Console 申請任何東西。
 3. 在專案根目錄建立 `.env.local`：
    ```
    NEXT_PUBLIC_SUPABASE_URL=你的 Supabase Project URL
@@ -99,12 +98,12 @@ docs/
 
 
 7. 每天自動備份 / 還原備份**：
-   - 新增 `backups` 資料表（`sql/backups.sql`），只存校務資料（學生、班級、課表、成績、出缺勤...等），**刻意不包含帳號本身**（`app_users`/`portal_accounts`，因為這兩張表跟 Supabase Auth 的登入帳號綁在一起，整批還原可能造成無法登入）。
+   - `backups` 資料表（已含在 `sql/01_schema.sql`），只存校務資料（學生、班級、課表、成績、出缺勤...等），**刻意不包含帳號本身**（`app_users`/`portal_accounts`，因為這兩張表跟 Supabase Auth 的登入帳號綁在一起，整批還原可能造成無法登入）。
    - `admin/backups` 頁面：手動「立即備份」、下載 JSON、還原（**限系統管理員S本人**，需輸入「確定還原」四個字確認）。
    - 自動每日備份靠 `vercel.json` 的 Vercel Cron 排程呼叫 `api/cron/daily-backup`，用環境變數 `CRON_SECRET` 驗證（**部署前請在 Vercel 專案設定新增這個環境變數**，隨便一組長亂數字串即可）。若不是部署在 Vercel，需要改用你的平台對應的排程機制呼叫同一支 API，並帶上一樣的 `Authorization: Bearer <CRON_SECRET>`。
    - **已知限制**：備份內容直接存成 `backups.tables` 這個 jsonb 欄位，學校規模很大、資料量很多時可能會遇到單一 row 過大的問題，屆時建議改成存到 Supabase Storage 的檔案而不是資料庫欄位；還原是「先刪全部、再整批插入」，還原途中若中斷，資料表可能會處於「已清空但還沒插入完成」的中間狀態，建議還原前後都再手動用「立即備份」留一份存檔。
 
-**執行順序建議**：`schema.sql` → `policies.sql` → （其餘既有的選擇性 SQL）→ `sql/phase4_updates.sql` → `sql/backups.sql`。
+**執行順序**：見上方「建置步驟」第 2 點（4 份檔案，依編號順序）。
 
 ## 角色說明
 
@@ -118,7 +117,7 @@ docs/
 
 ## 【教職員打卡系統】
 
-- `sql/104staff_clock.sql` — 打卡資料表、班別、放假日、人員對照、RLS（自己只查得到自己；教務處／系統管理員S／A 可查全部與設定）
+- `sql/archive/104staff_clock.sql`（已併入 `sql/01～04`）— 打卡資料表、班別、放假日、人員對照、RLS（自己只查得到自己；教務處／系統管理員S／A 可查全部與設定）
 - `lib/staffClock.ts` — CSV 解碼解析（泰文 Windows-874）、每日上下班／遲到／早退／漏打卡判定、月統計
 - `app/api/clock/import/route.ts` — 匯入 API（本機同步程式用 `CLOCK_SYNC_TOKEN`；後台手動上傳用登入身分）
 - `app/(app)/staff-clock/page.tsx` — 我的打卡紀錄（管理權限者可切換查看他人）

@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { BACKUP_TABLES, type BackupCounts, type BackupSnapshot } from './backupRestore';
+import { BACKUP_TABLES, applyStableOrder, countTableRows, isMissingTableError, type BackupCounts, type BackupSnapshot } from './backupRestore';
 
 // ============================================================
 // 分段備份（可續跑）
@@ -30,8 +30,9 @@ type TableState = {
   done: boolean;
   offset: number; // 已經撈到並寫進分段檔的列數
   parts: string[]; // 這張表的分段檔路徑
-  ordered: boolean; // 是否用 id 排序（沒有 id 欄位的表退回不排序）
-  skipped?: boolean; // 資料表不存在／讀取失敗，略過
+  ordered: boolean; // （舊欄位，保留相容）現在一律依主鍵排序，見 backupRestore.ts 的 orderColumnsFor()
+  skipped?: boolean; // 資料表不存在，略過（其他讀取失敗不會略過，會讓整個備份失敗）
+  retries?: number; // 筆數核對不符而整張重撈的次數
 };
 
 export type BackupJobState = {
@@ -112,10 +113,17 @@ export async function loadJob(admin: SupabaseClient, jobId: string): Promise<Bac
   return getJson<BackupJobState>(admin, statePath(jobId));
 }
 
-async function fetchPage(admin: SupabaseClient, table: string, ordered: boolean, from: number) {
-  let q = admin.from(table).select('*');
-  if (ordered) q = q.order('id', { ascending: true });
-  return q.range(from, from + PAGE_SIZE - 1);
+// 【2026-10 修正】一律依主鍵排序。原本沒有 id 欄位的表（students 全校學生名冊、conduct_scores、
+// student_remarks 等）會退回「不排序」，而這個備份是跨好幾個請求、每頁 1000 筆慢慢翻頁——
+// 沒有排序時 PostgreSQL 不保證每次回傳順序一致，同一列可能重複、另一列被跳過，備份檔就會悄悄不完整。
+// 另外暫時性錯誤（網路/逾時）重試最多 2 次，不要一遇到錯誤就當成「這張表不存在」。
+async function fetchPage(admin: SupabaseClient, table: string, _ordered: boolean, from: number) {
+  let res: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    res = await applyStableOrder(admin.from(table).select('*'), table).range(from, from + PAGE_SIZE - 1);
+    if (!res.error || isMissingTableError(res.error)) break;
+  }
+  return res as { data: any[] | null; error: any };
 }
 
 /**
@@ -156,11 +164,7 @@ export async function stepBackupJob(admin: SupabaseClient, state: BackupJobState
       const pageStarts = Array.from({ length: PARALLEL_PAGES }, (_, i) => from + i * PAGE_SIZE);
       let results = await Promise.all(pageStarts.map((f) => fetchPage(admin, table, ts.ordered, f)));
 
-      // 這張表沒有 id 欄位（複合主鍵／文字主鍵）：改成不排序重試一次，之後固定不排序
-      if (ts.ordered && ts.offset === 0 && buffer.length === 0 && results[0].error && /id/i.test(results[0].error.message ?? '') && /column|42703/i.test(`${results[0].error.message} ${results[0].error.code}`)) {
-        ts.ordered = false;
-        results = await Promise.all(pageStarts.map((f) => fetchPage(admin, table, ts.ordered, f)));
-      }
+      // （已移除「沒有 id 欄位就改成不排序」的退路：改為依主鍵排序，見 fetchPage）
 
       for (const r of results) {
         if (r.error) {
@@ -178,10 +182,10 @@ export async function stepBackupJob(admin: SupabaseClient, state: BackupJobState
     }
 
     if (failed) {
-      // 資料表不存在（該專案沒執行過那個選擇性 SQL 檔）或其他讀取問題：略過，跟舊版行為一致
-      // 但已經撈到一半的表不能默默變成不完整的備份——只有「從頭就失敗」才當成略過，
-      // 撈到一半才失敗就整個備份失敗，讓人知道要重來。
-      if (ts.offset === 0 && buffer.length === 0 && ts.parts.length === 0) {
+      // 只有「資料表不存在」（該專案沒執行過那個選擇性 SQL 檔）才可以略過。
+      // 其他任何讀取錯誤（逾時、網路、權限）都不能默默略過——否則備份會看起來成功、
+      // 實際上少了一整張表（例如成績、學生名冊），等到要還原時才發現。
+      if (isMissingTableError(failed) && ts.offset === 0 && buffer.length === 0 && ts.parts.length === 0) {
         ts.done = true;
         ts.skipped = true;
         state.counts[table] = null;
@@ -193,6 +197,22 @@ export async function stepBackupJob(admin: SupabaseClient, state: BackupJobState
 
     await flush();
     if (reachedEnd) {
+      // 【筆數核對】這張表撈完後，立刻跟資料庫目前的筆數比對。對不上（重複或漏列）就整張重撈一次；
+      // 重撈後仍對不上就讓整個備份失敗，而不是留下一份看起來成功、實際不完整的備份。
+      const { count: dbCount } = await countTableRows(admin, table);
+      if (dbCount !== null && dbCount !== ts.offset) {
+        if ((ts.retries ?? 0) < 1) {
+          ts.retries = (ts.retries ?? 0) + 1;
+          ts.offset = 0;
+          ts.parts = [];
+          await putJson(admin, statePath(state.jobId), state);
+          continue; // 回到這張表的開頭重撈
+        }
+        throw new Error(
+          `資料表 ${table} 備份筆數（${ts.offset}）與資料庫目前筆數（${dbCount}）對不上，已重撈一次仍不一致。` +
+            `為避免留下不完整的備份，已中止——請在沒有人正在登錄資料的時段重新備份，或聯絡開發人員。`
+        );
+      }
       ts.done = true;
       state.counts[table] = ts.offset;
       state.tableIdx++;

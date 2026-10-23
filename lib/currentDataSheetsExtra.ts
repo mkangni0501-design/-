@@ -1,6 +1,6 @@
 import { supabase } from './supabaseClient';
 import type { SheetRows } from './schoolWideDataQueries';
-import { fetchAllPaged } from './schoolWideDataQueries';
+import { fetchAllPaged, inChunks } from './schoolWideDataQueries';
 
 // ============================================================
 // 【2026-08 新增】管理員S反映「一鍵上傳/下載中功能上有缺失分頁」——原本
@@ -139,25 +139,38 @@ export async function fetchCurrentAcademicTermsSheet(): Promise<SheetRows> {
 export const CONDUCT_SCORES_SHEET_NAME = '操行成績(現況)';
 export async function fetchCurrentConductScoresSheet(): Promise<SheetRows> {
   const HEADER = ['學年度', '部別', '年級', '班級', '學期', '座號', '學號', '姓名', '禮貌', '衣著', '服務', '紀律'];
-  const { data: enrollRows, error: enrollErr } = await fetchAllPaged((from, to) =>
-    supabase
-      .from('enrollments')
-      .select('id, student_no, seat_no, term, students(name), classes(academic_year, department, grade_level, class_name)')
-      .eq('is_current', true)
-      .range(from, to)
+  // 班級／學生姓名改成分開查詢、用 Map 對應（外鍵嵌入查詢在本專案不穩定，失敗會讓整張表「讀取失敗」）
+  const { data: enrollRows, error: enrollErr } = await fetchAllPaged<any>((from, to) =>
+    supabase.from('enrollments').select('id, student_no, class_id, seat_no, term').eq('is_current', true).order('id').range(from, to)
   );
   if (enrollErr) return { name: CONDUCT_SCORES_SHEET_NAME, aoa: [['讀取失敗：' + enrollErr.message]] };
+  const { data: classRows, error: classErr } = await fetchAllPaged<any>((from, to) =>
+    supabase.from('classes').select('id, academic_year, department, grade_level, class_name').order('id').range(from, to)
+  );
+  if (classErr) return { name: CONDUCT_SCORES_SHEET_NAME, aoa: [['讀取班級失敗：' + classErr.message]] };
+  const studentNos = Array.from(new Set(enrollRows.map((r: any) => r.student_no)));
+  const { data: stuRows, error: stuErr } = await inChunks<any>(studentNos as string[], (chunk, from, to) =>
+    supabase.from('students').select('student_no, name').in('student_no', chunk).order('student_no').range(from, to)
+  );
+  if (stuErr) return { name: CONDUCT_SCORES_SHEET_NAME, aoa: [['讀取學生姓名失敗：' + stuErr.message]] };
+  const classMap = new Map(classRows.map((c: any) => [c.id, c]));
+  const stuMap = new Map(stuRows.map((s: any) => [s.student_no, s.name]));
   const ids = enrollRows.map((r: any) => r.id);
-  const { data: conductRows, error: conductErr } =
-    ids.length === 0
-      ? { data: [] as any[], error: null }
-      : await supabase.from('conduct_scores').select('enrollment_id, politeness, dress, service, discipline').in('enrollment_id', ids);
+  // 【2026-10 修正】原本把全校 enrollment id（1300+ 個 uuid）一次塞進單一 .in()：網址過長會被截斷/拒絕，
+  // 而且結果也受單次1000筆上限影響，操行成績會漏。改成分段＋分頁。
+  const { data: conductRows, error: conductErr } = await inChunks<any>(ids, (chunk, from, to) =>
+    supabase
+      .from('conduct_scores')
+      .select('enrollment_id, politeness, dress, service, discipline')
+      .in('enrollment_id', chunk)
+      .order('enrollment_id')
+      .range(from, to)
+  );
   if (conductErr) return { name: CONDUCT_SCORES_SHEET_NAME, aoa: [['讀取操行成績失敗：' + conductErr.message]] };
   const conductMap = new Map((conductRows ?? []).map((c: any) => [c.enrollment_id, c]));
   const rows = enrollRows
     .map((e: any) => {
-      const cls = Array.isArray(e.classes) ? e.classes[0] : e.classes;
-      const stu = Array.isArray(e.students) ? e.students[0] : e.students;
+      const cls: any = classMap.get(e.class_id);
       const c = conductMap.get(e.id);
       return [
         cls?.academic_year ?? '',
@@ -167,7 +180,7 @@ export async function fetchCurrentConductScoresSheet(): Promise<SheetRows> {
         e.term,
         e.seat_no,
         e.student_no,
-        stu?.name ?? '',
+        stuMap.get(e.student_no) ?? '',
         c?.politeness ?? '',
         c?.dress ?? '',
         c?.service ?? '',
@@ -212,7 +225,9 @@ export async function fetchCurrentClubRosterSheet(academicYear: number, term: st
   const { data: members, error: memberErr } =
     clubIds.length === 0
       ? { data: [] as any[], error: null }
-      : await supabase.from('club_members').select('club_id, student_no, status, students(name)').in('club_id', clubIds).order('student_no');
+      : await inChunks<any>(clubIds, (chunk, from, to) =>
+          supabase.from('club_members').select('id, club_id, student_no, status, students(name)').in('club_id', chunk).order('student_no').order('id').range(from, to)
+        );
   if (memberErr) return { name: CLUB_ROSTER_SHEET_NAME, aoa: [['讀取社團成員失敗：' + memberErr.message]] };
   const membersByClub = new Map<string, any[]>();
   (members ?? []).forEach((m: any) => {
@@ -249,10 +264,14 @@ export async function fetchCurrentClubScoresSheet(academicYear: number, term: st
   const { data: scores, error: scoreErr } =
     clubIds.length === 0
       ? { data: [] as any[], error: null }
-      : await supabase
-          .from('club_scores')
-          .select('club_id, student_no, score_midterm, score_final, score_daily, is_submitted, students(name)')
-          .in('club_id', clubIds);
+      : await inChunks<any>(clubIds, (chunk, from, to) =>
+          supabase
+            .from('club_scores')
+            .select('id, club_id, student_no, score_midterm, score_final, score_daily, is_submitted, students(name)')
+            .in('club_id', chunk)
+            .order('id')
+            .range(from, to)
+        );
   if (scoreErr) return { name: CLUB_SCORES_SHEET_NAME, aoa: [['讀取社團成績失敗：' + scoreErr.message]] };
   const rows = (scores ?? [])
     .map((s: any) => {

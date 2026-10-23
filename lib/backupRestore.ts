@@ -87,19 +87,67 @@ export const BACKUP_TABLES = [
   'clock_employee_map',
   'clock_records',
   'clock_day_overrides',
+  // 【2026-10 補齊】下面這些表原本完全不在備份範圍：考試分班（exam_*，依外鍵順序：
+  // 考試場次 → 試場 → 試場班級/座位 → 座位學生；各班名單送出狀態只依賴場次）與
+  // 導師代點名設定。report_card_xlsx_template 是整份 xlsx 二進位檔（bytea），不放進 JSON 備份，
+  // 請另外保留原始檔。attendance_audit_log／score_audit_log 是稽核軌跡，跟 account_audit_log
+  // 同樣的理由刻意不納入（還原不應該倒退或抹掉稽核紀錄）。
+  'exam_sessions',
+  'exam_rooms',
+  'exam_room_classes',
+  'exam_room_seats',
+  'exam_seat_students',
+  'exam_class_roster_status',
+  'homeroom_attendance_assist_settings',
 ] as const;
 
-// 大部分資料表拿 id（uuid）當「符合全部列」的比對欄位；少數是複合主鍵或文字主鍵，這裡特別列出。
-// 這個欄位一定要是 not null，才能用 `.not(column, 'is', null)` 撈到/刪到全部列。
-const MATCH_ALL_COLUMN: Record<string, string> = {
-  grading_rules: 'academic_year',
-  conduct_point_defaults: 'item',
-  clock_employee_map: 'device_code', // 主鍵是打卡機代碼（int），沒有 id 欄
-  clock_holidays: 'holiday_date', // 主鍵是日期，沒有 id 欄
+// 【2026-10 修正】主鍵「不是單一 id 欄位」的資料表。這份清單有兩個用途：
+// 1) 分頁撈資料時一定要依「主鍵」排序——`.range()` 分頁如果沒有排序，PostgreSQL 不保證每次回傳
+//    的順序一致，跨多個請求翻頁時同一列可能重複出現、另一列則被跳過，備份檔筆數看起來「差不多」
+//    其實有漏。原本這些表（含 students 全校學生名冊）因為沒有 id 欄位被退回「不排序」。
+// 2) 還原時「清空整張表」需要一個一定不是 null 的欄位來比對（`.not(col,'is',null)`），
+//    原本預設用 id，沒有 id 欄位的表（students／student_remarks／conduct_scores 等）清空會報錯，
+//    接著插入又撞主鍵重複，導致這幾張表根本還原不回去。
+// 欄位依據 sql/02_constraints_indexes.sql 的 PRIMARY KEY 定義（主鍵欄位一定 not null）。
+export const NON_ID_PRIMARY_KEYS: Record<string, string[]> = {
+  students: ['student_no'],
+  grading_rules: ['academic_year', 'term'],
+  conduct_point_defaults: ['item'],
+  student_remarks: ['enrollment_id'],
+  grade_progression: ['department', 'grade_level'],
+  governed_tables: ['table_name'],
+  conduct_scores: ['enrollment_id'],
+  admin_module_order: ['module_key'],
+  site_content: ['content_key'],
+  site_settings: ['setting_key'],
+  clock_holidays: ['holiday_date'],
+  clock_employee_map: ['device_code'],
+  exam_seat_students: ['exam_room_seat_id'],
 };
 
+/** 分頁時用來排序的欄位（主鍵）：大部分表是 id，少數見 NON_ID_PRIMARY_KEYS */
+export function orderColumnsFor(table: string): string[] {
+  return NON_ID_PRIMARY_KEYS[table] ?? ['id'];
+}
+
 function matchAllColumn(table: string) {
-  return MATCH_ALL_COLUMN[table] ?? 'id';
+  return orderColumnsFor(table)[0];
+}
+
+/** 這個錯誤是不是「資料表根本不存在」（該專案沒執行過那個選擇性 SQL 檔）——只有這種才可以略過；
+ *  其他任何讀取錯誤（逾時、網路、權限）都不可以默默略過，否則備份會悄悄少一張表。 */
+export function isMissingTableError(err: any): boolean {
+  if (!err) return false;
+  const code = String(err.code ?? '');
+  const msg = String(err.message ?? '');
+  return code === '42P01' || code === 'PGRST205' || /could not find the table|does not exist|relation .* does not exist/i.test(msg);
+}
+
+/** 依主鍵排序（多欄位就依序 order），讓 `.range()` 跨頁翻頁結果穩定 */
+export function applyStableOrder<Q extends { order: (col: string, opts?: { ascending?: boolean }) => Q }>(q: Q, table: string): Q {
+  let out = q;
+  for (const col of orderColumnsFor(table)) out = out.order(col, { ascending: true });
+  return out;
 }
 
 export type BackupSnapshot = Record<string, any[] | null>; // null = 該表不存在/略過
@@ -143,14 +191,24 @@ export function countsFromSnapshot(snapshot: BackupSnapshot): BackupCounts {
 // 小於 PAGE_SIZE 才停止），不管伺服器單次上限是多少，都能確保撈到全部資料。
 const PAGE_SIZE = 1000;
 
+export async function countTableRows(admin: SupabaseClient, table: string): Promise<{ count: number | null; error: any }> {
+  const { count, error } = await admin.from(table).select('*', { count: 'exact', head: true });
+  return { count: error ? null : count ?? 0, error };
+}
+
 async function fetchAllRows(admin: SupabaseClient, table: string): Promise<{ data: any[] | null; error: any }> {
   const rows: any[] = [];
   let from = 0;
   while (true) {
-    const { data, error } = await admin
-      .from(table)
-      .select('*')
-      .range(from, from + PAGE_SIZE - 1);
+    let data: any[] | null = null;
+    let error: any = null;
+    // 暫時性錯誤（網路抖動、逾時）重試最多 2 次；資料表不存在則不重試、直接回報
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await applyStableOrder(admin.from(table).select('*'), table).range(from, from + PAGE_SIZE - 1);
+      data = res.data as any[] | null;
+      error = res.error;
+      if (!error || isMissingTableError(error)) break;
+    }
     if (error) return { data: null, error };
     rows.push(...(data ?? []));
     if (!data || data.length < PAGE_SIZE) break; // 這一批不足一頁，代表已經撈到最後一批
@@ -262,27 +320,55 @@ export async function loadBackupSnapshot(
 // 處理，大幅縮短總執行時間，不要讓 65 張表的網路延遲依序疊加。
 const BACKUP_CONCURRENCY = 8;
 
-export async function runBackup(admin: SupabaseClient): Promise<{ tables: BackupSnapshot; counts: BackupCounts }> {
+export type RunBackupResult = {
+  tables: BackupSnapshot;
+  counts: BackupCounts;
+  /** 讀取失敗、而且不是「資料表不存在」的表——代表這份備份不完整，呼叫端不可以拿來當作「已經備份好了」 */
+  failedTables: { table: string; message: string }[];
+  /** 撈到的筆數跟資料庫目前筆數對不上的表（已重撈一次仍對不上） */
+  mismatches: { table: string; backedUp: number; inDatabase: number }[];
+};
+
+export async function runBackup(admin: SupabaseClient): Promise<RunBackupResult> {
   const tables: BackupSnapshot = {};
   const counts: BackupCounts = {};
+  const failedTables: RunBackupResult['failedTables'] = [];
+  const mismatches: RunBackupResult['mismatches'] = [];
+
+  async function backupOne(table: string) {
+    let res = await fetchAllRows(admin, table);
+    if (res.error) {
+      if (isMissingTableError(res.error)) {
+        tables[table] = null; // 該專案沒執行過那個選擇性 SQL 檔，真的沒有這張表
+        counts[table] = null;
+      } else {
+        tables[table] = null;
+        counts[table] = null;
+        failedTables.push({ table, message: res.error.message ?? JSON.stringify(res.error) });
+      }
+      return;
+    }
+    // 筆數核對：撈完立刻跟資料庫目前筆數比，對不上就整張重撈一次
+    let got = res.data ?? [];
+    const first = await countTableRows(admin, table);
+    if (first.count !== null && first.count !== got.length) {
+      const retry = await fetchAllRows(admin, table);
+      if (!retry.error) got = retry.data ?? [];
+      const second = await countTableRows(admin, table);
+      if (second.count !== null && second.count !== got.length) {
+        mismatches.push({ table, backedUp: got.length, inDatabase: second.count });
+      }
+    }
+    tables[table] = got;
+    counts[table] = got.length;
+  }
 
   for (let i = 0; i < BACKUP_TABLES.length; i += BACKUP_CONCURRENCY) {
     const batch = BACKUP_TABLES.slice(i, i + BACKUP_CONCURRENCY);
-    const results = await Promise.all(batch.map((table) => fetchAllRows(admin, table)));
-    batch.forEach((table, idx) => {
-      const { data, error } = results[idx];
-      if (error) {
-        // 資料表不存在（該專案沒執行過那個選擇性 SQL 檔）或其他讀取問題，略過但留紀錄
-        tables[table] = null;
-        counts[table] = null;
-        return;
-      }
-      tables[table] = data ?? [];
-      counts[table] = (data ?? []).length;
-    });
+    await Promise.all(batch.map((table) => backupOne(table)));
   }
 
-  return { tables, counts };
+  return { tables, counts, failedTables, mismatches };
 }
 
 const CHUNK_SIZE = 500;
